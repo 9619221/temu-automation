@@ -5318,6 +5318,36 @@ function saveSkuBundle(payload = {}, actor = erpState.currentUser) {
   };
 }
 
+function refreshBundleCostForSkus(db, skuIds) {
+  if (!skuIds || !skuIds.length) return;
+  const unique = [...new Set(skuIds)];
+  const ph = unique.map(() => "?").join(",");
+  const bundles = db.prepare(`
+    SELECT DISTINCT bundle_sku_id
+    FROM erp_sku_bundle_components
+    WHERE component_sku_id IN (${ph}) AND status = 'active'
+  `).all(...unique);
+  if (!bundles.length) return;
+  for (const { bundle_sku_id } of bundles) {
+    const comps = db.prepare(`
+      SELECT c.component_sku_id, c.qty
+      FROM erp_sku_bundle_components c
+      WHERE c.bundle_sku_id = ? AND c.status = 'active'
+    `).all(bundle_sku_id);
+    let total = 0;
+    for (const c of comps) {
+      const cost = getSkuEffectiveCost(db, c.component_sku_id);
+      const unitCost = cost ?? 0;
+      db.prepare(
+        "UPDATE erp_sku_bundle_components SET unit_cost = ? WHERE bundle_sku_id = ? AND component_sku_id = ? AND status = 'active'"
+      ).run(unitCost, bundle_sku_id, c.component_sku_id);
+      total += unitCost * c.qty;
+    }
+    const bundleCost = Number(total.toFixed(4));
+    db.prepare("UPDATE erp_skus SET bundle_cost_price = ? WHERE id = ?").run(bundleCost, bundle_sku_id);
+  }
+}
+
 function getSkuReferenceCounts(db, skuId) {
   const references = [
     { table: "erp_purchase_requests", label: "采购需求" },
@@ -5476,7 +5506,13 @@ function toSkuOptionRow(row) {
 function toSkuStockDetail(row) {
   const next = toCamelRow(row);
   const remark = parseJsonObject(row.receipt_remark);
-  next.businessType = "采购进仓";
+  const bc = row.batch_code || "";
+  if (bc.startsWith("DIRECT-")) {
+    const ledgerType = bc.replace(/^DIRECT-/, "").replace(/-[A-Z0-9]+$/, "");
+    next.businessType = LEDGER_TYPE_LABELS[ledgerType] || "采购进仓";
+  } else {
+    next.businessType = "采购进仓";
+  }
   next.date = row.received_at || row.created_at || null;
   next.qty = Number(row.received_qty || 0);
   next.orderNo = row.receipt_no || row.batch_code || row.id;
@@ -5510,9 +5546,16 @@ function toSkuStockDetail(row) {
 const LEDGER_TYPE_LABELS = {
   purchase_return: "采购退货出仓",
   outbound_to_temu: "出库发货",
+  outbound_to_temu_reversal: "撤销发货入库",
   sku_swap_out: "换货换出",
+  sku_swap_in: "换货换入",
   transfer_out: "调拨出库",
+  transfer_in: "调拨入库",
   platform_return_out: "平台仓转出",
+  platform_return_in: "平台仓转入",
+  consign_after_sale_return: "送仓售后入库",
+  purchase_return_reversal: "退货作废入库",
+  customer_return: "消费者退货入库",
   scrap: "报废",
   stock_adjustment: "库存调整",
 };
@@ -6744,6 +6787,12 @@ function confirmConsignAfterSaleReceipt(payload = {}, actor = {}) {
       savedItems.push({ skuId: sku.id, internalSkuCode: sku.internal_sku_code, receivedQty, batchId: batch?.id || null });
     }
     if (!savedItems.length) throw new Error("没有实收数量大于 0 的明细，未入库");
+
+    try {
+      refreshBundleCostForSkus(db, savedItems.map((i) => i.skuId));
+    } catch (e) {
+      try { console.warn("[bundle-cost] refresh after consign return failed:", e?.message || e); } catch {}
+    }
 
     db.prepare(`
       INSERT INTO consign_after_sale_receipts
@@ -19480,6 +19529,13 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
     "create_batches",
     `仓库创建入库批次：${receipt.receipt_no || receipt.id}（${batches.length} 个）`,
   );
+
+  try {
+    const inboundSkuIds = [...new Set(pendingLines.map((l) => l.sku_id).filter(Boolean))];
+    refreshBundleCostForSkus(db, inboundSkuIds);
+  } catch (e) {
+    try { console.warn("[bundle-cost] refresh after inbound failed:", e?.message || e); } catch {}
+  }
 
   return batches;
 }

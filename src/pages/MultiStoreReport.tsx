@@ -414,7 +414,7 @@ function fmtSettlementCell(n: number | null | undefined, digits = 2) {
 }
 
 const SETTLEMENT_REPORT_HEADERS = [
-  "店铺", "销量", "收入金额", "售后预留金额", "售后释放金额", "收入合计",
+  "店铺", "销量", "收入金额", "综合预留金额", "综合释放金额", "收入合计",
   "售后赔付", "扣款", "仓储综合服务费", "EPR费用", "广告服务费",
   "其它服务费", "销售成本", "支出合计", "预估利润", "预估利润率",
 ];
@@ -474,9 +474,9 @@ interface SettlementRow {
   qty_history_costed: number;
   qty_current_fallback: number;
   qty_missing_cost: number;
-  income: number;        // 收入金额
-  reserve: number;       // 售后预留金额（待结算）
-  release: number;       // 售后释放金额（已到账）
+  income: number;        // 收入金额（销售回款）
+  reserve: number;       // 综合预留金额（|冲回|−补贴净值）
+  release: number;       // 综合释放金额
   income_total: number;  // 收入合计
   after_sale: number;    // 售后赔付
   deduction: number;     // 扣款
@@ -530,6 +530,9 @@ interface SettlementStoreData {
     qty_missing_cost?: number;
     cost: number;
     amount: number;
+    sales_revenue?: number;
+    reversal_total?: number;
+    subsidy_total?: number;
   } | null;
 }
 
@@ -570,22 +573,20 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const fs = s.fund_summary;
   const risk = s.risk_detail;
   const sd = s.settlement_detail;
-  // 聚水潭口径（与 Temu 结算单原生字段对齐，只取已结算行）：
-  //   收入金额 = incomeAmount（已结算货款，物化列 sales_receipt_amount）
-  //   售后预留 = afsReverseAmount（物化列 chargeback_amount，列名历史误称）
-  //   售后释放 = afsReleaseAmount（物化列 subsidy_amount，列名历史误称）
-  //   收入合计 = 收入 − 预留 + 释放 = Temu 结算单合计（settled.total）
-  // income-summary 逐日收入是另一口径，不进报表列（仅趋势图使用）。
-  const income = sd?.settled?.sales_receipt || 0;
-  const reserve = sd?.settled?.chargeback || 0;
-  const release = sd?.settled?.subsidy || 0;
-  const fees = classifyFundCategories(fd);
-  // 销量/成本只认结算机器人采集到的已结算订单明细；未采到时保持 0，不回退其它口径。
   const od = s.order_detail;
   const useOrder = !!od && od.qty > 0;
-  // 收入合计：优先用逐订单结算明细净额（账期口径，后端按账务时间 create_time 过滤所选时间段，
-  //   与销量/成本同批货、可逐店对账聚协云）；无逐订单数据的店回退已到账卡片口径（收入−预留+释放）。
-  //   收入金额/售后预留/售后释放三列仍展示卡片快照，仅供参考，可能与收入合计口径不一致。
+  const fees = classifyFundCategories(fd);
+  // 收入三列对齐聚协云口径：有逐订单明细时按交易类型拆分（销售回款/销售冲回/非商责补贴），
+  // 综合预留 = |冲回| − 补贴（净值），综合释放 = 0；无明细时回退已到账卡片快照。
+  const income = useOrder && od.sales_revenue != null
+    ? od.sales_revenue
+    : (sd?.settled?.sales_receipt || 0);
+  const reserve = useOrder && od.sales_revenue != null
+    ? Math.max(0, Math.abs(od.reversal_total || 0) - (od.subsidy_total || 0))
+    : (sd?.settled?.chargeback || 0);
+  const release = useOrder && od.sales_revenue != null
+    ? 0
+    : (sd?.settled?.subsidy || 0);
   const income_total = useOrder ? od.amount : (income - reserve + release);
   // 覆盖率 = 订单明细金额 ÷ 资金入账流水「结算」类合计（同为入账口径，分母不能用结算汇总卡片）
   const settleInflow = fd?.by_category?.["结算"] || 0;
@@ -1642,7 +1643,7 @@ export default function MultiStoreReport() {
           )}
           <div style={{ padding: "8px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "#888", fontSize: 12 }}>
-              表格口径对齐店铺分析报告：收入合计 = 逐笔结算明细按账期（账务时间）合计，与销量/成本同批货、可逐店对账；收入金额/售后预留/售后释放为已到账卡片快照，仅供参考（口径可能与收入合计不一致）。支出合计 = 售后赔付 + 扣款 + 仓储综合服务费 + EPR费用 + 广告服务费 + 其它服务费 + 销售成本。
+              统计口径对齐聚协云：收入金额 = 销售回款，综合预留 = |销售冲回| − 非商责补贴（净值），综合释放 = 0，收入合计 = 收入金额 − 综合预留。支出合计 = 售后赔付 + 扣款 + 仓储综合服务费 + EPR费用 + 广告服务费 + 其它服务费 + 销售成本。
               {!stlFundAvail && stlLoaded ? " 费用列为空 = 该店尚未抓到对账数据。" : ""}
             </span>
             <Button size="small" icon={<DownloadOutlined />}
@@ -1671,9 +1672,9 @@ export default function MultiStoreReport() {
               { title: "收入金额", dataIndex: "income", key: "income", width: 110, align: "right",
                 render: (v: number) => fmtSettlementCell(v),
                 sorter: (a, b) => a.income - b.income },
-              { title: "售后预留金额", dataIndex: "reserve", key: "reserve", width: 120, align: "right",
+              { title: "综合预留金额", dataIndex: "reserve", key: "reserve", width: 120, align: "right",
                 render: (v: number) => fmtSettlementCell(v) },
-              { title: "售后释放金额", dataIndex: "release", key: "release", width: 120, align: "right",
+              { title: "综合释放金额", dataIndex: "release", key: "release", width: 120, align: "right",
                 render: (v: number) => fmtSettlementCell(v) },
               { title: "收入合计", dataIndex: "income_total", key: "income_total", width: 110, align: "right",
                 render: (v: number) => <Typography.Text style={{ color: v > 0 ? COLOR.good : undefined }}>{fmtSettlementCell(v)}</Typography.Text>,

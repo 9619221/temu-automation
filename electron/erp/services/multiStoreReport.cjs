@@ -2650,6 +2650,9 @@ function querySettlementData(db, opts = {}) {
         SELECT d.mall_id,
                COALESCE(d.quantity, 0) AS qty,
                COALESCE(d.amount, 0) AS amount,
+               CASE WHEN json_extract(d.raw_json, '$.交易类型') = '销售回款' THEN COALESCE(d.amount, 0) ELSE 0 END AS sales_amt,
+               CASE WHEN json_extract(d.raw_json, '$.交易类型') = '销售冲回' THEN COALESCE(d.amount, 0) ELSE 0 END AS reversal_amt,
+               CASE WHEN json_extract(d.raw_json, '$.交易类型') = '非商责补贴' THEN COALESCE(d.amount, 0) ELSE 0 END AS subsidy_amt,
                CASE
                  WHEN COALESCE(lc.unit_cost, 0) > 0 THEN lc.unit_cost
                  WHEN COALESCE(h.weighted_avg_cost, 0) > 0 THEN h.weighted_avg_cost
@@ -2688,7 +2691,10 @@ function querySettlementData(db, opts = {}) {
              SUM(CASE WHEN source_kind = 'current' THEN qty ELSE 0 END) AS qty_current_fallback,
              SUM(CASE WHEN source_kind = 'missing' THEN qty ELSE 0 END) AS qty_missing_cost,
              SUM(qty * unit_cost) AS cost,
-             SUM(amount) AS amount
+             SUM(amount) AS amount,
+             SUM(sales_amt) AS sales_revenue,
+             SUM(reversal_amt) AS reversal_total,
+             SUM(subsidy_amt) AS subsidy_total
         FROM detail_cost
        GROUP BY mall_id
     `).all(...odParams);
@@ -2702,6 +2708,9 @@ function querySettlementData(db, opts = {}) {
         qty_missing_cost: Number(r.qty_missing_cost) || 0,
         cost: Number(r.cost) || 0,
         amount: Number(r.amount) || 0,
+        sales_revenue: Number(r.sales_revenue) || 0,
+        reversal_total: Number(r.reversal_total) || 0,
+        subsidy_total: Number(r.subsidy_total) || 0,
       });
     }
   } catch { /* settlement_order_detail 表不存在时保持空 */ }
