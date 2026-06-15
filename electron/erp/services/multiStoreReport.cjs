@@ -3942,7 +3942,7 @@ function buildProductPanel(db, options = {}) {
       let arr = detailMap.get(k);
       if (!arr) { arr = []; detailMap.set(k, arr); }
       const _cts = _skuTotalStock(toNum(d.warehouse_stock), toNum(d.unavailable_stock), toNum(d.lack_quantity), 0);
-      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: _calcAdvice(toNum(d.today_sales), toNum(d.last7d_sales), _cts), lack_qty: toNum(d.lack_quantity) });
+      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), unavail_stock: toNum(d.unavailable_stock), advice_qty: _calcAdvice(toNum(d.today_sales), toNum(d.last7d_sales), _cts), lack_qty: toNum(d.lack_quantity) });
       let a = agg.get(k);
       if (!a) { a = { skcs: new Set(), skus: new Set(), declared: null, score: null, comments: null, stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lackQty: 0 }; agg.set(k, a); }
       if (d.skc_id) a.skcs.add(d.skc_id);
@@ -3958,16 +3958,21 @@ function buildProductPanel(db, options = {}) {
     }
     codeMap = new Map([...agg].map(([k, a]) => [k, { skcs: [...a.skcs].join(",") || null, skus: [...a.skus].join(",") || null, declared: a.declared, score: a.score, comments: a.comments, stock: a.stock, occupy: a.occupy, unavail: a.unavail, advice: a.advice, lack: a.lack, lackQty: a.lackQty }]));
   }
-  // 发货在途：备货单运输中数量(shipping_qty)，按 mall_id+product_id 聚合(stock_order 是当前态 upsert，无跨天虚高)
+  // 发货在途：备货单运输中数量(shipping_qty)，按 mall_id+product_id+sku_ext_code 聚合(stock_order 是当前态 upsert，无跨天虚高)
   let shipMap = new Map();
+  let shipSkuMap = new Map();
   if (pids.length) {
     const ph2 = pids.map(() => "?").join(",");
     const shipRows = optionalAllLocal(db, `
-      SELECT mall_id, product_id, SUM(COALESCE(shipping_qty,0)) ship
+      SELECT mall_id, product_id, sku_ext_code, SUM(COALESCE(shipping_qty,0)) ship
         FROM cloud.temu_stock_order_snapshot
        WHERE tenant_id = ? AND product_id IN (${ph2}) AND product_id IS NOT NULL AND product_id <> ''
-       GROUP BY mall_id, product_id`, [tid, ...pids]);
-    shipMap = new Map(shipRows.map((s) => [s.mall_id + "|" + s.product_id, toNum(s.ship)]));
+       GROUP BY mall_id, product_id, sku_ext_code`, [tid, ...pids]);
+    for (const s of shipRows) {
+      const pk = s.mall_id + "|" + s.product_id;
+      shipMap.set(pk, (shipMap.get(pk) || 0) + toNum(s.ship));
+      if (s.sku_ext_code) shipSkuMap.set(pk + "|" + s.sku_ext_code, toNum(s.ship));
+    }
   }
   const out = [];
   for (const e of map.values()) {
@@ -3991,6 +3996,10 @@ function buildProductPanel(db, options = {}) {
     // 总库存 = 可用 + 暂不可用 - 缺货件数 + 发货在途
     e.total_stock = cm ? (toNum(cm.stock) + toNum(cm.unavail) - toNum(cm.lackQty) + e.shipping) : null;
     e.skus_detail = detailMap.get(String(e.product_id)) || [];
+    const spk = e.mall_id + "|" + e.product_id;
+    for (const sk of e.skus_detail) {
+      sk.shipping = sk.sku_ext_code ? (shipSkuMap.get(spk + "|" + sk.sku_ext_code) || 0) : 0;
+    }
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);

@@ -562,7 +562,7 @@ export default function ConsignAfterSalesSection() {
             <Input.Search
               allowClear
               prefix={<SearchOutlined />}
-              placeholder="搜索店铺 / 售后单号 / 外部单号 / 物流单号 / 备注"
+              placeholder="搜索商品编码 / 店铺 / 售后单号 / 物流单号 / 备注"
               enterButton="搜索"
               value={searchDraft}
               onChange={(e) => {

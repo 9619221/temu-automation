@@ -77,7 +77,7 @@ interface StoreMatrixRow {
   first_ship: number;         // 今日(北京)发出的首单数(按 WB 去重)
   goods_created: number;      // 今日(北京)创建的商品 SKC 数
 }
-interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; last30d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; last30d: number; sale_days: number | null; stock: number; occupy: number; unavail_stock?: number; shipping?: number; advice_qty: number; lack_qty?: number; }
 interface FirstShipRow { mall_id: string; store_code: string | null; mall_name: string | null; sub_purchase_order_sn: string; delivery_order_sn: string | null; product_skc_id: string | null; ext_code: string | null; deliver_time: number | null; }
 interface QcRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
@@ -314,6 +314,7 @@ export default function OperationsWorkbench() {
   const [scoreFilter, setScoreFilter] = useSessionState(owViewKey("scoreFilter"), "all");
   const [regionFilter, setRegionFilter] = useSessionState(owViewKey("reviewRegion"), "all");
   const [slowFilter, setSlowFilter] = useSessionState(owViewKey("slowFilter"), "all"); // 商品运营全景:全部 / 仅看滞销
+  const [onsaleDaysFilter, setOnsaleDaysFilter] = useSessionState(owViewKey("onsaleDays"), "all"); // 加入站点天数筛选
   const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
   const [kindFilter, setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
   const [todoType, setTodoType] = useSessionState(owViewKey("todoType"), "all");
@@ -1017,9 +1018,14 @@ export default function OperationsWorkbench() {
   }, [panelRows, storeFilter, search, inScope]);
   const slowCount = useMemo(() => panelBase.filter(isSlowMoving).length, [panelBase]);
   const panelView = useMemo(() => {
-    const v = slowFilter === "slow" ? panelBase.filter(isSlowMoving) : panelBase;
+    let v = slowFilter === "slow" ? panelBase.filter(isSlowMoving) : panelBase;
+    if (onsaleDaysFilter !== "all") {
+      const d = Number(onsaleDaysFilter);
+      if (d === 0) v = v.filter((r) => !r.onsales_duration || r.onsales_duration <= 0);
+      else v = v.filter((r) => { const days = r.onsales_duration ?? 0; return days > 0 && days <= d; });
+    }
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [panelBase, slowFilter]);
+  }, [panelBase, slowFilter, onsaleDaysFilter]);
   // 官方流量(店铺维度)：用 shopRows 把 mall_id 映射成店名/store_code，沿用 owner/store 过滤
   const mallInfoMap = useMemo(() => {
     const m = new Map<string, { name: string; code: string | null }>();
@@ -1362,12 +1368,12 @@ export default function OperationsWorkbench() {
     { title: "30天销量", key: "sales_30d", width: 95, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.last30d || 0), 0) - skusOf(b).reduce((x, s) => x + (s.last30d || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.last30d || 0), 0); return stackCell(skus, (s) => fmtNum(s.last30d), fmtNum(sum)); } },
     { title: "可用库存", key: "stock", width: 108, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.stock || 0), 0) - skusOf(b).reduce((x, s) => x + (s.stock || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
     { title: "预占用库存", key: "occupy", width: 116, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.occupy || 0), 0) - skusOf(b).reduce((x, s) => x + (s.occupy || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
-    { title: "暂不可用库存", dataIndex: "unavail", width: 130, align: "right", sorter: (a, b) => (a.unavail ?? 0) - (b.unavail ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
+    { title: "暂不可用库存", key: "unavail", width: 130, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.unavail_stock || 0), 0) - skusOf(b).reduce((x, s) => x + (s.unavail_stock || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.unavail_stock || 0), 0); return stackCell(skus, (s) => ((s.unavail_stock || 0) > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(s.unavail_stock || 0)}</span> : <span>0</span>), sum > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(sum)}</span> : fmtNum(sum)); } },
     { title: "缺货件数", key: "lack_qty", width: 110, align: "right", sorter: (a, b) => (a.lack_qty ?? 0) - (b.lack_qty ?? 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.lack_qty || 0), 0); return stackCell(skus, (s) => ((s.lack_qty || 0) > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(s.lack_qty || 0)}</span> : <span style={{ color: "#bbb" }}>0</span>), sum > 0 ? <span style={{ color: "#cf1322" }}>{fmtNum(sum)}</span> : fmtNum(sum)); } },
-    { title: "在途库存", dataIndex: "shipping", width: 108, align: "right", sorter: (a, b) => (a.shipping ?? 0) - (b.shipping ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
-    { title: "总库存", dataIndex: "total_stock", width: 104, align: "right", sorter: (a, b) => (a.total_stock ?? 0) - (b.total_stock ?? 0), render: (v: number | null) => (v == null ? "—" : <span style={{ fontWeight: 700, color: v <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(v)}</span>) },
-    { title: "建议备货", key: "advice", width: 108, align: "right", sorter: (a, b) => adviceOf(a) - adviceOf(b), render: (_, r) => { const v = adviceOf(r); return v > 0 ? <Tag color="blue">{fmtNum(v)}</Tag> : <span style={{ color: "#bbb" }}>—</span>; } },
-    { title: "可售天数", key: "sellthrough", width: 112, align: "right", sorter: (a, b) => { const x = sellThroughDays(a), y = sellThroughDays(b); return (x === Infinity ? 1e9 : x) - (y === Infinity ? 1e9 : y); }, render: (_, r) => { const d = sellThroughDays(r); if (d === 0) return <span style={{ color: "#bbb" }}>—</span>; const txt = d === Infinity ? "∞" : Math.round(d) + " 天"; return isSlowMoving(r) ? <Tag color="orange">{txt} · 滞销</Tag> : <span style={{ color: d > 14 ? "#d46b08" : "#595959" }}>{txt}</span>; } },
+    { title: "在途库存", key: "shipping", width: 108, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.shipping || 0), 0) - skusOf(b).reduce((x, s) => x + (s.shipping || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.shipping || 0), 0); return stackCell(skus, (s) => ((s.shipping || 0) > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(s.shipping || 0)}</span> : <span style={{ color: "#bbb" }}>0</span>), sum > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(sum)}</span> : <span style={{ color: "#bbb" }}>0</span>); } },
+    { title: "总库存", key: "total_stock", width: 104, align: "right", sorter: (a, b) => (a.total_stock ?? 0) - (b.total_stock ?? 0), render: (_, r) => { const skus = skusOf(r); const sum = r.total_stock; const skuTotal = (s: SkuChild) => (s.stock || 0) + (s.unavail_stock || 0) - (s.lack_qty || 0) + (s.shipping || 0); return stackCell(skus, (s) => { const v = skuTotal(s); return <span style={{ fontWeight: 700, color: v <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(v)}</span>; }, sum == null ? "—" : <span style={{ fontWeight: 700, color: sum <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(sum)}</span>); } },
+    { title: "建议备货", key: "advice", width: 108, align: "right", sorter: (a, b) => adviceOf(a) - adviceOf(b), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.advice_qty || 0), 0); return stackCell(skus, (s) => (s.advice_qty > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(s.advice_qty)}</span> : <span style={{ color: "#bbb" }}>—</span>), sum > 0 ? <Tag color="blue">{fmtNum(sum)}</Tag> : <span style={{ color: "#bbb" }}>—</span>); } },
+    { title: "可售天数", key: "sellthrough", width: 112, align: "right", sorter: (a, b) => { const x = sellThroughDays(a), y = sellThroughDays(b); return (x === Infinity ? 1e9 : x) - (y === Infinity ? 1e9 : y); }, render: (_, r) => { const skus = skusOf(r); const fmtDays = (s: SkuChild) => { if (s.sale_days == null) return <span style={{ color: "#bbb" }}>—</span>; const d = Number(s.sale_days); return <span style={{ color: d > 14 ? "#d46b08" : "#595959" }}>{Math.round(d)} 天</span>; }; const d = sellThroughDays(r); if (d === 0) return stackCell(skus, () => <span style={{ color: "#bbb" }}>—</span>, <span style={{ color: "#bbb" }}>—</span>); const txt = d === Infinity ? "∞" : Math.round(d) + " 天"; const sumEl = isSlowMoving(r) ? <Tag color="orange">{txt} · 滞销</Tag> : <span style={{ color: d > 14 ? "#d46b08" : "#595959" }}>{txt}</span>; return stackCell(skus, fmtDays, sumEl); } },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
     { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
@@ -1653,9 +1659,12 @@ export default function OperationsWorkbench() {
             <div>
               <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。总库存 = 可用 + 暂不可用 − 缺货件数 + 在途库存。滞销 = 加入站点&gt;20天 且 可售天数(可用库存÷近7日均销)&gt;20天。</div>
               {commonFilters(
-                <Select size="small" style={{ width: 150 }} value={slowFilter} onChange={setSlowFilter} options={[{ value: "all", label: "全部商品" }, { value: "slow", label: `仅看滞销 (${slowCount})` }]} />,
+                <>
+                  <Select size="small" style={{ width: 150 }} value={slowFilter} onChange={setSlowFilter} options={[{ value: "all", label: "全部商品" }, { value: "slow", label: `仅看滞销 (${slowCount})` }]} />
+                  <Select size="small" style={{ width: 160 }} value={onsaleDaysFilter} onChange={setOnsaleDaysFilter} options={[{ value: "all", label: "全部站点时间" }, { value: "0", label: "未上架" }, { value: "7", label: "≤7天" }, { value: "15", label: "≤15天" }, { value: "30", label: "≤30天" }, { value: "60", label: "≤60天" }]} />
+                </>,
               )}
-              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => { const k = String(c.key ?? ""); const di = String((c as { dataIndex?: string }).dataIndex ?? ""); if (HIDE_REVIEW && k === "score") return false; if (HIDE_ACTIVITY && k === "act") return false; if (OFFICIAL_SOURCE && (k === "declared_price" || ["limited", "compliance", "expose", "click", "pay", "conv"].includes(di))) return false; return true; })} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1560 }} loading={panelLoading} />
+              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => { const k = String(c.key ?? ""); const di = String((c as { dataIndex?: string }).dataIndex ?? ""); if (HIDE_REVIEW && k === "score") return false; if (HIDE_ACTIVITY && k === "act") return false; if (OFFICIAL_SOURCE && (k === "declared_price" || ["limited", "compliance", "expose", "click", "pay", "conv"].includes(di))) return false; return true; })} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1560, y: "calc(100vh - 320px)" }} loading={panelLoading} />
             </div>
           ) : prodSeg === "diag" ? (
             <div>

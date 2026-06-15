@@ -5951,7 +5951,7 @@ function listPurchaseReturns(params = {}) {
   const search = optionalString(params.search || params.q);
   if (search) {
     values.search = `%${search}%`;
-    conditions.push("(supplier_name LIKE @search OR warehouse LIKE @search OR creator_name LIKE @search OR labels LIKE @search OR remark LIKE @search OR CAST(io_id AS TEXT) LIKE @search)");
+    conditions.push("(supplier_name LIKE @search OR warehouse LIKE @search OR creator_name LIKE @search OR labels LIKE @search OR remark LIKE @search OR CAST(io_id AS TEXT) LIKE @search OR EXISTS (SELECT 1 FROM purchase_return_items pri LEFT JOIN erp_skus sk ON sk.id = pri.sku_id WHERE pri.io_id = purchase_returns.io_id AND (pri.i_id LIKE @search OR pri.sku_id LIKE @search OR sk.internal_sku_code LIKE @search)))");
   }
   const supplier = optionalString(params.supplier || params.supplier_name);
   if (supplier) {

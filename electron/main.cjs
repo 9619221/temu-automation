@@ -24,6 +24,8 @@ const {
 const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
 const DIST_PROTOCOL = "temu-app";
 
+app.commandLine.appendSwitch("proxy-bypass-list", "<local>;erp.temu.chat");
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: DIST_PROTOCOL,

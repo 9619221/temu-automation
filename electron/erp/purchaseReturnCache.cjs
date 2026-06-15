@@ -176,7 +176,7 @@ function buildHeadConditions(params, args) {
   }
   const search = optionalString(params.search || params.q);
   if (search) {
-    conditions.push("payload_json LIKE @search");
+    conditions.push("(payload_json LIKE @search OR EXISTS (SELECT 1 FROM purchase_return_item_cache pic WHERE pic.company_id = purchase_return_cache.company_id AND pic.io_id = purchase_return_cache.io_id AND pic.status_internal != 'deleted' AND pic.payload_json LIKE @search))");
     args.search = `%${search}%`;
   }
   return conditions;

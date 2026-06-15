@@ -268,7 +268,13 @@ function rowMatchesQuery(row: UnifiedAfterSaleRow, needle: string): boolean {
     row.shopName, row.outerAsId, row.asId, row.lId, row.remark,
     row.platformReason, row.type, row.logisticsCompany, row.receiverName, row.soId,
   ];
-  return fields.some((v) => v != null && String(v).toLowerCase().includes(needle));
+  if (fields.some((v) => v != null && String(v).toLowerCase().includes(needle))) return true;
+  if (row.platformItems?.length) {
+    return row.platformItems.some((it) =>
+      [it.internalSkuCode, it.skuId, it.skcId].some((v) => v != null && String(v).toLowerCase().includes(needle)),
+    );
+  }
+  return false;
 }
 
 export interface FetchUnifiedResult {

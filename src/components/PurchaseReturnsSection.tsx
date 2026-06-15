@@ -840,7 +840,7 @@ export default function PurchaseReturnsSection() {
             <Input.Search
               allowClear
               prefix={<SearchOutlined />}
-              placeholder="搜索供应商 / 单号 / 制单人 / 仓库 / 标签 / 备注"
+              placeholder="搜索商品编码 / 供应商 / 单号 / 制单人 / 仓库 / 备注"
               enterButton="搜索"
               value={searchDraft}
               onChange={(e) => {

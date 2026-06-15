@@ -682,22 +682,22 @@ class InventoryService {
               updated_at = @updated_at
           WHERE id = @id
         `).run({ id: batch.id, take, updated_at: now });
-        this.writeLedger({
-          accountId: batch.account_id,
-          skuId: batch.sku_id,
-          batchId: batch.id,
-          type: ledgerType,
-          qtyDelta: -take,
-          fromBucket: "available",
-          toBucket: null,
-          unitCost: input.unitCost ?? null,
-          sourceDocType: input.sourceDocType || "manual",
-          sourceDocId: input.sourceDocId || "",
-          actor: input.actor,
-        });
         lines.push({ batchId: batch.id, qty: take, unitLandedCost: Number(batch.unit_landed_cost || 0) });
         remaining -= take;
       }
+      this.writeLedger({
+        accountId,
+        skuId,
+        batchId: lines.length === 1 ? lines[0].batchId : null,
+        type: ledgerType,
+        qtyDelta: -qty,
+        fromBucket: "available",
+        toBucket: null,
+        unitCost: input.unitCost ?? null,
+        sourceDocType: input.sourceDocType || "manual",
+        sourceDocId: input.sourceDocId || "",
+        actor: input.actor,
+      });
       if (input.affectSkuTotal) {
         if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN) {
           const unitCost = Number(input.unitCost);
