@@ -5344,7 +5344,7 @@ function refreshBundleCostForSkus(db, skuIds) {
       total += unitCost * c.qty;
     }
     const bundleCost = Number(total.toFixed(4));
-    db.prepare("UPDATE erp_skus SET bundle_cost_price = ? WHERE id = ?").run(bundleCost, bundle_sku_id);
+    db.prepare("UPDATE erp_skus SET bundle_cost_price = ?, updated_at = ? WHERE id = ?").run(bundleCost, nowIso(), bundle_sku_id);
   }
 }
 
