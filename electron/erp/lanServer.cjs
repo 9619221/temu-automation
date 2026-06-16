@@ -3597,7 +3597,7 @@ function renderOutboundWorkbench(model = {}, user = {}) {
 
 function createRequestHandler(options = {}) {
   const getErpStatus = options.getErpStatus || (() => ({}));
-  const getPurchaseWorkbench = options.getPurchaseWorkbench || (() => ({
+  let getPurchaseWorkbench = options.getPurchaseWorkbench || (() => ({
     summary: {},
     purchaseRequests: [],
     purchaseOrders: [],
@@ -3608,7 +3608,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Purchase action handler is not available");
   });
   const db = options.db || null;
-  const getWarehouseWorkbench = options.getWarehouseWorkbench || (() => ({
+  let getWarehouseWorkbench = options.getWarehouseWorkbench || (() => ({
     summary: {},
     inboundReceipts: [],
     inventoryBatches: [],
@@ -3616,7 +3616,7 @@ function createRequestHandler(options = {}) {
   const performWarehouseAction = options.performWarehouseAction || (() => {
     throw new Error("Warehouse action handler is not available");
   });
-  const getQcWorkbench = options.getQcWorkbench || (() => ({
+  let getQcWorkbench = options.getQcWorkbench || (() => ({
     summary: {},
     pendingBatches: [],
     inspections: [],
@@ -3624,7 +3624,7 @@ function createRequestHandler(options = {}) {
   const performQcAction = options.performQcAction || (() => {
     throw new Error("QC action handler is not available");
   });
-  const getOutboundWorkbench = options.getOutboundWorkbench || (() => ({
+  let getOutboundWorkbench = options.getOutboundWorkbench || (() => ({
     summary: {},
     availableBatches: [],
     outboundShipments: [],
@@ -3635,6 +3635,25 @@ function createRequestHandler(options = {}) {
   const performInventoryAction = options.performInventoryAction || (() => {
     throw new Error("Inventory action handler is not available");
   });
+
+  // worker_threads 只读查询池：把重型 workbench 查询挪到后台线程，主线程事件循环不再被
+  // 同步大查询（0.5-1.3s）冻住。只在云端（startErpHeadlessServer 传入 queryPool）启用；
+  // 任意一步失败都降级回主线程直查，保证不因池故障丢功能。
+  const queryPool = options.queryPool || null;
+  if (queryPool) {
+    const _wrapPool = (handlerName, original) => async (params) => {
+      try {
+        return JSON.parse(await queryPool.run(handlerName, params));
+      } catch (error) {
+        console.error(`[QueryPool] ${handlerName} fallback to main thread:`, error?.message || error);
+        return original(params);
+      }
+    };
+    getPurchaseWorkbench = _wrapPool("purchase_workbench", getPurchaseWorkbench);
+    getWarehouseWorkbench = _wrapPool("warehouse_workbench", getWarehouseWorkbench);
+    getQcWorkbench = _wrapPool("qc_workbench", getQcWorkbench);
+    getOutboundWorkbench = _wrapPool("outbound_workbench", getOutboundWorkbench);
+  }
   const listWorkItems = options.listWorkItems || (() => []);
   const getWorkItemStats = options.getWorkItemStats || (() => ({
     total: 0,

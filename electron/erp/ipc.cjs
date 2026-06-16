@@ -1327,6 +1327,21 @@ function initializeHostErp(options = {}) {
   }
 }
 
+function initErpReadonly(readonlyDb) {
+  if (erpState.db) return;
+  erpState.db = readonlyDb;
+  // requireErp() 要求 services 非空，且会调 ensureRuntimeSchema（有 schemaRepairDone 守卫不写库）。
+  // workbench 查询只解构 { db } 不真用 services，故给个空占位即可，绝不触发写操作。
+  erpState.services = {};
+  // 只读标志：让 workbench 查询里的"启动期一次性写初始化"（ensureDefault* 等）整体短路。
+  // 主线程早已 ensure 过，worker 只读连接再写会抛 "attempt to write a readonly database"。
+  erpState.readonly = true;
+  erpState.schemaRepairDone = true;
+  erpState.initResult = { dbPath: readonlyDb.__erpDbPath || "", migrations: [] };
+  erpState.initError = null;
+  _poNumbersNormalized = true;
+}
+
 function initializeErp(options = {}) {
   erpState.userDataDir = options.userDataDir || erpState.userDataDir || null;
   if (typeof options.workerInvoker === "function") {
@@ -8961,7 +8976,7 @@ async function getPurchaseWorkbench(params = {}) {
     `).all({ company_id: companyId }).map(toCamelRow)
     : undefined;
 
-  if (include1688Meta) {
+  if (include1688Meta && !erpState.readonly) {
     ensureDefault1688MessageSubscriptions(db, {
       companyId,
       actor: params.user || erpState.currentUser || {},
@@ -23408,10 +23423,24 @@ async function startErpHeadlessServer(options = {}) {
     dbPath: options.dbPath || env.ERP_DB_PATH,
   });
   const bootstrap = bootstrapAdminFromEnv(env);
+  // worker_threads 只读查询池（opt-in：ERP_QUERY_POOL=1）。重型 workbench 查询走后台线程，
+  // 避免同步大查询冻住单进程事件循环导致全站超时。仅云端 headless 启用；创建失败则回退主线程。
+  let queryPool = null;
+  if (["1", "true", "on", "yes"].includes(String(env.ERP_QUERY_POOL || "").toLowerCase())) {
+    try {
+      const { QueryPool } = require("./queryPool.cjs");
+      queryPool = new QueryPool({ dbPath: initResult.dbPath || erpState.db.__erpDbPath });
+      queryPool.spawn();
+    } catch (error) {
+      console.warn("[QueryPool] init failed, using main thread:", error?.message || error);
+      queryPool = null;
+    }
+  }
   const lanStatus = await startLanServer({
     port: Number(options.port || env.ERP_PORT) || DEFAULT_LAN_PORT,
     bindAddress: optionalString(options.bindAddress || env.ERP_BIND_ADDRESS) || DEFAULT_BIND_ADDRESS,
     db: erpState.db,
+    queryPool,
     getErpStatus,
     getPurchaseWorkbench,
     getWarehouseWorkbench,
@@ -24160,4 +24189,8 @@ module.exports = {
   runScheduledMessageReprocess,
   processSettlementBatchItems,
   getPurchaseWorkbench,
+  initErpReadonly,
+  getWarehouseWorkbench,
+  getQcWorkbench,
+  getOutboundWorkbench,
 };
