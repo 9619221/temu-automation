@@ -182,12 +182,12 @@ async function main() {
     try { startSettlementIncomeSyncScheduler(result.initResult.dbPath); } catch (e) { console.warn("[settlement-income-sync] start failed:", e?.message || e); }
   }, 30 * 1000);
 
-  // 45s: prewarm（18MB同步大查询，必须在cron之前跑完，否则跟cron争磁盘I/O会从3s膨胀到64s）
+  // 45s: prewarm（18MB大查询）。有 worker 池时走 worker，主线程不阻塞；否则主线程直跑（原行为）。
   setTimeout(() => {
     const t0 = Date.now();
     console.log("[prewarm] firing purchase/workbench ...");
     const { prewarmPurchaseWorkbench } = require("../electron/erp/lanServer.cjs");
-    prewarmPurchaseWorkbench(getPurchaseWorkbench)
+    prewarmPurchaseWorkbench(getPurchaseWorkbench, result.queryPool || null)
       .then((len) => console.log(`[prewarm] purchase/workbench done t=${Date.now() - t0}ms bodyLen=${len}`))
       .catch((e) => console.warn(`[prewarm] purchase/workbench failed: ${e.message}`));
   }, 45_000);

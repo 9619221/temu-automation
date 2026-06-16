@@ -23527,6 +23527,7 @@ async function startErpHeadlessServer(options = {}) {
     bootstrap,
     lanStatus,
     auto1688OrderSync,
+    queryPool, // 暴露给 erp-server，让启动期 prewarm 也能走 worker 池（不阻塞主线程）
   };
 }
 

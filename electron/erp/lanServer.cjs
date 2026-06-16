@@ -26,11 +26,19 @@ function _poolStringTransportEnabled() {
   const poolOn = ["1", "true", "on", "yes"].includes(String(process.env.ERP_QUERY_POOL || "").toLowerCase());
   return poolOn && process.env.ENFORCE_STORE_SCOPE !== "1";
 }
-async function prewarmPurchaseWorkbench(getPurchaseWorkbenchFn) {
+async function prewarmPurchaseWorkbench(getPurchaseWorkbenchFn, queryPool = null) {
   const payload = { limit: 2000, includeRequestDetails: false, includeOptions: false, include1688Meta: false };
   const cacheKey = _purchaseWbCacheKey(payload, null);
+  // 透传模式 + 有池：18MB 大查询走 worker，主线程不阻塞（治本 prewarm 启动期裸跑卡全站，
+  // 实测主线程 4.2s、冷态争盘可膨胀到 64s）。worker 出串直接拼接存 {json}。
+  if (queryPool && _poolStringTransportEnabled()) {
+    const wbStr = await queryPool.run("purchase_workbench", payload);
+    const json = '{"ok":true,"workbench":' + wbStr + '}';
+    _purchaseWbCache.set(cacheKey, { json, ts: Date.now(), len: json.length });
+    return json.length;
+  }
+  // 无池/降级/store-scope：主线程直跑（原逻辑）。缓存格式须与路由读取端一致：透传读 {json}、对象读 {data}。
   const workbench = await getPurchaseWorkbenchFn(payload);
-  // 缓存格式必须与路由读取端一致：透传快路读 {json}，对象路径读 {data}。
   if (_poolStringTransportEnabled()) {
     const json = '{"ok":true,"workbench":' + JSON.stringify(workbench) + '}';
     _purchaseWbCache.set(cacheKey, { json, ts: Date.now(), len: json.length });
