@@ -34,6 +34,8 @@ for (const inc of [false, true]) {
   mat("risk_list:" + k, () => svc.buildRiskList(db, { includeTest: inc, attachCloudDb: attach, force: true }));
   mat("activity_list:" + k, () => svc.buildActivityList(db, { includeTest: inc, attachCloudDb: attach, force: true }));
   mat("high_price_flow:" + k + ":14", () => svc.buildHighPriceFlowList(db, { includeTest: inc, days: 14, attachCloudDb: attach, force: true }));
+  mat("openapi_qc:" + k, () => svc.buildOpenapiQc(db, { includeTest: inc }));
+  mat("quality_panel:" + k, () => svc.buildQualityPanel(db, { includeTest: inc, attachCloudDb: attach, force: true }));
 }
 // 管道总览(商品全景):内存缓存键固定 "pf" 不分 test,沿用既有行为,用 excludeTest 跑一次写单键。
 mat("pipeline_overview", () => svc.buildPipelineOverview(db, { includeTest: false, attachCloudDb: attach, force: true }));

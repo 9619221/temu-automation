@@ -285,8 +285,8 @@ function registerReportsHandlers(ipcMain, deps) {
         return await remoteRequest(`/api/erp/reports/openapi-qc?include_test=${includeTest}`, { method: "GET" });
       }
       requireErp();
-      const { buildOpenapiQc } = require("../services/multiStoreReport.cjs");
-      return { ok: true, data: buildOpenapiQc(erpState.db, { includeTest: payload?.includeTest }) };
+      const { getOpenapiQcFast } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: getOpenapiQcFast(erpState.db, { includeTest: payload?.includeTest }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }
@@ -331,9 +331,9 @@ function registerReportsHandlers(ipcMain, deps) {
         return await remoteRequest(`/api/erp/reports/quality-panel?include_test=${includeTest}`, { method: "GET" });
       }
       requireErp();
-      const { buildQualityPanel } = require("../services/multiStoreReport.cjs");
+      const { getQualityPanelFast } = require("../services/multiStoreReport.cjs");
       const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
-      return { ok: true, data: buildQualityPanel(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+      return { ok: true, data: getQualityPanelFast(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

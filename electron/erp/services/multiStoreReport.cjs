@@ -4570,6 +4570,14 @@ function buildOpenapiQc(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
 
+// 平台质检快速版:优先读物化缓存(refresh-ops-reports cron 预聚合「openapi_qc:0/1」),miss 才实时算。
+// buildOpenapiQc 本身是本地表 LIMIT 查询、不慢,加缓存主要防它在重负载下被同 Tab 的 quality-panel 连带超时。
+function getOpenapiQcFast(db, options = {}) {
+  const mat = _readOpsReportCache(db, "openapi_qc:" + (options.includeTest ? "1" : "0"));
+  if (mat) return mat;
+  return buildOpenapiQc(db, options);
+}
+
 // 今日首单发货(运营工作台总览统计卡):读 erp_temu_firstship_daily 当天(北京时区)行,关联店名。
 // 数据由 temuOpenApiFirstShip.cjs(cron)物化(bg.shiporderv2.get 筛 isFirst,按 WB 去重)。纯本地 erp.sqlite。
 function buildFirstShipToday(db, options = {}) {
@@ -4751,6 +4759,15 @@ function buildQualityPanel(db, options = {}) {
   const shops = Array.from(shopByMall.values());
 
   return { generated_at: Date.now(), row_count: rows.length, rows, shops, source: "cloud", attached: true };
+}
+
+// 商品品质看板快速版:优先读物化缓存(refresh-ops-reports cron 预聚合「quality_panel:0/1」),miss 才实时算。
+// buildQualityPanel 实时要 attach cloud 大库 + 全表扫 capture_events + 逐条 JSON.parse(实测~31s,
+// 还会占满单进程连带拖垮同 Tab 其它接口),命中缓存则毫秒返回、无需 attach。
+function getQualityPanelFast(db, options = {}) {
+  const mat = _readOpsReportCache(db, "quality_panel:" + (options.includeTest ? "1" : "0"));
+  if (mat) return mat;
+  return buildQualityPanel(db, options);
 }
 
 // raw_json（同步时存的整条 review item）里捞 erp 表没单列存的字段：是否福利评价 + 晒图 URL。
@@ -5315,9 +5332,11 @@ module.exports = {
   buildMultiStoreReport,
   buildWarehouseInventory,
   buildOpenapiQc,
+  getOpenapiQcFast,
   buildFirstShipToday,
   buildGoodsCreatedToday,
   buildQualityPanel,
+  getQualityPanelFast,
   buildReviews,
   fetchQcFlawImages,
   buildPurchaseReport,
