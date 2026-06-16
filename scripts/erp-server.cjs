@@ -136,6 +136,9 @@ function setupCronScheduler(erpDbPath) {
   scheduler.register("product-panel", 10 * 60 * 1000,
     path.join(scriptsDir, "refresh-product-panel.cjs"), { ...envBase, CLOUD_DB });
 
+  scheduler.register("ops-reports", 10 * 60 * 1000,
+    path.join(scriptsDir, "refresh-ops-reports.cjs"), { ...envBase, CLOUD_DB });
+
   scheduler.register("openapi-consign", 6 * 60 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-consign.cjs"), envBase);
 

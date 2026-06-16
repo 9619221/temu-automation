@@ -3253,6 +3253,20 @@ function _calcAdvice(today, last7d, totalStock) {
 // 进程级结果缓存：跨库聚合冷态可达 ~17s（OS page cache 被挤出后首查），
 // 缓存 + 服务端定时预热让用户请求永远命中暖缓存、秒回。
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// 读运营报表物化缓存(erp_report_cache,由 refresh-ops-reports cron 预聚合)。
+// 命中返回解析后的数据,否则 null;表不存在/解析失败均静默回退实时计算(保证正确性)。
+function _readOpsReportCache(db, cacheKey) {
+  try {
+    const row = db.prepare("SELECT payload_json, updated_at FROM erp_report_cache WHERE cache_key = ?").get(cacheKey);
+    if (row && row.payload_json) {
+      const d = JSON.parse(row.payload_json);
+      d.cached_at = row.updated_at || null;
+      return d;
+    }
+  } catch (e) { /* 实时兜底 */ }
+  return null;
+}
 const _reportCache = new Map();    // includeTest -> { data, ts }
 const _reportInflight = new Map(); // includeTest -> Promise（并发去重，避免多请求同时冷算）
 
@@ -3544,6 +3558,8 @@ function buildRiskList(db, options = {}) {
   if (!options.force) {
     const c = _riskCache.get(key);
     if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+    const mat = _readOpsReportCache(db, "risk_list:" + key);
+    if (mat) { _riskCache.set(key, { data: mat, ts: Date.now() }); return mat; }
   }
   const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
   const rows = optionalAllLocal(db, `
@@ -3584,6 +3600,8 @@ function buildActivityList(db, options = {}) {
   if (!options.force) {
     const c = _activityCache.get(key);
     if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+    const mat = _readOpsReportCache(db, "activity_list:" + key);
+    if (mat) { _activityCache.set(key, { data: mat, ts: Date.now() }); return mat; }
   }
   const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
   const rows = optionalAllLocal(db, `
@@ -4116,6 +4134,8 @@ function buildHighPriceFlowList(db, options = {}) {
   if (!options.force) {
     const c = _hpfListCache.get(key);
     if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+    const mat = _readOpsReportCache(db, "high_price_flow:" + key);
+    if (mat) { _hpfListCache.set(key, { data: mat, ts: Date.now() }); return mat; }
   }
   const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
   // 1) 高价限流：per (mall_id, product_id) 近 days 天最新一条，取流量下降率
@@ -4846,6 +4866,8 @@ function buildPipelineOverviewFast(db, options = {}) {
   if (!options.force) {
     const c = _pipelineCache.get("pf");
     if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+    const mat = _readOpsReportCache(db, "pipeline_overview");
+    if (mat) { _pipelineCache.set("pf", { data: mat, ts: Date.now() }); return mat; }
   }
   const includeTest = !!options.includeTest;
 
