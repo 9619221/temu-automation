@@ -3298,6 +3298,15 @@ async function buildMultiStoreReport(db, options = {}) {
   return p;
 }
 
+// 物化优先版：先读 erp_report_cache 的 multi_store:<test> 物化结果（毫秒），
+// miss/无表时回退实时 buildMultiStoreReport（冷态 ~46s 独占单进程，故须靠 cron 喂表）。
+// async：缓存命中也走 async 签名，与既有调用点 await 一致。
+async function getMultiStoreReportFast(db, options = {}) {
+  const mat = _readOpsReportCache(db, "multi_store:" + (options.includeTest ? "1" : "0"));
+  if (mat) return mat;
+  return buildMultiStoreReport(db, options);
+}
+
 // 预热：强制重算并填缓存，供服务端定时调用，使 page cache 常暖、用户不撞冷查询。
 function prewarmMultiStoreReport(db, attachCloudDb) {
   try { buildSkuSales(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
@@ -5330,6 +5339,7 @@ function buildProductRiskTags(db, options = {}) {
 
 module.exports = {
   buildMultiStoreReport,
+  getMultiStoreReportFast,
   buildWarehouseInventory,
   buildOpenapiQc,
   getOpenapiQcFast,

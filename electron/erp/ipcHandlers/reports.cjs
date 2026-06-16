@@ -16,9 +16,9 @@ function registerReportsHandlers(ipcMain, deps) {
         });
       }
       requireErp();
-      const { buildMultiStoreReport } = require("../services/multiStoreReport.cjs");
+      const { getMultiStoreReportFast } = require("../services/multiStoreReport.cjs");
       const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
-      const data = await buildMultiStoreReport(erpState.db, {
+      const data = await getMultiStoreReportFast(erpState.db, {
         includeTest: payload?.includeTest,
         attachCloudDb: attachTemuCloudDbIfPossible,
       });

@@ -731,7 +731,10 @@ function unifiedRowToPayload(row) {
 // scripts/rebuild-consign-snapshot.cjs 后台进程预先把昂贵的 UNIFIED_CONSIGN_CTE 结果落到
 // temu_consign_unified_snapshot。读不到 / 太旧 / 任何异常 → 返回 null，调用方回退到在线 CTE
 // （正确但慢），因此没有快照 = 退化为现状，零回归。
-const CONSIGN_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 超过 6h 未刷新视为陈旧，回退在线查询
+// 陈旧阈值 12h > cron 重建间隔 6h：留一次 cron 失败/跑慢/排队靠后的余量。
+// 若阈值==间隔(原 6h)则零余量，某次 cron 没及时跑就会判陈旧→回退在线 CTE(冷态~46s)拖垮全站。
+// 送仓状态非秒级敏感，12h 内的数据延迟可接受，远好过偶发 46s 全站连带超时。
+const CONSIGN_SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
   const { companyId, page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
@@ -4678,8 +4681,8 @@ async function handleMultiStoreReportRequest({ req, res, db }) {
   try {
     const parsed = new URL(req.url || "/", "http://127.0.0.1");
     const includeTest = parsed.searchParams.get("include_test") === "1";
-    const { buildMultiStoreReport } = require("./services/multiStoreReport.cjs");
-    const data = await buildMultiStoreReport(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+    const { getMultiStoreReportFast } = require("./services/multiStoreReport.cjs");
+    const data = await getMultiStoreReportFast(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
     writeJson(res, 200, { ok: true, data });
   } catch (error) {
     writeJson(res, error?.statusCode || 500, {

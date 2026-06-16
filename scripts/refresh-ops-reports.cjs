@@ -40,5 +40,17 @@ for (const inc of [false, true]) {
 // 管道总览(商品全景):内存缓存键固定 "pf" 不分 test,沿用既有行为,用 excludeTest 跑一次写单键。
 mat("pipeline_overview", () => svc.buildPipelineOverview(db, { includeTest: false, attachCloudDb: attach, force: true }));
 
-console.log(new Date().toISOString(), "ops-reports refreshed in", Date.now() - t0, "ms");
-db.close();
+// 多店报表(buildMultiStoreReport 是 async,冷态实测 ~46s 独占单进程,故必须 cron 喂表)。
+// 只物化默认视图 multi_store:0;includeTest=1 罕用,getMultiStoreReportFast miss 时回退实时即可。
+(async () => {
+  const t1 = Date.now();
+  try {
+    const data = await svc.buildMultiStoreReport(db, { includeTest: false, attachCloudDb: attach, force: true });
+    up.run("multi_store:0", JSON.stringify(data));
+    console.log(new Date().toISOString(), "multi_store:0", (Date.now() - t1) + "ms");
+  } catch (e) {
+    console.error(new Date().toISOString(), "multi_store:0", "FAIL", (e && e.message) || e);
+  }
+  console.log(new Date().toISOString(), "ops-reports refreshed in", Date.now() - t0, "ms");
+  db.close();
+})();
