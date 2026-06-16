@@ -38,14 +38,23 @@ interface ActivityRow {
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
   __rk?: number;
 }
-// 活动报名「概览」行:按(店×货号)聚合的商品维度,actIds=可提交活动 pendingIds=缺ID待采集
+// 活动报名内嵌精简明细(后端 products[].activities):报名弹窗/今日待办/最小库存用。
+// 父商品字段(mall/store/sku/skc/product_name 等)摊平时从 product 补,见 loadAct。
+interface ActivityDetail {
+  activity_id: string | null; kind: string | null; title: string | null; status: string | null;
+  activity_type: number | null; sku_id: string | null;
+  signup_price: number | null; suggested_price: number | null; price_diff: number | null;
+  activity_stock: number; cost: number | null; end_at: string | null;
+}
+// 活动报名「概览」行:后端已按(店×货号)聚合好,act_count=可提交活动 pending_count=缺ID待采集。
+// activities=该商品的精简活动明细(供弹窗/待办);kinds=涉及的活动类型(供前端筛选)。
 interface ActProductRow {
   key: string; mall_id: string; store_code: string | null; mall_name: string | null;
   sku_ext_code: string; product_id: string | null; skc_id: string | null;
   product_name: string | null; thumb: string | null;
-  actIds: Set<string>; pendingIds: Set<string>;
-  bestMargin: number | null; bestProfit: number | null;
-  enrolledCount: number;
+  act_count: number; pending_count: number;
+  best_margin: number | null; best_profit: number | null;
+  enrolled_count: number; kinds: string[]; activities: ActivityDetail[];
 }
 interface ShopHealthRow {
   mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null;
@@ -257,10 +266,10 @@ export default function OperationsWorkbench() {
   const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
   const [riskLoading, setRiskLoading] = useState(false);
   const [riskLoaded, setRiskLoaded] = useState(false);
-  const [actRows, setActRows] = useState<ActivityRow[]>([]);
+  const [actRows, setActRows] = useState<ActivityRow[]>([]); // 由 actProducts[].activities 摊平派生(今日待办/最小库存/报名弹窗复用既有 ActivityRow 逻辑)
+  const [actProducts, setActProducts] = useState<ActProductRow[]>([]); // 后端聚合好的商品概览(活动报名表格直接用,不再前端聚合)
   const [actLoading, setActLoading] = useState(false);
   const [actLoaded, setActLoaded] = useState(false);
-  const [actEnrolled, setActEnrolled] = useState<Map<string, number>>(new Map()); // 已报活动数:`mall_id|货号`→数量
   const [shopRows, setShopRows] = useState<ShopHealthRow[]>([]);
   const [shopLoading, setShopLoading] = useState(false);
   const [shopLoaded, setShopLoaded] = useState(false);
@@ -323,7 +332,6 @@ export default function OperationsWorkbench() {
   const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
   const [enrollBusy, setEnrollBusy] = useState(false);
-  const [actSkuOnly, setActSkuOnly] = useSessionState(owViewKey("actSkuOnly"), true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
   const [, startJumpTransition] = useTransition();
   const jumpWorkbench = useCallback((tab: string, query: string, before?: () => void) => {
     before?.();
@@ -561,7 +569,25 @@ export default function OperationsWorkbench() {
   const loadAct = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.activityList) return;
     setActLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.activityList({ includeTest: false }); if (resp.ok && resp.data) { setActRows((resp.data.rows || []) as ActivityRow[]); const em = new Map<string, number>(); for (const en of ((resp.data as { enrolled?: { mall_id: string; sku_ext_code: string | null; count: number }[] }).enrolled || [])) { if (en.sku_ext_code) em.set(`${en.mall_id}|${en.sku_ext_code}`, en.count); } setActEnrolled(em); setActLoaded(true); } } catch { /* */ } finally { setActLoading(false); }
+    try {
+      const resp = await window.electronAPI.erp.reports.activityList({ includeTest: false });
+      if (resp.ok && resp.data) {
+        const products = ((resp.data as { products?: ActProductRow[] }).products || []) as ActProductRow[];
+        setActProducts(products);
+        // 摊平内嵌明细回 ActivityRow(从父商品补 mall/store/sku 等),供今日待办/最小库存/报名弹窗沿用既有逻辑
+        const flat: ActivityRow[] = [];
+        for (const p of products) for (const a of p.activities) {
+          flat.push({ mall_id: p.mall_id, store_code: p.store_code, mall_name: p.mall_name,
+            kind: a.kind, title: a.title, status: a.status, activity_id: a.activity_id,
+            product_id: p.product_id, activity_type: a.activity_type, sku_id: a.sku_id,
+            sku_ext_code: p.sku_ext_code, skc_id: p.skc_id, product_name: p.product_name, thumb: p.thumb,
+            signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
+            activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: flat.length });
+        }
+        setActRows(flat);
+        setActLoaded(true);
+      }
+    } catch { /* */ } finally { setActLoading(false); }
   }, []);
   const loadShop = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.shopHealth) return;
@@ -896,78 +922,30 @@ export default function OperationsWorkbench() {
     return [...v].sort((a, b) => (SEV_RANK[b.severity || ""] || 0) - (SEV_RANK[a.severity || ""] || 0)).map((r, i) => ({ ...r, __rk: i }));
   }, [riskStoreReady, storeFilter, sevFilter, search, inScope]);
 
-  const actView = useMemo(() => {
-    let v = actRows.filter((r) => inScope(r.store_code || r.mall_id));
-    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
-    if (kindFilter !== "all") v = v.filter((r) => r.kind === kindFilter);
-    if (actSkuOnly) v = v.filter((r) => r.sku_ext_code); // 仅看有货号的行(滤掉活动表头噪声)
-    const q = search.trim().toLowerCase();
-    if (q) v = v.filter((r) => (r.product_name || r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
-    // 去重:同 货号+活动+申报价+参考价 的完全重复行只留一条
-    const seen = new Set<string>();
-    v = v.filter((r) => {
-      const k = `${r.store_code || r.mall_id}|${r.sku_ext_code || ""}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
-      if (seen.has(k)) return false; seen.add(k); return true;
-    });
-    // 店铺 → 商品(货号) → 活动 维度排序;无货号的表头行沉底
-    const sc = (r: ActivityRow) => r.store_code || r.mall_id || "";
-    return [...v].sort((a, b) => {
-      const s = sc(a).localeCompare(sc(b)); if (s) return s;
-      const ah = a.sku_ext_code ? 0 : 1, bh = b.sku_ext_code ? 0 : 1; if (ah !== bh) return ah - bh;
-      const sk = (a.sku_ext_code || "").localeCompare(b.sku_ext_code || ""); if (sk) return sk;
-      return (a.title || "").localeCompare(b.title || "");
-    }).map((r, i) => ({ ...r, __rk: i }));
-  }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly]);
-
-  // 每货号可报活动数(去重后,按 activity_id||活动名 区分)
-  // 活动报名「概览」:把逐行 actView 按(店×货号)聚合成每商品一行,算可报活动数/待补ID/最优参考利润率
+  // 活动报名「概览」:后端已聚合好每商品一行(店×货号),前端只做用户筛选(范围/店铺/活动类型/搜索),沿用后端排序
   const actProductView = useMemo<ActProductRow[]>(() => {
-    const m = new Map<string, ActProductRow>();
-    for (const r of actView) {
-      if (!r.sku_ext_code) continue;
-      const key = `${r.store_code || r.mall_id}|${r.sku_ext_code}`;
-      let e = m.get(key);
-      if (!e) {
-        e = { key, mall_id: r.mall_id, store_code: r.store_code, mall_name: r.mall_name,
-          sku_ext_code: r.sku_ext_code, product_id: r.product_id, skc_id: r.skc_id,
-          product_name: r.product_name || r.title, thumb: r.thumb,
-          actIds: new Set(), pendingIds: new Set(), bestMargin: null, bestProfit: null, enrolledCount: 0 };
-        m.set(key, e);
-      }
-      if (!e.product_name && (r.product_name || r.title)) e.product_name = r.product_name || r.title;
-      if (!e.thumb && r.thumb) e.thumb = r.thumb;
-      if (!e.product_id && r.product_id) e.product_id = r.product_id;
-      if (!e.skc_id && r.skc_id) e.skc_id = r.skc_id;
-      if (r.activity_id) e.actIds.add(r.activity_id);
-      else e.pendingIds.add(r.title || "");
-      const ref = r.suggested_price ?? r.signup_price; // 参考价:优先活动参考价,无则原申报价
-      if (ref != null && r.cost != null && ref > 0) {
-        const margin = (ref - r.cost) / ref;
-        if (e.bestMargin == null || margin > e.bestMargin) { e.bestMargin = margin; e.bestProfit = ref - r.cost; }
-      }
-    }
-    const arr = [...m.values()];
-    for (const e of arr) e.enrolledCount = actEnrolled.get(`${e.mall_id}|${e.sku_ext_code}`) || 0; // 填已报活动数
-    return arr.sort((a, b) => {
-      const s = (a.store_code || a.mall_id).localeCompare(b.store_code || b.mall_id); if (s) return s;
-      return b.actIds.size - a.actIds.size; // 可报活动多的在前
-    });
-  }, [actView, actEnrolled]);
+    let v = actProducts.filter((p) => inScope(p.store_code || p.mall_id));
+    if (storeFilter !== "all") v = v.filter((p) => p.store_code === storeFilter);
+    if (kindFilter !== "all") v = v.filter((p) => p.kinds.includes(kindFilter));
+    const q = search.trim().toLowerCase();
+    if (q) v = v.filter((p) => (p.product_name || "").toLowerCase().includes(q) || (p.sku_ext_code || "").toLowerCase().includes(q));
+    return v; // 后端已按 店→可报活动数 排序
+  }, [actProducts, storeFilter, kindFilter, search, inScope]);
 
   // 活动概览顶部汇总(我的店范围):在售商品数 + 有活动可报商品数 + 可报活动机会总数
   const actSummary = useMemo(() => {
     let onSale = 0;
     for (const r of shopRows) { if (!inScope(r.store_code || r.mall_id)) continue; onSale += r.on_sale || 0; }
     let opp = 0, withAct = 0, enrolled = 0;
-    for (const p of actProductView) { opp += p.actIds.size; if (p.actIds.size > 0) withAct++; enrolled += p.enrolledCount; }
+    for (const p of actProductView) { opp += p.act_count; if (p.act_count > 0) withAct++; enrolled += p.enrolled_count; }
     return { onSale, withAct, opp, enrolled };
   }, [shopRows, inScope, actProductView]);
 
-  // 报名弹窗:当前商品的可报活动行(actView 里同店同货号,逐个活动一行)
+  // 报名弹窗:当前商品的可报活动行(派生 actRows 里同店同货号,逐个活动一行)
   const modalActRows = useMemo(() => {
     if (!enrollModalSku) return [];
-    return actView.filter((r) => r.sku_ext_code === enrollModalSku.sku_ext_code && r.mall_id === enrollModalSku.mall_id);
-  }, [enrollModalSku, actView]);
+    return actRows.filter((r) => r.sku_ext_code === enrollModalSku.sku_ext_code && r.mall_id === enrollModalSku.mall_id);
+  }, [enrollModalSku, actRows]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
@@ -1174,15 +1152,15 @@ export default function OperationsWorkbench() {
         </div>
       </div>
     ) },
-    { title: "可报活动", key: "canact", width: 90, align: "center", render: (_, r) => r.actIds.size > 0 ? <Tag color={r.actIds.size >= 3 ? "green" : "blue"}>{r.actIds.size} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>, sorter: (a, b) => a.actIds.size - b.actIds.size, defaultSortOrder: "descend" },
-    { title: "待补ID", key: "pending", width: 88, align: "center", render: (_, r) => r.pendingIds.size > 0 ? <Tooltip title="这些活动缺活动ID(扩展只采到列表、没采到可报名场次),需用扩展逛该店活动后台采集后才能报"><span style={{ color: "#d46b08" }}>{r.pendingIds.size} 个</span></Tooltip> : <span style={{ color: "#bbb" }}>—</span> },
-    { title: "已报活动", key: "enrolled", width: 88, align: "center", render: (_, r) => r.enrolledCount > 0 ? <Tag color="green">{r.enrolledCount} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>, sorter: (a, b) => a.enrolledCount - b.enrolledCount },
+    { title: "可报活动", key: "canact", width: 90, align: "center", render: (_, r) => r.act_count > 0 ? <Tag color={r.act_count >= 3 ? "green" : "blue"}>{r.act_count} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>, sorter: (a, b) => a.act_count - b.act_count, defaultSortOrder: "descend" },
+    { title: "待补ID", key: "pending", width: 88, align: "center", render: (_, r) => r.pending_count > 0 ? <Tooltip title="这些活动缺活动ID(扩展只采到列表、没采到可报名场次),需用扩展逛该店活动后台采集后才能报"><span style={{ color: "#d46b08" }}>{r.pending_count} 个</span></Tooltip> : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "已报活动", key: "enrolled", width: 88, align: "center", render: (_, r) => r.enrolled_count > 0 ? <Tag color="green">{r.enrolled_count} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>, sorter: (a, b) => a.enrolled_count - b.enrolled_count },
     { title: "最优参考利润", key: "bestm", width: 132, align: "right", render: (_, r) => {
-      if (r.bestProfit == null || r.bestMargin == null) return <span style={{ color: "#bbb" }}>—</span>;
-      const color = r.bestProfit < 0 ? "#cf1322" : "#3f8600";
-      return <span style={{ color, fontWeight: 600 }}>{r.bestProfit < 0 ? "亏 " : ""}{fmtMoney(r.bestProfit)}<span style={{ fontSize: 11, marginLeft: 4 }}>{(r.bestMargin * 100).toFixed(1)}%</span></span>;
-    }, sorter: (a, b) => (a.bestProfit ?? -1e9) - (b.bestProfit ?? -1e9) },
-    { title: "操作", key: "op", width: 96, align: "center", render: (_, r) => <Button size="small" type="link" disabled={r.actIds.size === 0} onClick={() => { setSelActRows([]); setEnrollModalSku({ mall_id: r.mall_id, store_code: r.store_code, sku_ext_code: r.sku_ext_code, product_name: r.product_name }); }}>去报名</Button> },
+      if (r.best_profit == null || r.best_margin == null) return <span style={{ color: "#bbb" }}>—</span>;
+      const color = r.best_profit < 0 ? "#cf1322" : "#3f8600";
+      return <span style={{ color, fontWeight: 600 }}>{r.best_profit < 0 ? "亏 " : ""}{fmtMoney(r.best_profit)}<span style={{ fontSize: 11, marginLeft: 4 }}>{(r.best_margin * 100).toFixed(1)}%</span></span>;
+    }, sorter: (a, b) => (a.best_profit ?? -1e9) - (b.best_profit ?? -1e9) },
+    { title: "操作", key: "op", width: 96, align: "center", render: (_, r) => <Button size="small" type="link" disabled={r.act_count === 0} onClick={() => { setSelActRows([]); setEnrollModalSku({ mall_id: r.mall_id, store_code: r.store_code, sku_ext_code: r.sku_ext_code, product_name: r.product_name }); }}>去报名</Button> },
   ];
 
 
@@ -1513,7 +1491,7 @@ export default function OperationsWorkbench() {
             {!HIDE_DIAG && <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>}
             {!HIDE_RESTOCK && <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>}
             {!HIDE_STOCK && <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockLoaded ? stockView.length : "查看"} valueStyle={!stockLoaded ? { fontSize: 16, color: "#1677ff" } : undefined} /></Card>}
-            {!HIDE_ACTIVITY && <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>}
+            {!HIDE_ACTIVITY && <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actProductView.reduce((s, p) => s + p.act_count, 0)} valueStyle={{ color: "#3f8600" }} /></Card>}
           </div>
           <Card size="small" title="各店概览 · 点店看明细,问题多的店排前;后段列为各店上新生命周期阶段(SKC)" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading || lifecycleLoading}>
             <Table<StoreMatrixRow> dataSource={storeMatrix} rowKey="store_code" size="small"
@@ -1838,7 +1816,6 @@ export default function OperationsWorkbench() {
           {commonFilters(
             <>
               <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />
-              <Select size="small" style={{ width: 130 }} value={actSkuOnly ? "sku" : "all"} onChange={(v) => setActSkuOnly(v === "sku")} options={[{ value: "sku", label: "仅有货号" }, { value: "all", label: "含活动表头" }]} />
             </>,
           )}
           <Table<ActProductRow> dataSource={actProductView} columns={actProductColumns} rowKey={(r) => r.key} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1000 }} loading={actLoading} />

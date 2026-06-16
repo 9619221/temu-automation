@@ -3599,7 +3599,7 @@ function buildActivityList(db, options = {}) {
   if (!db) throw new Error("buildActivityList: db is required (host mode only)");
   const attachCloudDb = options.attachCloudDb;
   if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
-    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+    return { generated_at: Date.now(), product_count: 0, products: [], enrolled: [], attached: false };
   }
   const key = options.includeTest ? "1" : "0";
   if (!options.force) {
@@ -3656,7 +3656,54 @@ function buildActivityList(db, options = {}) {
      WHERE e.tenant_id = ? AND COALESCE(e.enroll_status, 0) <> 2 AND e.activity_thematic_id IS NOT NULL
      GROUP BY e.mall_id, e.sku_ext_code`, [tid, tid]);
   const enrolled = enrolledRows.map((r) => ({ mall_id: r.mall_id, sku_ext_code: r.sku_ext_code || null, product_id: r.product_id || null, count: toNum(r.enrolled_count) }));
-  const data = { generated_at: Date.now(), row_count: out.length, rows: out, enrolled };
+  // 聚合成「每商品一行」概览(店×货号),内嵌精简活动明细 —— 前端不再传 4000 行明细、不再本地聚合。
+  // 去重规则、best_margin/act_count 口径与前端原 actView+actProductView 完全一致(平移到后端)。
+  const enrMap = new Map();
+  for (const e of enrolled) if (e.sku_ext_code) enrMap.set(`${e.mall_id}|${e.sku_ext_code}`, e.count);
+  const seen = new Set();
+  const pmap = new Map();
+  for (const r of out) {
+    if (!r.sku_ext_code) continue; // 无货号的活动表头噪声行不进概览
+    const dk = `${r.store_code || r.mall_id}|${r.sku_ext_code}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
+    if (seen.has(dk)) continue; seen.add(dk); // 同 货号+活动+申报价+参考价 完全重复只留一条
+    const pkey = `${r.store_code || r.mall_id}|${r.sku_ext_code}`;
+    let e = pmap.get(pkey);
+    if (!e) {
+      e = { key: pkey, mall_id: r.mall_id, store_code: r.store_code, mall_name: r.mall_name,
+        sku_ext_code: r.sku_ext_code, product_id: r.product_id, skc_id: r.skc_id,
+        product_name: r.product_name, thumb: r.thumb,
+        act_count: 0, pending_count: 0, best_margin: null, best_profit: null,
+        enrolled_count: enrMap.get(`${r.mall_id}|${r.sku_ext_code}`) || 0, kinds: [], activities: [] };
+      pmap.set(pkey, e);
+    }
+    if (!e.product_name && r.product_name) e.product_name = r.product_name;
+    if (!e.thumb && r.thumb) e.thumb = r.thumb;
+    if (!e.product_id && r.product_id) e.product_id = r.product_id;
+    if (!e.skc_id && r.skc_id) e.skc_id = r.skc_id;
+    if (r.kind && !e.kinds.includes(r.kind)) e.kinds.push(r.kind);
+    // 内嵌精简明细(报名弹窗/今日待办/最小库存用):去掉 store/mall/sku 等可从父 product 取的冗余字段
+    e.activities.push({ activity_id: r.activity_id, kind: r.kind, title: r.title, status: r.status,
+      activity_type: r.activity_type, sku_id: r.sku_id, signup_price: r.signup_price,
+      suggested_price: r.suggested_price, price_diff: r.price_diff, activity_stock: r.activity_stock,
+      cost: r.cost, end_at: r.end_at });
+  }
+  for (const e of pmap.values()) {
+    const ids = new Set(), pend = new Set();
+    for (const a of e.activities) {
+      if (a.activity_id) ids.add(a.activity_id); else pend.add(a.title || "");
+      const ref = a.suggested_price != null ? a.suggested_price : a.signup_price; // 参考价:优先活动参考价
+      if (ref != null && a.cost != null && ref > 0) {
+        const margin = (ref - a.cost) / ref;
+        if (e.best_margin == null || margin > e.best_margin) { e.best_margin = margin; e.best_profit = ref - a.cost; }
+      }
+    }
+    e.act_count = ids.size; e.pending_count = pend.size;
+  }
+  const products = [...pmap.values()].sort((a, b) => {
+    const s = (a.store_code || a.mall_id).localeCompare(b.store_code || b.mall_id); if (s) return s;
+    return b.act_count - a.act_count; // 同店内可报活动多的在前
+  });
+  const data = { generated_at: Date.now(), product_count: products.length, products, enrolled };
   _activityCache.set(key, { data, ts: Date.now() });
   return data;
 }
