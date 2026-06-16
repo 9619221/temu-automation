@@ -174,6 +174,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:batch-collect", params),
     batchCollectStop: () =>
       ipcRenderer.invoke("automation:batch-collect-stop"),
+    batchCollectStatus: () =>
+      ipcRenderer.invoke("automation:batch-collect-status"),
     onBatchCollectProgress: (handler) => {
       const channel = "automation:batch-collect-progress";
       const listener = (_event, payload) => handler(payload);

@@ -70,6 +70,12 @@ function batchTaskLabel(key: string): string {
   return BATCH_TASKS.find((t) => t.key === key)?.label || BATCH_TASK_EXTRA_LABELS[key] || key;
 }
 
+// 进度文案：恢复（查 status）与实时（广播）两条路径共用，保证措辞一致。
+function describeBatchProgress(p: { current?: number; total?: number; tag?: string; accLabel?: string; uploaded?: number }): string {
+  if (!p.tag) return `准备按店铺顺序采集 ${p.total || 0} 店...`;
+  return `正在采集第 ${p.current}/${p.total} 店：${p.tag}（账号 ${p.accLabel || "-"}） · 已上报 ${p.uploaded || 0} 项`;
+}
+
 interface BatchTaskStats {
   success: number;
   error: number;
@@ -165,6 +171,61 @@ function BatchCollectSection() {
 
   useEffect(() => { loadMalls(); }, [loadMalls]);
 
+  // 采集状态恢复 + 实时监听：采集真正跑在主进程后台，与本页面生命周期无关。
+  // 进页面先查一次后台真实状态（在跑就恢复进度、跑完就恢复结果），并常驻监听后台广播。
+  // 这样切走再回来、甚至刷新窗口，都能续上正在进行的采集，而不是看到一个空白重置的页面。
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    let alive = true;
+
+    (async () => {
+      try {
+        const st = await api?.automation?.batchCollectStatus?.();
+        if (!alive || !st?.ok || !st.state) return;
+        const s = st.state;
+        if (s.running) {
+          setCollecting(true);
+          setStartedAt(s.startedAt || null);
+          setProgress({ current: s.current || 0, total: s.total || 0, currentMall: describeBatchProgress(s) });
+        } else if (s.lastResult) {
+          setResult(s.lastResult);
+          if (s.startedAt) setStartedAt(s.startedAt);
+        }
+      } catch { /* ignore */ }
+    })();
+
+    const off = api?.automation?.onBatchCollectProgress?.((p: any) => {
+      if (!p) return;
+      if (p.phase === "done") {
+        setCollecting(false);
+        setStopping(false);
+        setProgress(null);
+        const r = p.lastResult;
+        if (r) {
+          if (r.success) {
+            setResult(r);
+            setError(null);
+            const taskSummary = Object.entries(r.stats?.tasks || {})
+              .map(([k, sv]: [string, any]) => `${batchTaskLabel(k)}: ${sv.success}店/${sv.totalRecords}条`)
+              .join("，");
+            const uncovered = r.uncoveredStores?.length || 0;
+            if (uncovered === 0) message.success(`批量采集完成：${taskSummary}`);
+            else message.warning(`采集完成，${uncovered} 个店铺未覆盖。${taskSummary}`);
+          } else {
+            setError(r.error || "未知错误");
+            if (r.stats) setResult(r);
+            message.warning(r.error || "批量采集失败");
+          }
+        }
+        return;
+      }
+      setCollecting(true);
+      setProgress({ current: p.current || 0, total: p.total || 0, currentMall: describeBatchProgress(p) });
+    });
+
+    return () => { alive = false; if (typeof off === "function") off(); };
+  }, []);
+
   const handleToggle = (key: BatchTaskKey, checked: boolean) => {
     setSelectedTasks((prev) => checked ? [...prev, key] : prev.filter((k) => k !== key));
   };
@@ -181,7 +242,7 @@ function BatchCollectSection() {
     setSelectedMallIds(checked ? new Set(mallList.map((m) => m.mall_id)) : new Set());
   }, [mallList]);
 
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(() => {
     const batchCollect = window.electronAPI?.automation?.batchCollect;
     if (typeof batchCollect !== "function") {
       message.warning("当前版本不支持批量采集，请升级桌面端");
@@ -204,57 +265,27 @@ function BatchCollectSection() {
       return;
     }
 
-    setCollecting(true);
     setResult(null);
     setError(null);
+    setCollecting(true);
     setStartedAt(new Date().toISOString());
     setProgress({ current: 0, total: selectedMalls.length, currentMall: `准备按店铺顺序采集 ${selectedMalls.length} 店...` });
-    // 监听 main 推送的逐店进度
-    const api = (window as any).electronAPI;
-    const offProgress = api?.automation?.onBatchCollectProgress?.((payload: any) => {
-      if (!payload) return;
-      setProgress({
-        current: payload.current || 0,
-        total: payload.total || selectedMalls.length,
-        currentMall: `正在采集第 ${payload.current}/${payload.total} 店：${payload.tag || ""}（账号 ${payload.accLabel || "-"}） · 已上报 ${payload.uploaded || 0} 项`,
-      });
-    });
 
-    try {
-      const resp = await batchCollect({
-        tasks: selectedTasks,
-        selectedMalls,
-        startDate: dateRange[0].format("YYYY-MM-DD"),
-        endDate: dateRange[1].format("YYYY-MM-DD"),
-      });
-
-      if (resp?.success) {
-        setResult(resp);
-        const tasks = resp.stats?.tasks || {};
-        const taskSummary = Object.entries(tasks)
-          .map(([k, s]: [string, any]) => `${batchTaskLabel(k)}: ${s.success}店/${s.totalRecords}条`)
-          .join("，");
-        const uncovered = resp.uncoveredStores?.length || 0;
-        if (uncovered === 0) {
-          message.success(`批量采集完成：${taskSummary}`);
-        } else {
-          message.warning(`采集完成，${uncovered} 个店铺未覆盖。${taskSummary}`);
-        }
-      } else {
-        setError(resp?.error || "未知错误");
-        if (resp?.stats) setResult(resp);
-        message.warning(resp?.error || "批量采集失败");
-      }
-    } catch (err) {
+    // fire-and-forget：采集跑在主进程后台，逐店进度与最终结果都由常驻监听（main 广播）驱动，
+    // 这里不 await 结果做 setState——否则页面切走/重建后会在已卸载组件上更新、且拿不到结果。
+    batchCollect({
+      tasks: selectedTasks,
+      selectedMalls,
+      startDate: dateRange[0].format("YYYY-MM-DD"),
+      endDate: dateRange[1].format("YYYY-MM-DD"),
+    }).catch((err: any) => {
+      // 仅兜底「启动即异常」（IPC 调用本身抛）；正常完成/业务失败走广播的 done 分支。
       const detail = err instanceof Error ? err.message : String(err);
       setError(detail);
+      setCollecting(false);
+      setProgress(null);
       message.warning(`批量采集异常：${detail}`);
-    }
-
-    if (typeof offProgress === "function") offProgress();
-    setCollecting(false);
-    setStopping(false);
-    setProgress(null);
+    });
   }, [selectedTasks, mallList, selectedMallIds, dateRange]);
 
   const handleStop = useCallback(async () => {

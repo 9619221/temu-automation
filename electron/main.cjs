@@ -164,6 +164,31 @@ let workerStartTargetAiImageServer = "";
 // 批量采集「停止」标志（模块级，便于 sendCmd 在停止期间不自动重启 worker 重采）。
 // 前端点停止 → 置 true → ① 强制杀 worker 进程中断当前店；② sendCmd 不再自动重启重试。
 let _batchCollectStopRequested = false;
+// 批量采集「全局状态」（模块级真相源）。采集跑在主进程后台，与前端页面生命周期无关；
+// 前端页面切走会被卸载、state 清零，但这里始终保留进度，页面重建时查 batch-collect-status 即可恢复。
+let _batchCollectState = {
+  running: false,
+  current: 0,
+  total: 0,
+  tag: "",
+  accLabel: "",
+  uploaded: 0,
+  inserted: 0,
+  startedAt: null,
+  finishedAt: null,
+  lastResult: null,   // 采集完成（或停止）后的完整结果对象，供页面重建后恢复结果卡片
+  lastError: null,
+};
+// 进度/完成事件「广播给所有窗口」（取代原来只发给发起请求那个 webContents 的做法），
+// 同时把 payload 合并进全局状态，这样无论哪个页面在前台、或页面刚重建，都能拿到最新进度。
+function emitBatchCollect(payload) {
+  try {
+    _batchCollectState = { ..._batchCollectState, ...payload };
+    for (const win of BrowserWindow.getAllWindows()) {
+      try { win.webContents.send("automation:batch-collect-progress", payload); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
 const AUTO_PRICING_TASKS_KEY = "temu_auto_pricing_tasks";
 const AUTO_PRICING_TASK_LIMIT = 20;
 const CREATE_HISTORY_KEY = "temu_create_history";
@@ -4610,6 +4635,12 @@ ipcMain.handle("automation:batch-collect-stop", async () => {
   return { ok: true };
 });
 
+// 批量采集「状态查询」：前端进入页面时调一次，若 running 则恢复进度条、若有 lastResult 则恢复结果卡片。
+// 这是「切页面/刷新窗口后还能续上」的关键——状态真相源在主进程，不依赖前端 state。
+ipcMain.handle("automation:batch-collect-status", async () => {
+  return { ok: true, state: _batchCollectState };
+});
+
 ipcMain.handle("automation:batch-collect", async (_e, params) => {
   // 按店铺顺序逐店采集：照你选的店一个一个来。
   // 每个店：查映射表得到归属账号 → 关浏览器 → 新浏览器登录账号 → 采这个店 → 入库 → 关浏览器 → 下一个店。
@@ -4622,6 +4653,15 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
   const startDate = typeof params?.startDate === "string" ? params.startDate : "";
   const endDate = typeof params?.endDate === "string" ? params.endDate : "";
   console.error(`[batch-collect] 逐店采集: 选中 ${selectedMalls.length} 店（按店铺顺序）, 任务=${tasks.join(",")}, 结算范围=${startDate || "-"}~${endDate || "-"}`);
+
+  // 标记「采集开始」并广播：写入全局真相源，前端无论是否在前台都能据此恢复进度。
+  emitBatchCollect({
+    running: true, phase: "running",
+    current: 0, total: selectedMalls.length, tag: "", accLabel: "",
+    uploaded: 0, inserted: 0,
+    startedAt: new Date().toISOString(), finishedAt: null,
+    lastResult: null, lastError: null,
+  });
 
   // 读映射表：mall_id -> accountId
   const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
@@ -4714,16 +4754,15 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
       for (const key of Object.keys(mergedTasks[tk])) mergedTasks[tk][key] += s[key] || 0;
     }
 
-    try {
-      _e.sender.send("automation:batch-collect-progress", {
-        current: i + 1, total: selectedMalls.length, tag, accLabel: accName,
-        uploaded: totalUploaded, inserted: totalInserted,
-      });
-    } catch { /* ignore */ }
+    emitBatchCollect({
+      running: true, phase: "running",
+      current: i + 1, total: selectedMalls.length, tag, accLabel: accName,
+      uploaded: totalUploaded, inserted: totalInserted,
+    });
   }
 
   console.error(`[batch-collect] ${stoppedByUser ? "已暂停" : "全部完成"}: 已采 ${storesCollected}/${selectedMalls.length} 店, 入库 ${totalInserted}, 上报 ${totalUploaded}${unmappedStores.length ? `, ${unmappedStores.length} 店无归属(${unmappedStores.join(",")})` : ""}`);
-  return {
+  const result = {
     success: true,
     stoppedByUser,
     stats: { totalStores: selectedMalls.length, totalAccounts: allCreds.length, accountsUsed: storesCollected, tasks: mergedTasks },
@@ -4734,6 +4773,15 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
     uncoveredStores: [...unmappedStores, ...failedStores],
     failedAccounts: failedStores,
   };
+  // 广播「采集完成」：清 running、落 lastResult。前端常驻监听据 phase==="done" 收尾，
+  // 页面即使在采集期间被切走、重建，也能靠这条广播或随后查 status 拿到最终结果。
+  emitBatchCollect({
+    running: false, phase: "done",
+    finishedAt: new Date().toISOString(),
+    uploaded: totalUploaded, inserted: totalInserted,
+    lastResult: result, lastError: null,
+  });
+  return result;
 });
 
 // ===== 店铺映射表（手动指定「哪个店归哪个账号」，采集时按它精准登账号）=====
