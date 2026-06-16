@@ -3256,6 +3256,11 @@ const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // 读运营报表物化缓存(erp_report_cache,由 refresh-ops-reports cron 预聚合)。
 // 命中返回解析后的数据,否则 null;表不存在/解析失败均静默回退实时计算(保证正确性)。
+//
+// 必须用传入的主连接直接读 —— 与 getProductPanelFast 同款。
+// 早期错用「新建独立只读连接」读 erp_report_cache,在大 WAL(几百MB未 checkpoint)下
+// 读不到 cron 子进程刚写入、仍滞留 WAL 的最新行(独立连接快照看不到),导致恒 miss 走实时;
+// 而主连接(服务长连接)能看到 WAL 最新行,故 product-panel 一直 9ms 命中。
 function _readOpsReportCache(db, cacheKey) {
   try {
     const row = db.prepare("SELECT payload_json, updated_at FROM erp_report_cache WHERE cache_key = ?").get(cacheKey);
@@ -3264,7 +3269,7 @@ function _readOpsReportCache(db, cacheKey) {
       d.cached_at = row.updated_at || null;
       return d;
     }
-  } catch (e) { /* 实时兜底 */ }
+  } catch (e) { /* 表不存在/解析失败 → 走实时兜底 */ }
   return null;
 }
 const _reportCache = new Map();    // includeTest -> { data, ts }
@@ -4226,15 +4231,8 @@ function getProductPanelFast(db, options = {}) {
     _productPanelCache.set(ok, { data, ts: Date.now() });
     return data;
   }
-  try {
-    const key = "product_panel:" + (options.includeTest ? "1" : "0");
-    const row = db.prepare("SELECT payload_json, updated_at FROM erp_report_cache WHERE cache_key = ?").get(key);
-    if (row && row.payload_json) {
-      const d = JSON.parse(row.payload_json);
-      d.cached_at = row.updated_at || null;
-      return d;
-    }
-  } catch (e) { /* 表不存在/解析失败 → 走实时兜底 */ }
+  const mat = _readOpsReportCache(db, "product_panel:" + (options.includeTest ? "1" : "0"));
+  if (mat) return mat;
   return buildProductPanel(db, options);
 }
 
