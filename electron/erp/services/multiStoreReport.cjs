@@ -2747,8 +2747,11 @@ function querySettlementData(db, opts = {}) {
   const dict = readMallDictionary(db);
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
 
-  // 6. 合并所有出现过的 mall_id
+  // 6. 合并所有出现过的 mall_id + 字典里所有 active 店铺（确保无数据的店也显示）
   const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...stlIncByMall.keys(), ...orderByMall.keys()]);
+  for (const row of dict) {
+    if (row.status === "active") allMalls.add(row.mall_id);
+  }
 
   const stores = [];
   for (const mallId of allMalls) {

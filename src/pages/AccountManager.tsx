@@ -81,6 +81,10 @@ const statusConfig = {
 
 const STORAGE_KEY = "temu_accounts";
 
+function stripNamePrefix(name: string): string {
+  return name.replace(/^[\(（]\d{2,4}[\)）]\s*/, "").trim();
+}
+
 function maskPhone(phone: string) {
   if (!phone || phone.length < 7) return phone;
   return phone.slice(0, 3) + "****" + phone.slice(-4);
@@ -151,12 +155,14 @@ export default function AccountManager() {
   const [passwordModalAccountId, setPasswordModalAccountId] = useState<string | null>(null);
   const [passwordModalAutoLogin, setPasswordModalAutoLogin] = useState(false);
   const [accountStats, setAccountStats] = useState<Record<string, AccountStats>>({});
+  const [mallNameToCode, setMallNameToCode] = useState<Record<string, string>>({});
   const [form] = Form.useForm();
   const [passwordForm] = Form.useForm();
   const navigate = useNavigate();
 
   const api = window.electronAPI?.automation;
   const store = (window as any).electronAPI?.store;
+  const erp = window.electronAPI?.erp;
 
   // 从 CollectionContext 获取实时采集状态
   const { collecting, successCount, errorCount } = useCollection();
@@ -294,6 +300,28 @@ export default function AccountManager() {
     })();
     return () => { cancelled = true; };
   }, [hydrated, activeAccountId, store]);
+
+  // 加载店铺字典：account.name → store_code 映射
+  useEffect(() => {
+    if (!erp?.reports?.mallDict) return;
+    let cancelled = false;
+    erp.reports.mallDict().then((res: any) => {
+      if (cancelled) return;
+      const malls: any[] = res?.data?.malls || res?.malls || [];
+      const map: Record<string, string> = {};
+      for (const m of malls) {
+        if (!m.store_code) continue;
+        const name = String(m.mall_name || "").trim();
+        if (name) {
+          map[name] = m.store_code;
+          const stripped = name.replace(/店铺?$/, "").trim();
+          if (stripped && stripped !== name) map[stripped] = m.store_code;
+        }
+      }
+      setMallNameToCode(map);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [erp]);
 
   // 采集完成后刷新数据
   useEffect(() => {
@@ -511,16 +539,21 @@ export default function AccountManager() {
     message.success("账号已删除");
   };
 
-  // 排序账号：活跃 > 在线 > 其它
+  const getStoreCode = (name: string) => mallNameToCode[name] || mallNameToCode[stripNamePrefix(name)];
+
+  // 排序账号：按店铺编号(store_code)升序，活跃账号置顶
   const sortedAccounts = useMemo(() =>
     accounts.slice().sort((a, b) => {
       if (a.id === activeAccountId) return -1;
       if (b.id === activeAccountId) return 1;
-      if (a.status === "online" && b.status !== "online") return -1;
-      if (b.status === "online" && a.status !== "online") return 1;
-      return 0;
+      const codeA = getStoreCode(a.name);
+      const codeB = getStoreCode(b.name);
+      if (codeA && codeB) return Number(codeA) - Number(codeB);
+      if (codeA) return -1;
+      if (codeB) return 1;
+      return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
     }),
-  [accounts, activeAccountId]);
+  [accounts, activeAccountId, mallNameToCode]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId) || null;
   const selectedAccountNeedsPasswordRepair = accountNeedsPasswordRepair(selectedAccount);
@@ -646,8 +679,13 @@ export default function AccountManager() {
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {getStoreCode(account.name) && (
+                <Tag style={{ fontSize: 11, lineHeight: "16px", padding: "0 4px", borderRadius: 4, margin: 0, fontWeight: 600, color: "#1a73e8", background: "#e8f0fe", border: "none" }}>
+                  {getStoreCode(account.name)}
+                </Tag>
+              )}
               <Text strong ellipsis style={{ fontSize: 14, maxWidth: 120 }}>
-                {account.name || "未命名店铺"}
+                {stripNamePrefix(account.name) || "未命名店铺"}
               </Text>
               {isActive && (
                 <Tag
@@ -719,7 +757,7 @@ export default function AccountManager() {
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Title level={4} style={{ margin: 0 }}>
-                    {selectedAccount.name || "未命名店铺"}
+                    {stripNamePrefix(selectedAccount.name) || "未命名店铺"}
                   </Title>
                   <Tag
                     color={status.color as string}

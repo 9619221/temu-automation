@@ -1662,7 +1662,8 @@ export default function MultiStoreReport() {
             loading={stlLoading}
             columns={[
               { title: "店铺", dataIndex: "store", key: "store", width: 120, fixed: "left",
-                render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
+                render: (v: string) => <Typography.Text strong>{v}</Typography.Text>,
+                sorter: (a, b) => a.store.localeCompare(b.store, "zh-CN", { numeric: true }) },
               { title: "销量", dataIndex: "qty", key: "qty", width: 80, align: "right",
                 render: (v: number, r: SettlementRow) => (
                   <Tooltip title={settlementQtyTooltip(r)}>
