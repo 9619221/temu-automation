@@ -1,15 +1,10 @@
 const { parentPort, workerData } = require('worker_threads');
-const Database = require('better-sqlite3');
 const ipc = require('./ipc.cjs');
+const { openErpDatabaseReadonly } = require('../db/connection.cjs');
 
 const { dbPath, index } = workerData;
-const db = new Database(dbPath, { readonly: true });
-db.pragma('journal_mode = WAL');
-db.pragma('query_only = ON');
-db.pragma('busy_timeout = 10000');
-db.pragma('synchronous = NORMAL');
-db.pragma('foreign_keys = ON');
-db.__erpDbPath = dbPath;
+// 复用统一的只读连接装配，pragma 逻辑单一来源（含「只读不可设 journal_mode」的修复）。
+const db = openErpDatabaseReadonly(dbPath);
 
 ipc.initErpReadonly(db);
 

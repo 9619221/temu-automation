@@ -20,10 +20,22 @@ function _purchaseWbCacheKey(payload, user) {
   return key.length > 256 ? crypto.createHash("md5").update(key).digest("hex") : key;
 }
 function _clearPurchaseWbCache() { _purchaseWbCache.clear(); }
+// 透传快路是否启用：查询池开 + 未启用店铺数据隔离（store-scope 需对象出口裁剪，与字符串透传互斥）。
+// 启动期常量级判断，保证同进程缓存只用一种格式（透传存 {json}，对象路径存 {data}），不混。
+function _poolStringTransportEnabled() {
+  const poolOn = ["1", "true", "on", "yes"].includes(String(process.env.ERP_QUERY_POOL || "").toLowerCase());
+  return poolOn && process.env.ENFORCE_STORE_SCOPE !== "1";
+}
 async function prewarmPurchaseWorkbench(getPurchaseWorkbenchFn) {
   const payload = { limit: 2000, includeRequestDetails: false, includeOptions: false, include1688Meta: false };
   const cacheKey = _purchaseWbCacheKey(payload, null);
   const workbench = await getPurchaseWorkbenchFn(payload);
+  // 缓存格式必须与路由读取端一致：透传快路读 {json}，对象路径读 {data}。
+  if (_poolStringTransportEnabled()) {
+    const json = '{"ok":true,"workbench":' + JSON.stringify(workbench) + '}';
+    _purchaseWbCache.set(cacheKey, { json, ts: Date.now(), len: json.length });
+    return json.length;
+  }
   const body = { ok: true, workbench };
   const bodyText = JSON.stringify(body);
   _purchaseWbCache.set(cacheKey, { data: body, ts: Date.now(), len: bodyText.length });
@@ -1141,6 +1153,42 @@ function writeJson(res, statusCode, payload, headers = {}) {
   respHeaders["Content-Length"] = buf.length;
   res.writeHead(statusCode, respHeaders);
   res.end(buf);
+}
+
+// 与 writeJson 同款响应头，但入参已是序列化好的 JSON 字符串（worker 出串、主线程拼接得到），
+// 且用「异步 gzip」(libuv 线程池) 代替 gzipSync —— 压缩 ~18MB 不再阻塞主线程事件循环
+// （实测同步 gzip 18MB ≈ 170ms，是透传后主线程剩余的最大单项开销）。
+// 仅用于已确认无需 store-scope 出口裁剪的透传快路（裁剪需对象，见 /api/purchase/workbench）。
+function writeRawJsonGzip(res, statusCode, jsonStr, headers = {}) {
+  const respHeaders = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Device-Id",
+    "X-Content-Type-Options": "nosniff",
+    ...headers,
+  };
+  const buf = Buffer.from(jsonStr);
+  const acceptEnc = String(res.req?.headers?.["accept-encoding"] || "").toLowerCase();
+  if (buf.length >= 4096 && acceptEnc.includes("gzip")) {
+    zlib.gzip(buf, (err, gz) => {
+      if (err) {
+        respHeaders["Content-Length"] = buf.length;
+        res.writeHead(statusCode, respHeaders);
+        res.end(buf);
+        return;
+      }
+      respHeaders["Content-Encoding"] = "gzip";
+      respHeaders["Vary"] = "Accept-Encoding";
+      respHeaders["Content-Length"] = gz.length;
+      res.writeHead(statusCode, respHeaders);
+      res.end(gz);
+    });
+  } else {
+    respHeaders["Content-Length"] = buf.length;
+    res.writeHead(statusCode, respHeaders);
+    res.end(buf);
+  }
 }
 
 function writeText(res, statusCode, body, headers = {}) {
@@ -3654,6 +3702,9 @@ function createRequestHandler(options = {}) {
     getQcWorkbench = _wrapPool("qc_workbench", getQcWorkbench);
     getOutboundWorkbench = _wrapPool("outbound_workbench", getOutboundWorkbench);
   }
+  // purchase/workbench 透传快路开关（启动期定）：池开 + 无 store-scope 时，主路由直接用
+  // worker 出的 JSON 字符串拼接响应 + 异步 gzip，跳过主线程 parse/stringify/gzipSync。
+  const purchaseStringTransport = !!queryPool && _poolStringTransportEnabled();
   const listWorkItems = options.listWorkItems || (() => []);
   const getWorkItemStats = options.getWorkItemStats || (() => ({
     total: 0,
@@ -5754,8 +5805,67 @@ async function handleRequest({
       const payload = await readOptionalPayload(req);
       const cacheKey = _purchaseWbCacheKey(payload, session.user);
 
+      if (purchaseStringTransport) {
+        // —— 透传快路：worker 出 workbench JSON 字符串 → 主线程字符串拼接（无大对象 parse/stringify）
+        //    → 异步 gzip（不占事件循环）。pool 自带背压并发，去掉串行门。store-scope 已确认未启用。
+        const cached = _purchaseWbCache.get(cacheKey);
+        if (cached && cached.json) {
+          const age = Date.now() - cached.ts;
+          if (age < PURCHASE_WB_CACHE_TTL_MS) {
+            writeRawJsonGzip(res, 200, cached.json);
+            console.error(`[purchase/workbench] CACHE_HIT t=${Date.now() - __wbT0}ms bodyLen=${cached.len}`);
+            return;
+          }
+          if (age < PURCHASE_WB_STALE_TTL_MS) {
+            writeRawJsonGzip(res, 200, cached.json);
+            console.error(`[purchase/workbench] STALE_HIT age=${age}ms t=${Date.now() - __wbT0}ms`);
+            if (!_purchaseWbInflight.has(cacheKey)) {
+              const bgPromise = queryPool.run("purchase_workbench", { ...payload, user: session.user })
+                .then((wbStr) => {
+                  const json = '{"ok":true,"workbench":' + wbStr + '}';
+                  _purchaseWbCache.set(cacheKey, { json, ts: Date.now(), len: json.length });
+                  console.error(`[purchase/workbench] BG_REVALIDATE bodyLen=${json.length}`);
+                  return json;
+                })
+                .catch((e) => console.error(`[purchase/workbench] BG_REVALIDATE fail: ${e?.message || e}`))
+                .finally(() => _purchaseWbInflight.delete(cacheKey));
+              _purchaseWbInflight.set(cacheKey, bgPromise);
+            }
+            return;
+          }
+        }
+
+        let jsonPromise = _purchaseWbInflight.get(cacheKey);
+        if (!jsonPromise) {
+          jsonPromise = queryPool.run("purchase_workbench", { ...payload, user: session.user })
+            .then((wbStr) => {
+              const json = '{"ok":true,"workbench":' + wbStr + '}';
+              _purchaseWbCache.set(cacheKey, { json, ts: Date.now(), len: json.length });
+              console.error(`[purchase/workbench] POOL_COMPUTE t=${Date.now() - __wbT0}ms bodyLen=${json.length}`);
+              return json;
+            })
+            .finally(() => _purchaseWbInflight.delete(cacheKey));
+          _purchaseWbInflight.set(cacheKey, jsonPromise);
+        } else {
+          console.error(`[purchase/workbench] DEDUP waiting on inflight key`);
+        }
+        let json;
+        try {
+          json = await jsonPromise;
+        } catch (error) {
+          // 池故障兜底：退回主线程对象路径，保证不因池异常给前端报错。
+          console.error(`[purchase/workbench] POOL fail, fallback main thread: ${error?.message || error}`);
+          const workbench = await getPurchaseWorkbench({ ...payload, user: session.user });
+          writeJson(res, 200, { ok: true, workbench });
+          return;
+        }
+        writeRawJsonGzip(res, 200, json);
+        return;
+      }
+
+      // —— 对象路径（无池/降级，或 store-scope 启用需 writeJson 出口裁剪）：保持原逻辑。
       const cached = _purchaseWbCache.get(cacheKey);
-      if (cached) {
+      if (cached && cached.data) {
         const age = Date.now() - cached.ts;
         if (age < PURCHASE_WB_CACHE_TTL_MS) {
           writeJson(res, 200, cached.data);

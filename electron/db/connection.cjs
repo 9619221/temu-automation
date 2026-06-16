@@ -41,15 +41,12 @@ function openErpDatabaseReadonly(dbPathOrOptions = {}) {
   const dbPath = typeof dbPathOrOptions === "string"
     ? dbPathOrOptions
     : getErpDatabasePath(dbPathOrOptions);
+  // 只读连接：不要设 journal_mode（改 DB header 是写操作，只读连接会抛 SQLITE_READONLY；
+  // WAL 模式由主连接维护，只读连接打开时自动继承）。也不碰 wal_autocheckpoint（checkpoint
+  // 是主连接的事）。只保留对只读有意义的两项：query_only 强化只读约束、busy_timeout 防读阻塞。
   const db = new Database(dbPath, { readonly: true });
-  db.pragma("journal_mode = WAL");
   db.pragma("query_only = ON");
   db.pragma("busy_timeout = 10000");
-  db.pragma("synchronous = NORMAL");
-  db.pragma("foreign_keys = ON");
-  if (process.env.ERP_WAL_AUTOCHECKPOINT === "0") {
-    db.pragma("wal_autocheckpoint = 0");
-  }
   db.__erpDbPath = dbPath;
   return db;
 }
