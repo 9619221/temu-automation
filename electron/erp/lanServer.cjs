@@ -10,6 +10,26 @@ const DEFAULT_BIND_ADDRESS = "0.0.0.0";
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+const PURCHASE_WB_CACHE_TTL_MS = 30_000;
+const PURCHASE_WB_STALE_TTL_MS = 120_000;
+const _purchaseWbCache = new Map();
+const _purchaseWbInflight = new Map();
+let _purchaseWbGate = Promise.resolve();
+function _purchaseWbCacheKey(payload, user) {
+  const key = JSON.stringify({ p: payload, u: user?.companyId || "" });
+  return key.length > 256 ? crypto.createHash("md5").update(key).digest("hex") : key;
+}
+function _clearPurchaseWbCache() { _purchaseWbCache.clear(); }
+async function prewarmPurchaseWorkbench(getPurchaseWorkbenchFn) {
+  const payload = { limit: 2000, includeRequestDetails: false, includeOptions: false, include1688Meta: false };
+  const cacheKey = _purchaseWbCacheKey(payload, null);
+  const workbench = await getPurchaseWorkbenchFn(payload);
+  const body = { ok: true, workbench };
+  const bodyText = JSON.stringify(body);
+  _purchaseWbCache.set(cacheKey, { data: body, ts: Date.now(), len: bodyText.length });
+  return bodyText.length;
+}
+
 const ROLE_PERMISSIONS = Object.freeze({
   "/": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/users": ["admin", "manager"],
@@ -5713,17 +5733,63 @@ async function handleRequest({
     if (pathname === "/api/purchase/workbench") {
       const __wbT0 = Date.now();
       const payload = await readOptionalPayload(req);
-      const workbench = await getPurchaseWorkbench({ ...payload, user: session.user });
-      const __wbT1 = Date.now();
-      const __wbBody = { ok: true, workbench };
-      const __wbBodyText = JSON.stringify(__wbBody);
-      console.error(`[purchase/workbench] sql=${__wbT1 - __wbT0}ms bodyLen=${__wbBodyText.length}`);
-      writeJson(res, 200, __wbBody);
-      console.error(`[purchase/workbench] writeJson done t=${Date.now() - __wbT0}ms`);
+      const cacheKey = _purchaseWbCacheKey(payload, session.user);
+
+      const cached = _purchaseWbCache.get(cacheKey);
+      if (cached) {
+        const age = Date.now() - cached.ts;
+        if (age < PURCHASE_WB_CACHE_TTL_MS) {
+          writeJson(res, 200, cached.data);
+          console.error(`[purchase/workbench] CACHE_HIT t=${Date.now() - __wbT0}ms bodyLen=${cached.len}`);
+          return;
+        }
+        if (age < PURCHASE_WB_STALE_TTL_MS) {
+          writeJson(res, 200, cached.data);
+          console.error(`[purchase/workbench] STALE_HIT age=${age}ms t=${Date.now() - __wbT0}ms`);
+          if (!_purchaseWbInflight.has(cacheKey)) {
+            const bgPromise = Promise.resolve()
+              .then(() => getPurchaseWorkbench({ ...payload, user: session.user }))
+              .then((workbench) => {
+                const body = { ok: true, workbench };
+                const len = JSON.stringify(body).length;
+                _purchaseWbCache.set(cacheKey, { data: body, ts: Date.now(), len });
+                console.error(`[purchase/workbench] BG_REVALIDATE bodyLen=${len}`);
+              })
+              .finally(() => _purchaseWbInflight.delete(cacheKey));
+            _purchaseWbInflight.set(cacheKey, bgPromise);
+          }
+          return;
+        }
+      }
+
+      let resultPromise = _purchaseWbInflight.get(cacheKey);
+      if (!resultPromise) {
+        const prev = _purchaseWbGate;
+        resultPromise = prev
+          .catch(() => {})
+          .then(() => getPurchaseWorkbench({ ...payload, user: session.user }))
+          .then((workbench) => {
+            const body = { ok: true, workbench };
+            const bodyText = JSON.stringify(body);
+            _purchaseWbCache.set(cacheKey, { data: body, ts: Date.now(), len: bodyText.length });
+            console.error(`[purchase/workbench] COMPUTE sql=${Date.now() - __wbT0}ms bodyLen=${bodyText.length}`);
+            return body;
+          })
+          .finally(() => _purchaseWbInflight.delete(cacheKey));
+        _purchaseWbGate = resultPromise.catch(() => {});
+        _purchaseWbInflight.set(cacheKey, resultPromise);
+      } else {
+        console.error(`[purchase/workbench] DEDUP waiting on inflight key`);
+      }
+
+      const body = await resultPromise;
+      writeJson(res, 200, body);
+      console.error(`[purchase/workbench] done t=${Date.now() - __wbT0}ms`);
       return;
     }
 
     if (pathname === "/api/purchase/action") {
+      _clearPurchaseWbCache();
       await handlePurchaseActionRequest({
         req,
         res,
@@ -6324,4 +6390,5 @@ module.exports = {
   UNIFIED_CONSIGN_CTE,
   buildUnifiedConsignCte,
   unifiedRowToPayload,
+  prewarmPurchaseWorkbench,
 };

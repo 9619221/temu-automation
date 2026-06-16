@@ -162,4 +162,82 @@ function refreshConsignAll(db) {
   return { purchaseOrders: poRows.length, shipMerged, rows: rows.length };
 }
 
-module.exports = { refreshConsignAll, parsePurchaseOrder, buildCostMap, PO_STATUS, SHIP_STATUS };
+async function refreshConsignAllChunked(db, batchSize = 500) {
+  const costMap = buildCostMap(db);
+  const now = new Date().toISOString();
+  const byWb = new Map();
+  const poRows = db.prepare("SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source='purchase_order'").all();
+  await new Promise((r) => setImmediate(r));
+  for (let off = 0; off < poRows.length; off += batchSize) {
+    const batch = poRows.slice(off, off + batchSize);
+    for (const r of batch) {
+      let it; try { it = JSON.parse(r.raw_json); } catch { continue; }
+      const row = parsePurchaseOrder(it, costMap);
+      if (!row.so_id) continue;
+      row.mall_id = r.mall_id;
+      byWb.set(r.mall_id + "|" + row.so_id, row);
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  let shipMerged = 0;
+  const shipRows = db.prepare("SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source='ship_order'").all();
+  await new Promise((r) => setImmediate(r));
+  for (let off = 0; off < shipRows.length; off += batchSize) {
+    const batch = shipRows.slice(off, off + batchSize);
+    for (const r of batch) {
+      let it; try { it = JSON.parse(r.raw_json); } catch { continue; }
+      const wb = str(it.subPurchaseOrderSn); if (!wb) continue;
+      const row = byWb.get(r.mall_id + "|" + wb);
+      if (!row) continue;
+      row.ship_status = SHIP_STATUS[String(it.status)] || row.ship_status;
+      const dt = tsToStr(it.deliverTime); if (dt) row.deliver_time = dt;
+      if (!row.delivery_order_sn && it.deliveryOrderSn) row.delivery_order_sn = str(it.deliveryOrderSn);
+      row.express_company = it.expressCompany || null;
+      row.express_delivery_sn = str(it.expressDeliverySn);
+      row.driver_name = it.driverName || null;
+      row.plate_number = it.plateNumber || null;
+      row.deliver_package_num = num(it.deliverPackageNum);
+      row.receive_package_num = num(it.receivePackageNum);
+      row.sub_warehouse_name = it.subWarehouseName || null;
+      row.receive_address_json = it.receiveAddressInfo ? JSON.stringify(it.receiveAddressInfo) : null;
+      row.is_print_box_mark = it.isPrintBoxMark === true ? 1 : (it.isPrintBoxMark === false ? 0 : null);
+      row.delivery_method = num(it.deliveryMethod);
+      row.express_batch_sn = str(it.expressBatchSn);
+      row.predict_package_weight = num(it.predictTotalPackageWeight);
+      row.ship_create_time = tsToStr(it.deliveryOrderCreateTime);
+      row.inbound_time = tsToStr(it.inboundTime);
+      shipMerged += 1;
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  const rows = [...byWb.values()];
+  const ins = db.prepare(`
+    INSERT OR REPLACE INTO erp_temu_openapi_consign
+      (mall_id, so_id, original_po_sn, delivery_order_sn, product_id, product_skc_id, product_name,
+       sku_ext_codes, spec_names, demand_qty, delivered_qty, received_qty, amount_cents, cost_coverage,
+       sku_count, temu_status, ship_status, order_time, deliver_time, latest_ship_at,
+       receive_warehouse_name, supplier_name, items_json,
+       express_company, express_delivery_sn, driver_name, plate_number, deliver_package_num, receive_package_num,
+       sub_warehouse_name, receive_address_json, is_print_box_mark, delivery_method, express_batch_sn,
+       predict_package_weight, ship_create_time, inbound_time, category, today_can_deliver, is_first,
+       expect_arrival_at, urgency_type, synced_at)
+    VALUES
+      (@mall_id, @so_id, @original_po_sn, @delivery_order_sn, @product_id, @product_skc_id, @product_name,
+       @sku_ext_codes, @spec_names, @demand_qty, @delivered_qty, @received_qty, @amount_cents, @cost_coverage,
+       @sku_count, @temu_status, @ship_status, @order_time, @deliver_time, @latest_ship_at,
+       @receive_warehouse_name, @supplier_name, @items_json,
+       @express_company, @express_delivery_sn, @driver_name, @plate_number, @deliver_package_num, @receive_package_num,
+       @sub_warehouse_name, @receive_address_json, @is_print_box_mark, @delivery_method, @express_batch_sn,
+       @predict_package_weight, @ship_create_time, @inbound_time, @category, @today_can_deliver, @is_first,
+       @expect_arrival_at, @urgency_type, @now)`);
+  db.prepare("DELETE FROM erp_temu_openapi_consign").run();
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const chunk = rows.slice(i, i + batchSize);
+    const tx = db.transaction(() => { for (const row of chunk) ins.run({ ...row, now }); });
+    tx();
+    await new Promise((r) => setImmediate(r));
+  }
+  return { purchaseOrders: poRows.length, shipMerged, rows: rows.length };
+}
+
+module.exports = { refreshConsignAll, refreshConsignAllChunked, parsePurchaseOrder, buildCostMap, PO_STATUS, SHIP_STATUS };

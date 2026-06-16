@@ -30,6 +30,9 @@ function openErpDatabase(options = {}) {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
+  if (process.env.ERP_WAL_AUTOCHECKPOINT === "0") {
+    db.pragma("wal_autocheckpoint = 0");
+  }
   db.__erpDbPath = dbPath;
   return db;
 }

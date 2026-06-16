@@ -91,36 +91,24 @@ function buildSearchBlob(row) {
   ].filter((v) => v != null && v !== "").join("  ");
 }
 
-function main() {
-  if (!fs.existsSync(ERP_DB)) { log(`erp 库不存在：${ERP_DB}`); process.exit(1); }
+async function rebuildSnapshotInternal(db, opts = {}) {
+  const logger = opts.log || log;
   const t0 = Date.now();
-  const db = new Database(ERP_DB);
-  db.pragma("busy_timeout = 60000");
-  db.pragma("mmap_size = 0");
 
-  const cloudAttached = fs.existsSync(CLOUD_DB);
-  if (cloudAttached) {
-    db.exec(`ATTACH DATABASE '${CLOUD_DB.replace(/'/g, "''")}' AS cloud`);
-  } else {
-    log(`cloud 库不存在（${CLOUD_DB}），仅能物化 jst-only，跳过。`);
-    process.exit(0);
-  }
-
-  // 这张表纯是可重建的物化快照（脚本本就全量 DELETE+重插），结构随脚本演进可能加列
-  // （如 display_status）。旧表用 CREATE TABLE IF NOT EXISTS 不会补列，且 DDL 里引用新列的
-  // 索引会因列不存在而失败。直接 DROP 重建，保证表结构永远是最新 DDL，彻底消除列漂移。
   db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot");
   db.exec(SNAPSHOT_DDL);
-  ensureDisplayStatusColumn(db); // 兜底（DROP 重建后必有该列，此处仅防御）
+  ensureDisplayStatusColumn(db);
 
   const companies = db
     .prepare("SELECT DISTINCT company_id FROM jst_consign_deliveries WHERE company_id IS NOT NULL")
     .all()
     .map((r) => r.company_id);
   if (!companies.includes("company_default")) companies.push("company_default");
-  log(`待物化公司数=${companies.length}: ${companies.join(", ")}`);
+  logger(`待物化公司数=${companies.length}: ${companies.join(", ")}`);
 
-  const selectAll = db.prepare(`${UNIFIED_CONSIGN_CTE}\nSELECT * FROM unified`);
+  const cte = opts.cte || UNIFIED_CONSIGN_CTE;
+  const toPayload = opts.unifiedRowToPayload || unifiedRowToPayload;
+  const selectAll = db.prepare(`${cte}\nSELECT * FROM unified`);
   const rebuiltAt = t0;
 
   const replaceCompany = db.transaction((companyId) => {
@@ -140,7 +128,7 @@ function main() {
         display_status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
         order_key: row.jst_order_date || row.cloud_order_time || null,
         search_blob: buildSearchBlob(row),
-        payload_json: JSON.stringify(unifiedRowToPayload(row)),
+        payload_json: JSON.stringify(toPayload(row)),
         rebuilt_at: rebuiltAt,
       });
     }
@@ -150,23 +138,58 @@ function main() {
   let totalRows = 0;
   for (const companyId of companies) {
     const c0 = Date.now();
-    const n = replaceCompany(companyId);
+    let n = 0;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        n = replaceCompany.immediate(companyId);
+        break;
+      } catch (e) {
+        if (attempt < 2 && e && /database is locked|SQLITE_BUSY/.test(e.message)) {
+          logger(`  ${companyId}: busy, retry ${attempt + 1}/3 in 5s...`);
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
+        throw e;
+      }
+    }
     totalRows += n;
-    log(`  ${companyId}: ${n} 行, ${((Date.now() - c0) / 1000).toFixed(1)}s`);
+    logger(`  ${companyId}: ${n} 行, ${((Date.now() - c0) / 1000).toFixed(1)}s`);
+    await new Promise((r) => setImmediate(r));
   }
 
-  // 清掉已不存在公司的陈旧快照
-  db.prepare(
-    `DELETE FROM temu_consign_unified_snapshot WHERE company_id NOT IN (${companies.map(() => "?").join(",")})`,
-  ).run(...companies);
+  if (companies.length) {
+    db.prepare(
+      `DELETE FROM temu_consign_unified_snapshot WHERE company_id NOT IN (${companies.map(() => "?").join(",")})`,
+    ).run(...companies);
+  }
 
-  db.close();
-  log(`完成：共 ${totalRows} 行, 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  logger(`完成：共 ${totalRows} 行, 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return { totalRows, companies: companies.length, ms: Date.now() - t0 };
 }
 
-try {
+// 独立进程入口
+function main() {
+  if (!fs.existsSync(ERP_DB)) { log(`erp 库不存在：${ERP_DB}`); process.exit(1); }
+  const db = new Database(ERP_DB);
+  db.pragma("busy_timeout = 300000");
+  db.pragma("mmap_size = 0");
+
+  const cloudAttached = fs.existsSync(CLOUD_DB);
+  if (cloudAttached) {
+    db.exec(`ATTACH DATABASE '${CLOUD_DB.replace(/'/g, "''")}' AS cloud`);
+  } else {
+    log(`cloud 库不存在（${CLOUD_DB}），仅能物化 jst-only，跳过。`);
+    process.exit(0);
+  }
+
+  rebuildSnapshotInternal(db, { log })
+    .then(() => db.close())
+    .catch((e) => { log(`重建失败：${e && e.stack ? e.stack : e}`); process.exit(1); });
+}
+
+// 被 require 时导出，不自动执行
+if (require.main === module) {
   main();
-} catch (e) {
-  log(`重建失败：${e && e.stack ? e.stack : e}`);
-  process.exit(1);
 }
+
+module.exports = { rebuildSnapshotInternal, SNAPSHOT_DDL, buildSearchBlob };

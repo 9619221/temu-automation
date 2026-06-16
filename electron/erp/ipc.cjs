@@ -8042,7 +8042,8 @@ function addPurchaseRequestComment(db, pr, actor, body) {
   return row;
 }
 
-function getPurchaseWorkbench(params = {}) {
+const _yieldEvent = () => new Promise((r) => setImmediate(r));
+async function getPurchaseWorkbench(params = {}) {
   const { db } = requireErp();
   normalizePurchaseOrderNumbers(db);
   const accountId = optionalString(params.accountId);
@@ -8542,6 +8543,8 @@ function getPurchaseWorkbench(params = {}) {
     }
   }
 
+  await _yieldEvent();
+
   // 按需 JOIN：Step 1（取当页 po_id）与 COUNT 总数只在筛选/排序真正引用到某张表时才 JOIN。
   // line/sku 是 1:N 关联，JOIN 后会把每个采购单膨胀成「明细行数」行，强制 GROUP BY + 全量物化排序——
   // 这是翻页慢的根因。日常翻页（队列筛选 + 默认排序）不引用任何 JOIN，退化成 erp_purchase_orders 单表
@@ -8595,6 +8598,8 @@ function getPurchaseWorkbench(params = {}) {
   };
   const purchaseOrderTotal = Number(purchaseOrderTotalRow?.total || 0);
 
+  await _yieldEvent();
+
   // ===== 双步策略：先取当前页 50 个 po_id（精简 SQL），再按 IN(...) 拉详情 =====
   // 旧版把 10 个相关子查询塞进单条 SQL，导致 SQLite 先对全表 PO 跑完所有子查询、
   // 聚合、排序后才 LIMIT，触发 30+ 秒慢查询锁住 Node event loop。
@@ -8613,6 +8618,8 @@ function getPurchaseWorkbench(params = {}) {
       LIMIT @limit OFFSET @offset
     `).all(poParams);
     const orderedPoIds = idRows.map((r) => r.id);
+
+    await _yieldEvent();
 
     if (orderedPoIds.length === 0) {
       purchaseOrders = [];
@@ -8687,6 +8694,8 @@ function getPurchaseWorkbench(params = {}) {
         if (!linesByPoId.has(ln.po_id)) linesByPoId.set(ln.po_id, []);
         linesByPoId.get(ln.po_id).push(ln);
       }
+
+      await _yieldEvent();
 
       // Step 2c: mapping_count（按 po_id 聚合）
       const mappingByPoId = new Map();
@@ -8837,6 +8846,8 @@ function getPurchaseWorkbench(params = {}) {
     }
   }
 
+  await _yieldEvent();
+
   const paymentApprovals = db.prepare(`
     SELECT
       payment.*,
@@ -8935,6 +8946,8 @@ function getPurchaseWorkbench(params = {}) {
       sum + Number(item.unreadCount || 0)
     ), 0),
   };
+
+  await _yieldEvent();
 
   const skuOptions = includeOptions ? listSkus({ accountId, companyId, limit: 500 }) : undefined;
   const sku1688Sources = includeOptions ? listSku1688Sources({ accountId, limit: 500 }) : undefined;
@@ -12848,7 +12861,9 @@ function isSixDigitPurchaseOrderNo(value) {
   return /^\d{6}$/.test(String(value || "").trim());
 }
 
+let _poNumbersNormalized = false;
 function normalizePurchaseOrderNumbers(db) {
+  if (_poNumbersNormalized) return { updated: 0 };
   if (!db?.prepare) return { updated: 0 };
   const rows = db.prepare(`
     SELECT id, po_no
@@ -12865,7 +12880,7 @@ function normalizePurchaseOrderNumbers(db) {
       pending.push(row);
     }
   }
-  if (!pending.length) return { updated: 0 };
+  if (!pending.length) { _poNumbersNormalized = true; return { updated: 0 }; }
   let nextSerial = 1;
   const nextPoNo = () => {
     while (reserved.has(String(nextSerial).padStart(6, "0"))) nextSerial += 1;
@@ -12880,6 +12895,7 @@ function normalizePurchaseOrderNumbers(db) {
     for (const row of items) update.run({ id: row.id, po_no: nextPoNo() });
   });
   tx(pending);
+  _poNumbersNormalized = true;
   return { updated: pending.length };
 }
 
@@ -18273,7 +18289,7 @@ async function link1688OrderToPoAction({ db, services, payload, actor }) {
   return { purchaseOrder: toCamelRow(afterPo), order };
 }
 
-function getPurchaseWorkbenchForAction(payload = {}, actor = {}) {
+async function getPurchaseWorkbenchForAction(payload = {}, actor = {}) {
   if (payload.includeWorkbench === false || payload.skipWorkbench || payload.noWorkbench) return null;
   const action = optionalString(payload.action);
   const defaults = action === "create_pr" || action === "create_purchase_request"
@@ -18305,7 +18321,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18323,7 +18339,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     // 用 includeWorkbench:false / skipWorkbench:true 关掉。这样客户端拿到 action 响应
     // 时就有最新的 workbench，不需要再发第二次 /api/purchase/workbench（之前那次会把
     // 9MB+ 的全量 workbench 串两遍 IPC + 走 https，触发 IPC 120s 超时）。
-    const workbench = getPurchaseWorkbenchForAction(payload, actor);
+    const workbench = await getPurchaseWorkbenchForAction(payload, actor);
     const totalLen = JSON.stringify({ action, result, workbench }).length;
     console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] returning, totalBytes=${totalLen}`);
     return { action, result, workbench };
@@ -18334,7 +18350,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18344,7 +18360,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18354,7 +18370,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18364,7 +18380,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18374,7 +18390,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18384,7 +18400,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18426,7 +18442,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18436,7 +18452,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18445,7 +18461,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18455,7 +18471,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18465,7 +18481,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18475,7 +18491,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18496,7 +18512,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18547,7 +18563,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench: await getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -18713,7 +18729,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   return {
     action,
     result,
-    workbench: getPurchaseWorkbenchForAction(payload, actor),
+    workbench: await getPurchaseWorkbenchForAction(payload, actor),
   };
 }
 
@@ -24143,4 +24159,5 @@ module.exports = {
   resetScheduledOrderSyncState,
   runScheduledMessageReprocess,
   processSettlementBatchItems,
+  getPurchaseWorkbench,
 };

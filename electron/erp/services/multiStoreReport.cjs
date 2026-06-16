@@ -4885,7 +4885,18 @@ function buildPipelineOverviewFast(db, options = {}) {
       SELECT mall_id, product_id, MAX(compliance_status) cs
         FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
        GROUP BY mall_id, product_id`, [tid])) {
-      compMap.set(c.mall_id + "|" + c.product_id, c.cs || null);
+      compMap.set(c.mall_id + "|" + c.product_id, { status: c.cs || null, details: [] });
+    }
+    // 违规风险明细(risk_type=violation_goods)按商品聚合
+    for (const v of optionalAllLocal(db, `
+      WITH lr AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_operation_risk_snapshot WHERE tenant_id = ? AND risk_type = 'violation_goods' GROUP BY mall_id)
+      SELECT r.mall_id, r.product_id, r.risk_title, r.severity, r.risk_status
+        FROM cloud.temu_operation_risk_snapshot r JOIN lr ON lr.mall_id = r.mall_id AND lr.sd = r.stat_date
+       WHERE r.risk_type = 'violation_goods' AND r.product_id IS NOT NULL AND r.product_id <> ''`, [tid])) {
+      const k = v.mall_id + "|" + v.product_id;
+      let entry = compMap.get(k);
+      if (!entry) { entry = { status: "违规", details: [] }; compMap.set(k, entry); }
+      if (v.risk_title && !entry.details.includes(v.risk_title)) entry.details.push(v.risk_title);
     }
     const latestQualityBySite = new Map();
     for (const ev of optionalAllLocal(db, `
@@ -5014,7 +5025,8 @@ function buildPipelineOverviewFast(db, options = {}) {
       quality_score: quality.score == null ? null : quality.score,
       quality_site: quality.site || null,
       quality_afs_order_rate: quality.afs_order_rate == null ? null : quality.afs_order_rate,
-      compliance: compMap.get(k) || null,
+      compliance: (compMap.get(k) || {}).status || null,
+      compliance_details: (compMap.get(k) || {}).details || [],
       lifecycle_status: life,
       qc_bad: qc.bad || 0, qc_defective: qc.defective || 0,
       review_count: enr.comments == null ? 0 : enr.comments, avg_score: enr.score == null ? null : enr.score,

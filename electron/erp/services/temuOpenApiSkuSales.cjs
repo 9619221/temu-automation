@@ -97,4 +97,33 @@ function refreshSkuSalesAll(db) {
   return { records: recs.length, skuRows: rows.length };
 }
 
-module.exports = { refreshSkuSalesAll, parseSalesRecords };
+async function refreshSkuSalesAllChunked(db, batchSize = 500) {
+  const recs = db.prepare("SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source = 'sales'").all();
+  await new Promise((r) => setImmediate(r));
+  const allRows = [];
+  for (let i = 0; i < recs.length; i += batchSize) {
+    allRows.push(...parseSalesRecords(recs.slice(i, i + batchSize)));
+    await new Promise((r) => setImmediate(r));
+  }
+  const now = new Date().toISOString();
+  const ins = db.prepare(`
+    INSERT OR REPLACE INTO erp_temu_openapi_sku_sales
+      (mall_id, product_id, product_skc_id, product_sku_id, ext_code, title, thumb_url, category, spec_name,
+       today_sales, last7d_sales, last30d_sales, total_sales, sale_days, advice_qty, lack_quantity,
+       warehouse_stock, occupy_stock, unavailable_stock, wait_in_stock, supply_status, onsales_duration_offline, hot_tag, has_hot_sku, synced_at)
+    VALUES
+      (@mall_id, @product_id, @product_skc_id, @product_sku_id, @ext_code, @title, @thumb_url, @category, @spec_name,
+       @today_sales, @last7d_sales, @last30d_sales, @total_sales, @sale_days, @advice_qty, @lack_quantity,
+       @warehouse_stock, @occupy_stock, @unavailable_stock, @wait_in_stock, @supply_status, @onsales_duration_offline, @hot_tag, @has_hot_sku, @now)
+  `);
+  db.prepare("DELETE FROM erp_temu_openapi_sku_sales").run();
+  for (let i = 0; i < allRows.length; i += batchSize) {
+    const chunk = allRows.slice(i, i + batchSize);
+    const tx = db.transaction(() => { for (const row of chunk) ins.run({ ...row, now }); });
+    tx();
+    await new Promise((r) => setImmediate(r));
+  }
+  return { records: recs.length, skuRows: allRows.length };
+}
+
+module.exports = { refreshSkuSalesAll, refreshSkuSalesAllChunked, parseSalesRecords };
