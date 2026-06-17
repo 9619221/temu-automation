@@ -363,15 +363,6 @@ function unifiedRowDemand(row: ConsignDeliverUnifiedRow) {
   return Math.max(0, demand - delivered) || demand || 1;
 }
 
-function stockStatusColor(status?: string | null) {
-  const text = String(status || "");
-  if (!text) return "default";
-  if (/取消|cancel/i.test(text)) return "default";
-  if (/完成|已发|shipped|done|complete/i.test(text)) return "success";
-  if (/待|未|pending|wait/i.test(text)) return "gold";
-  return "processing";
-}
-
 function stockStatusCellStyle(status?: string | null): { bg: string; color: string } {
   const s = String(status || "");
   if (!s) return { bg: "#f5f5f5", color: "#bfbfbf" };
