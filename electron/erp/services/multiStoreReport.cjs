@@ -4988,7 +4988,7 @@ function buildPipelineOverviewFast(db, options = {}) {
       WITH lr AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_operation_risk_snapshot WHERE tenant_id = ? AND risk_type = 'violation_goods' GROUP BY mall_id)
       SELECT r.mall_id, r.product_id, r.risk_title, r.severity, r.risk_status
         FROM cloud.temu_operation_risk_snapshot r JOIN lr ON lr.mall_id = r.mall_id AND lr.sd = r.stat_date
-       WHERE r.risk_type = 'violation_goods' AND r.product_id IS NOT NULL AND r.product_id <> ''`, [tid])) {
+       WHERE r.tenant_id = ? AND r.risk_type = 'violation_goods' AND r.product_id IS NOT NULL AND r.product_id <> ''`, [tid, tid])) {
       const k = v.mall_id + "|" + v.product_id;
       let entry = compMap.get(k);
       if (!entry) { entry = { status: "违规", details: [] }; compMap.set(k, entry); }

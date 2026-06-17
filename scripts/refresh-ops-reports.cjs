@@ -1,21 +1,49 @@
-// 物化缓存刷新:独立 cron 进程预聚合「运营工作台」四个重报表,写入 erp_report_cache。
-// 高价限流/活动机会/违规风险/商品全景(管道总览)原本每次实时跨 12G cloud 库聚合
-// (实测稳态 60s/26s/5s/52s,缓存过期后第一个访问者吃满),这里改为后台预算好、端点直接读表(毫秒)。
-// buildXxx 内部已加「内存缓存 miss → 读 erp_report_cache」分支,本脚本负责把表喂满。
-// 用法(由 cronScheduler 串行调度,ionice -c3 nice -n19 低优先级):
-//   node scripts/refresh-ops-reports.cjs
+// 物化缓存刷新:独立 cron 进程预聚合「运营工作台」重报表,写入 erp_report_cache。
+// 优化: activity_list / high_price_flow 只跑一次 includeTest=true(超集),JS 过滤出非测试版写两个 cache key,
+// 省掉完整的第二轮 cloud 库扫描(~60-80s)。fast-path 报表(risk/qc/quality)仍双轮(本身极快)。
 const Database = require("better-sqlite3");
 const ERP_DB = process.env.ERP_DB || "/opt/temu-erp-data/erp.sqlite";
 const CLOUD_DB = process.env.CLOUD_DB || process.env.TEMU_CLOUD_DB_PATH || "/opt/temu-cloud/data/temu-cloud.sqlite";
 const db = new Database(ERP_DB);
 db.pragma("busy_timeout=60000");
 db.exec(`ATTACH '${CLOUD_DB}' AS cloud`);
+
+// 补充 cloud 索引(幂等):现有 idx 把 mall_id 放在 risk_type 前面,high_price_flow 的
+// WHERE risk_type='high_price_flow' GROUP BY mall_id, product_id 无法高效跳到 risk_type 分片。
+// 新索引列序 = (tenant_id, risk_type, mall_id, product_id, stat_date),覆盖 WHERE + GROUP BY + MAX(stat_date)。
+try {
+  db.exec(`CREATE INDEX IF NOT EXISTS cloud.idx_risk_tenant_rtype_mall_pid_date
+           ON temu_operation_risk_snapshot(tenant_id, risk_type, mall_id, product_id, stat_date)`);
+} catch (e) { console.warn("index risk_type_mall_pid:", e.message); }
+try {
+  db.exec(`CREATE INDEX IF NOT EXISTS cloud.idx_skc_tenant_skcid
+           ON skc_snapshots(tenant_id, skc_id)`);
+} catch (e) { console.warn("index skc_id:", e.message); }
+// settlement order detail: date(create_time) 表达式阻止索引命中 → 表达式索引
+try {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_settlement_od_create_date_mall
+           ON erp_temu_settlement_order_detail(date(create_time), mall_id)`);
+} catch (e) { console.warn("index settlement_od_date:", e.message); }
+// stock_order: 默认规划器选了次优索引(48s),覆盖索引让 GROUP BY mall_id 走纯索引扫描(116ms)
+try {
+  db.exec(`CREATE INDEX IF NOT EXISTS cloud.idx_stock_order_grp_mall
+           ON temu_stock_order_snapshot(tenant_id, mall_id, demand_qty, delivered_qty, temu_status)`);
+} catch (e) { console.warn("index stock_order_grp_mall:", e.message); }
+
 const svc = require("../electron/erp/services/multiStoreReport.cjs");
 const up = db.prepare(
   "INSERT INTO erp_report_cache (cache_key, payload_json, updated_at) VALUES (?, ?, datetime('now')) " +
   "ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at"
 );
 const attach = () => true;
+
+// 读测试店铺集合,用于从超集结果中过滤生成 includeTest=false 版本
+const testMalls = new Set();
+try {
+  for (const r of db.prepare("SELECT mall_id FROM erp_temu_malls WHERE status = 'test'").all()) {
+    testMalls.add(r.mall_id);
+  }
+} catch {}
 
 function mat(cacheKey, fn) {
   const t0 = Date.now();
@@ -29,19 +57,60 @@ function mat(cacheKey, fn) {
 }
 
 const t0 = Date.now();
+
+// ── 慢报表: 只跑 includeTest=true 一次,JS 过滤出 :0 版 ──
+
+// activity_list (~25s): 超集跑一次 → 过滤 test 店铺 → 写两个 cache key
+const actT0 = Date.now();
+try {
+  const actAll = svc.buildActivityList(db, { includeTest: true, attachCloudDb: attach, force: true });
+  up.run("activity_list:1", JSON.stringify(actAll));
+  console.log(new Date().toISOString(), "activity_list:1", "products=" + (actAll.product_count || "?"), (Date.now() - actT0) + "ms");
+  if (testMalls.size > 0) {
+    const filtered = { ...actAll,
+      products: actAll.products.filter(p => !testMalls.has(p.mall_id)),
+      enrolled: actAll.enrolled.filter(e => !testMalls.has(e.mall_id)),
+    };
+    filtered.product_count = filtered.products.length;
+    up.run("activity_list:0", JSON.stringify(filtered));
+    console.log(new Date().toISOString(), "activity_list:0", "products=" + filtered.product_count, "(filtered)");
+  } else {
+    up.run("activity_list:0", JSON.stringify(actAll));
+  }
+} catch (e) {
+  console.error(new Date().toISOString(), "activity_list", "FAIL", (e && e.message) || e);
+}
+
+// high_price_flow (~50s): 无 LIMIT,超集 → 过滤精确等价
+const hpfT0 = Date.now();
+try {
+  const hpfAll = svc.buildHighPriceFlowList(db, { includeTest: true, days: 14, attachCloudDb: attach, force: true });
+  up.run("high_price_flow:1:14", JSON.stringify(hpfAll));
+  console.log(new Date().toISOString(), "high_price_flow:1:14", "rows=" + hpfAll.row_count, (Date.now() - hpfT0) + "ms");
+  if (testMalls.size > 0) {
+    const filtered = { ...hpfAll, rows: hpfAll.rows.filter(r => !testMalls.has(r.mall_id)) };
+    filtered.row_count = filtered.rows.length;
+    up.run("high_price_flow:0:14", JSON.stringify(filtered));
+    console.log(new Date().toISOString(), "high_price_flow:0:14", "rows=" + filtered.row_count, "(filtered)");
+  } else {
+    up.run("high_price_flow:0:14", JSON.stringify(hpfAll));
+  }
+} catch (e) {
+  console.error(new Date().toISOString(), "high_price_flow", "FAIL", (e && e.message) || e);
+}
+
+// ── 快报表: 本身 <5s,双轮保持原样 ──
 for (const inc of [false, true]) {
   const k = inc ? "1" : "0";
   mat("risk_list:" + k, () => svc.buildRiskList(db, { includeTest: inc, attachCloudDb: attach, force: true }));
-  mat("activity_list:" + k, () => svc.buildActivityList(db, { includeTest: inc, attachCloudDb: attach, force: true }));
-  mat("high_price_flow:" + k + ":14", () => svc.buildHighPriceFlowList(db, { includeTest: inc, days: 14, attachCloudDb: attach, force: true }));
   mat("openapi_qc:" + k, () => svc.buildOpenapiQc(db, { includeTest: inc }));
   mat("quality_panel:" + k, () => svc.buildQualityPanel(db, { includeTest: inc, attachCloudDb: attach, force: true }));
 }
-// 管道总览(商品全景):内存缓存键固定 "pf" 不分 test,沿用既有行为,用 excludeTest 跑一次写单键。
+
+// 管道总览(商品全景)
 mat("pipeline_overview", () => svc.buildPipelineOverview(db, { includeTest: false, attachCloudDb: attach, force: true }));
 
-// 多店报表(buildMultiStoreReport 是 async,冷态实测 ~46s 独占单进程,故必须 cron 喂表)。
-// 只物化默认视图 multi_store:0;includeTest=1 罕用,getMultiStoreReportFast miss 时回退实时即可。
+// 多店报表(async)
 (async () => {
   const t1 = Date.now();
   try {
