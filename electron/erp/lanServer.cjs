@@ -3925,6 +3925,8 @@ function createRequestHandler(options = {}) {
       listTemuOpenApiRecordsBySource,
       validateSessionUser,
       verifyLogin,
+      queryPool,
+      purchaseStringTransport,
     }).catch((error) => {
       writeJson(res, 500, {
         ok: false,
@@ -5004,6 +5006,8 @@ async function handleRequest({
   listTemuOpenApiRecordsBySource,
   validateSessionUser,
   verifyLogin,
+  queryPool,
+  purchaseStringTransport,
 }) {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
