@@ -12,6 +12,7 @@ const REMOTE_SESSION_EXPIRED_MESSAGE = "Cloud login expired, please reconnect.";
 const HK_SERVER_URL = "https://erp.temu.chat";
 
 let userDataDir = null;
+let _cachedConfig = null;
 
 function configureClientRuntime(options = {}) {
   userDataDir = options.userDataDir || userDataDir || null;
@@ -80,6 +81,7 @@ function normalizeConfig(config = {}) {
 
 function readRuntimeConfig() {
   if (!userDataDir) return normalizeConfig();
+  if (_cachedConfig) return _cachedConfig;
   const configPath = getConfigPath();
   if (!fs.existsSync(configPath)) return normalizeConfig();
   try {
@@ -91,7 +93,8 @@ function readRuntimeConfig() {
       raw.sessionCookie = "";
       raw.currentUser = null;
     }
-    return normalizeConfig(raw);
+    _cachedConfig = normalizeConfig(raw);
+    return _cachedConfig;
   } catch {
     return normalizeConfig();
   }
@@ -105,6 +108,7 @@ function writeRuntimeConfig(nextConfig = {}) {
   });
   fs.mkdirSync(path.dirname(getConfigPath()), { recursive: true });
   fs.writeFileSync(getConfigPath(), JSON.stringify(config, null, 2), "utf8");
+  _cachedConfig = config;
   return config;
 }
 
@@ -248,29 +252,62 @@ async function remoteRequest(requestPath, options = {}) {
   if (!config.serverUrl) throw new Error("尚未配置主控端地址");
   const headers = {};
   if (config.sessionCookie) headers.Cookie = config.sessionCookie;
-  let result = null;
-  try {
-    result = await requestJson(config.serverUrl, requestPath, {
-      ...options,
-      headers: {
-        ...headers,
-        ...(options.headers || {}),
-      },
-    });
-  } catch (error) {
-    if (error?.statusCode === 401) {
-      clearClientSession();
-      const nextError = new Error(REMOTE_SESSION_EXPIRED_MESSAGE);
-      nextError.statusCode = 401;
-      nextError.payload = error.payload;
-      throw nextError;
+
+  const RETRYABLE_STATUS = new Set([502, 503, 504]);
+  const RETRYABLE_MESSAGES = ["ECONNRESET", "ETIMEDOUT", "socket hang up", "fetch failed"];
+  const MAX_ATTEMPTS = 2;
+  const RETRY_DELAY_MS = 1000;
+
+  function isRetryable(error) {
+    if (error?.statusCode && RETRYABLE_STATUS.has(error.statusCode)) return true;
+    const msg = String(error?.message || error || "");
+    return RETRYABLE_MESSAGES.some((keyword) => msg.includes(keyword));
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => { setTimeout(() => resolve(), ms); });
+  }
+
+  async function _doRequest() {
+    let result = null;
+    try {
+      result = await requestJson(config.serverUrl, requestPath, {
+        ...options,
+        headers: {
+          ...headers,
+          ...(options.headers || {}),
+        },
+      });
+    } catch (error) {
+      if (error?.statusCode === 401) {
+        clearClientSession();
+        const nextError = new Error(REMOTE_SESSION_EXPIRED_MESSAGE);
+        nextError.statusCode = 401;
+        nextError.payload = error.payload;
+        throw nextError;
+      }
+      throw error;
     }
-    throw error;
+    if (result.sessionCookie) {
+      writeRuntimeConfig({ sessionCookie: result.sessionCookie });
+    }
+    return result.payload;
   }
-  if (result.sessionCookie) {
-    writeRuntimeConfig({ sessionCookie: result.sessionCookie });
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await _doRequest();
+    } catch (error) {
+      lastError = error;
+      if (attempt < MAX_ATTEMPTS && isRetryable(error)) {
+        await delay(RETRY_DELAY_MS);
+        continue;
+      }
+      throw error;
+    }
   }
-  return result.payload;
+  throw lastError;
 }
 
 async function remoteLogin(payload = {}) {

@@ -30,6 +30,8 @@ function openErpDatabase(options = {}) {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
+  db.pragma("cache_size = -65536");
+  db.pragma("mmap_size = 268435456");
   if (process.env.ERP_WAL_AUTOCHECKPOINT === "0") {
     db.pragma("wal_autocheckpoint = 0");
   }
@@ -47,6 +49,8 @@ function openErpDatabaseReadonly(dbPathOrOptions = {}) {
   const db = new Database(dbPath, { readonly: true });
   db.pragma("query_only = ON");
   db.pragma("busy_timeout = 10000");
+  db.pragma("cache_size = -65536");
+  db.pragma("mmap_size = 268435456");
   db.__erpDbPath = dbPath;
   return db;
 }

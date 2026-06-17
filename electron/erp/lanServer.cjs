@@ -20,6 +20,75 @@ function _purchaseWbCacheKey(payload, user) {
   return key.length > 256 ? crypto.createHash("md5").update(key).digest("hex") : key;
 }
 function _clearPurchaseWbCache() { _purchaseWbCache.clear(); }
+
+// ===== 请求耗时观测（阶段0 测速仪）=====
+// 在 HTTP 包装层（res.on('finish')）统计每个 /api 端点的耗时，零侵入 handleRequest 内部上百个分支。
+// 慢请求（超过阈值）即时打一行 [REQ-SLOW]；每隔汇总间隔打一次 [REQ-PERF] 的 p50/p95 排行（按 p95 倒序）。
+// 正常请求开销 = 一次 Date.now() 差值 + Map 累加 + 环形数组写，纳秒级，可忽略。
+// 开关：ERP_REQUEST_TIMING=0 关闭；ERP_SLOW_REQUEST_MS 慢阈值(默认800)；ERP_PERF_SUMMARY_MIN 汇总间隔分钟(默认5)。
+const _reqTimingOn = process.env.ERP_REQUEST_TIMING !== "0";
+const _reqSlowMs = Math.max(1, Number(process.env.ERP_SLOW_REQUEST_MS) || 800);
+const _reqSummaryMs = Math.max(60_000, (Number(process.env.ERP_PERF_SUMMARY_MIN) || 5) * 60_000);
+const _reqSampleCap = 200; // 每端点保留最近 N 次耗时样本，用于近似 p50/p95（环形覆盖，内存恒定）
+const _reqStats = new Map(); // pathname -> { count, slow, samples:Float64Array, idx, filled }
+let _reqSummaryLast = 0;
+
+function _requestTimingEnabled() { return _reqTimingOn; }
+
+function _reqPercentile(sortedAsc, p) {
+  if (!sortedAsc.length) return 0;
+  const rank = Math.ceil((p / 100) * sortedAsc.length) - 1;
+  return Math.round(sortedAsc[Math.min(sortedAsc.length - 1, Math.max(0, rank))]);
+}
+
+function recordRequestTiming(pathname, method, ms, status) {
+  // 只统计业务接口；静态页 / favicon / OPTIONS 不进排行，避免噪音
+  if (!pathname || !pathname.startsWith("/api/")) return;
+  let s = _reqStats.get(pathname);
+  if (!s) {
+    s = { count: 0, slow: 0, samples: new Float64Array(_reqSampleCap), idx: 0, filled: 0 };
+    _reqStats.set(pathname, s);
+  }
+  s.count += 1;
+  s.samples[s.idx] = ms;
+  s.idx = (s.idx + 1) % _reqSampleCap;
+  if (s.filled < _reqSampleCap) s.filled += 1;
+  if (ms >= _reqSlowMs) {
+    s.slow += 1;
+    try { console.error(`[REQ-SLOW] ${ms}ms ${method || "?"} ${pathname} status=${status || "?"}`); } catch {}
+  }
+  _maybeFlushTimingSummary();
+}
+
+function _maybeFlushTimingSummary() {
+  const now = Date.now();
+  if (_reqSummaryLast === 0) { _reqSummaryLast = now; return; } // 首次只记起点，不在启动瞬间打空汇总
+  if (now - _reqSummaryLast < _reqSummaryMs) return;
+  _reqSummaryLast = now;
+  const rows = [];
+  let total = 0, slowTotal = 0;
+  for (const [pathname, s] of _reqStats) {
+    total += s.count; slowTotal += s.slow;
+    const arr = Array.from(s.samples.subarray(0, s.filled)).sort((a, b) => a - b);
+    rows.push({
+      pathname,
+      n: s.count,
+      slow: s.slow,
+      p50: _reqPercentile(arr, 50),
+      p95: _reqPercentile(arr, 95),
+      max: arr.length ? Math.round(arr[arr.length - 1]) : 0,
+    });
+  }
+  rows.sort((a, b) => b.p95 - a.p95);
+  try {
+    console.error(`[REQ-PERF] window~${Math.round(_reqSummaryMs / 60000)}m total=${total} slow=${slowTotal} | top by p95:`);
+    for (const r of rows.slice(0, 8)) {
+      console.error(`  ${r.pathname}  n=${r.n} p50=${r.p50}ms p95=${r.p95}ms max=${r.max}ms slow=${r.slow}`);
+    }
+  } catch {}
+  // 窗口计数清零（count/slow 反映「本窗口」）；samples 环形数组自然滚动，p50/p95/max 取最近样本
+  for (const s of _reqStats.values()) { s.count = 0; s.slow = 0; }
+}
 // 透传快路是否启用：查询池开 + 未启用店铺数据隔离（store-scope 需对象出口裁剪，与字符串透传互斥）。
 // 启动期常量级判断，保证同进程缓存只用一种格式（透传存 {json}，对象路径存 {data}），不混。
 function _poolStringTransportEnabled() {
@@ -1138,8 +1207,8 @@ function writeJson(res, statusCode, payload, headers = {}) {
       // 裁剪失败回退原 payload，不阻断响应。
     }
   }
-  const body = JSON.stringify(payload, null, 2);
-  let buf = Buffer.from(body);
+  const body = JSON.stringify(payload);
+  const buf = Buffer.from(body);
   const respHeaders = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -1151,19 +1220,27 @@ function writeJson(res, statusCode, payload, headers = {}) {
   // 0.3.25 跨海带宽优化：对 >=4KB 的 JSON 响应按 Accept-Encoding 协商 gzip。
   // 采购/商品 workbench 经常 1-4MB，gzip 后通常压到 1/5 - 1/10，跨海下载尤其受益。
   // <4KB 走 raw，避免 gzip 头部反而变大；客户端 Electron / Node http 默认带 gzip 自动解压。
+  // 0.3.83 改为异步 gzip，不阻塞事件循环。
   const acceptEnc = String(res.req?.headers?.["accept-encoding"] || "").toLowerCase();
   if (buf.length >= 4096 && acceptEnc.includes("gzip")) {
-    try {
-      buf = zlib.gzipSync(buf);
-      respHeaders["Content-Encoding"] = "gzip";
-      respHeaders["Vary"] = "Accept-Encoding";
-    } catch {
-      // 压缩失败回退 raw body
-    }
+    zlib.gzip(buf, (err, compressed) => {
+      if (!err) {
+        respHeaders["Content-Encoding"] = "gzip";
+        respHeaders["Vary"] = "Accept-Encoding";
+        respHeaders["Content-Length"] = compressed.length;
+        res.writeHead(statusCode, respHeaders);
+        res.end(compressed);
+      } else {
+        respHeaders["Content-Length"] = buf.length;
+        res.writeHead(statusCode, respHeaders);
+        res.end(buf);
+      }
+    });
+  } else {
+    respHeaders["Content-Length"] = buf.length;
+    res.writeHead(statusCode, respHeaders);
+    res.end(buf);
   }
-  respHeaders["Content-Length"] = buf.length;
-  res.writeHead(statusCode, respHeaders);
-  res.end(buf);
 }
 
 // 与 writeJson 同款响应头，但入参已是序列化好的 JSON 字符串（worker 出串、主线程拼接得到），
@@ -3764,6 +3841,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Account delete handler is not available");
   });
   const listSuppliers = options.listSuppliers || (() => []);
+  const listSupplierOptions = options.listSupplierOptions || ((params) => compactSupplierRows(listSuppliers(params)));
   const createSupplier = options.createSupplier || (() => {
     throw new Error("Supplier action handler is not available");
   });
@@ -3847,6 +3925,13 @@ function createRequestHandler(options = {}) {
   const verifyLogin = options.verifyLogin || (() => null);
 
   return (req, res) => {
+    // 阶段0 测速仪：响应发完后记一次耗时，零侵入内部分支。仅 finish（成功完成）触发，客户端中断不计。
+    if (_requestTimingEnabled()) {
+      const __reqT0 = Date.now();
+      res.on("finish", () => {
+        try { recordRequestTiming(getRequestPath(req), req.method, Date.now() - __reqT0, res.statusCode); } catch {}
+      });
+    }
     handleRequest({
       req,
       res,
@@ -3880,6 +3965,7 @@ function createRequestHandler(options = {}) {
       upsertAccount,
       deleteAccount,
       listSuppliers,
+      listSupplierOptions,
       createSupplier,
       listSkus,
       listSkuStockDetails,
@@ -4151,9 +4237,26 @@ function assertSessionRole(session, allowedRoles, actionName = "该操作") {
   }
 }
 
+function truthyPayloadFlag(value) {
+  if (value === true || value === 1) return true;
+  const text = String(value ?? "").trim().toLowerCase();
+  return text === "true" || text === "1" || text === "yes" || text === "y";
+}
+
+function compactSupplierRows(rows = []) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => ({
+      id: String(row?.id ?? row?.supplierId ?? row?.supplier_id ?? "").trim(),
+      name: String(row?.name ?? row?.supplierName ?? row?.supplier_name ?? "").trim() || undefined,
+    }))
+    .filter((row) => row.id);
+}
+
 async function buildMasterDataWorkbench({
   listAccounts,
   listSuppliers,
+  listSupplierOptions,
   listSkus,
   user,
   params = {},
@@ -4168,9 +4271,13 @@ async function buildMasterDataWorkbench({
   // 此前服务器忽略 part 三段全查全返，suppliers 4836 行 + skus 全字段同包 70MB+ 跨海必超时。
   // 不传 part 保持原全量行为。
   const part = String(params?.part || "").trim();
+  const compactSuppliers = truthyPayloadFlag(params?.compact) || truthyPayloadFlag(params?.forSelect);
+  const supplierLister = compactSuppliers && typeof listSupplierOptions === "function"
+    ? listSupplierOptions
+    : listSuppliers;
   const [accounts, suppliers, skus] = await Promise.all([
     !part || part === "accounts" ? Promise.resolve(listAccounts(scopedParams)) : Promise.resolve([]),
-    !part || part === "suppliers" ? Promise.resolve(listSuppliers(scopedParams)) : Promise.resolve([]),
+    !part || part === "suppliers" ? Promise.resolve(supplierLister(scopedParams)) : Promise.resolve([]),
     !part || part === "skus" ? Promise.resolve(listSkus(scopedParams)) : Promise.resolve([]),
   ]);
   return {
@@ -4961,6 +5068,7 @@ async function handleRequest({
   upsertAccount,
   deleteAccount,
   listSuppliers,
+  listSupplierOptions,
   createSupplier,
   listSkus,
   listSkuStockDetails,
@@ -5260,6 +5368,7 @@ async function handleRequest({
       const workbench = await buildMasterDataWorkbench({
         listAccounts,
         listSuppliers,
+        listSupplierOptions,
         listSkus,
         user: session.user,
         params: payload,
