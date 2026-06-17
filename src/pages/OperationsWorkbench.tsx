@@ -1,21 +1,21 @@
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { Alert, Button, Card, Empty, Image, Input, InputNumber, Modal, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Image, InputNumber, Modal, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
+import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, TODO_TYPE_TAG, TODO_LEVEL_TEXT, TREND_COLORS, processTarget, diagnose, fmtNum, fmtMoney, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
 import PipelineTab from "../components/PipelineTab";
-import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, useReviews, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
+import OpsCommonFilters from "../components/ops/OpsCommonFilters";
+import ReviewTab from "../components/ops/ReviewTab";
+import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
 import { useStoreScope } from "../hooks/useStoreScope";
 import { useOpsWorkbenchStore } from "../stores/opsWorkbenchStore";
-
-// 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
-const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
 
 interface SkuRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
@@ -122,17 +122,6 @@ interface QualityShopRow {
   mall_id: string; site: string; store_code: string | null; mall_name: string | null; owner: string | null;
   afs_rate_90d: number | null; avg_score_90d: number | null; expect_loss: number | null; captured_at: number | null;
 }
-// 站点标记 → 中文标签（cn=agentseller.temu.com 主站「全球」 / us=美区 / eu=欧区）
-const QUALITY_SITE_LABEL: Record<string, string> = { cn: "全球", us: "美区", eu: "欧区" };
-
-interface ReviewRow {
-  mall_id: string; site: string | null; store_code: string | null; mall_name: string | null;
-  review_id: string; product_id: string | null; product_skc_id: string | null;
-  goods_id: string | null; goods_name: string | null;
-  score: number | null; comment: string | null; comment_zh: string | null; spec_summary: string | null; category_path: string | null;
-  status: number | null; on_sale: number | null; created_at_ts: number | null;
-  is_benefit: boolean; pictures: string[];
-}
 
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
@@ -161,96 +150,6 @@ interface TodoTask {
   object: string; sub: string | null; metric: string; action: string;
   status?: "done" | "ignored" | null; __rk?: number;
 }
-const TODO_TYPE_TAG: Record<string, { c: string; t: string }> = {
-  product: { c: "orange", t: "运营" }, code: { c: "gold", t: "缺货号" }, risk: { c: "red", t: "风险" }, activity: { c: "green", t: "活动" },
-};
-const TODO_LEVEL_TEXT: Record<number, string> = { 3: "急", 2: "警", 1: "注意" };
-
-// 待办「去处理」跳转目标:备货走应用内路由(/purchase-center 采购单),其余跳 Temu 卖家后台
-// 后台深链路径取自 automation worker 实际用过的页;如需精确到违规/报名子页,改这里即可
-const SELLER_BASE = "https://agentseller.temu.com";
-const RESTOCK_LABELS = new Set(["已售罄", "即将断货", "建议补货", "售罄无销"]);
-function processTarget(t: TodoTask): { route?: string; ext?: string; label: string } {
-  if (t.type === "code") return { ext: `${SELLER_BASE}/goods/list`, label: "去后台补货号" };
-  if (t.type === "risk") return { ext: `${SELLER_BASE}/main/data-center`, label: "去后台处理" };
-  if (t.type === "activity") return { ext: `${SELLER_BASE}/main/activity-analysis`, label: "去活动中心" };
-  // product:补货类去开采购单,动销类(零动销/停销/下滑)去后台救量
-  if (RESTOCK_LABELS.has(t.typeLabel)) return { route: "/purchase-center", label: "去开采购单" };
-  return { ext: `${SELLER_BASE}/main/activity-analysis`, label: "去活动救量" };
-}
-
-const LEVEL_COLOR: Record<number, string> = { 3: "#cf1322", 2: "#d46b08", 1: "#d4b106", 0: "#3f8600" };
-const TAG_COLOR: Record<number, string> = { 3: "red", 2: "orange", 1: "gold", 0: "green" };
-
-const RISK_TYPE_LABEL: Record<string, string> = {
-  high_price_flow: "高价限流", high_price: "高价限制", violation: "违规", appeal: "申诉",
-  compliance: "合规风险", quality: "质量风险", punish: "处罚",
-};
-const SEV_COLOR: Record<string, string> = { high: "red", medium: "orange", low: "gold" };
-const SEV_TEXT: Record<string, string> = { high: "高", medium: "中", low: "低" };
-const SEV_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
-const KIND_LABEL: Record<string, string> = { activity: "活动", bidding: "竞价", coupon: "优惠券" };
-// 活动类型(activity_type)中文:用于报名弹窗区分同商品的多个活动
-const ACTIVITY_TYPE_LABEL: Record<number, string> = { 1: "限时秒杀", 5: "大促活动", 13: "官方大促", 14: "限时专属", 21: "超级秒杀", 27: "清仓甩卖", 101: "秒杀进阶", 127: "清仓进阶" };
-
-function diagnose(r: SkuRow): Diag[] {
-  const issues: Diag[] = [];
-  const hasSales = (r.last30d || 0) > 0 || (r.last7d || 0) > 0;
-  if ((r.stock || 0) <= 0) {
-    if (hasSales) issues.push({ label: "已售罄", action: "近期有销量却断货 → 立即补货", level: 3 });
-    else issues.push({ label: "售罄无销", action: "长期断货且无销量 → 确认是否下架/清理", level: 1 });
-  } else {
-    if (r.sale_days != null && r.sale_days < 7) issues.push({ label: "即将断货", action: `仅可售约 ${r.sale_days} 天 → 尽快备货`, level: 2 });
-    else if ((r.advice_qty || 0) > 0) issues.push({ label: "建议补货", action: `系统建议备货 ${r.advice_qty.toLocaleString("zh-CN")} 件`, level: 1 });
-    if ((r.last30d || 0) === 0) issues.push({ label: "零动销", action: "30 天无销量但有库存 → 清仓/优化标题/报活动", level: 2 });
-    else if ((r.last7d || 0) === 0) issues.push({ label: "近期停销", action: "30 天有销、近 7 天 0 → 查原因/报活动救量", level: 2 });
-    else {
-      const d7 = (r.last7d || 0) / 7, d30 = (r.last30d || 0) / 30;
-      if (d30 > 0 && d7 < d30 * 0.5) issues.push({ label: "销量下滑", action: "近 7 天日均不足 30 天一半 → 关注/报活动/比价", level: 1 });
-    }
-  }
-  if (!r.sku_ext_code) issues.push({ label: "缺货号", action: "Temu 后台未回填 SKU 货号,无法与 ERP 绑定 → 去卖家后台补货号", level: 1 });
-  return issues;
-}
-
-const fmtNum = (n: number | null | undefined) => (n == null ? "-" : n.toLocaleString("zh-CN"));
-const fmtMoney = (n: number | null | undefined) => (n == null ? "—" : "¥" + n.toFixed(2));
-// 评价时间戳：Temu 给的可能是秒或毫秒，统一判断后格式化为「YYYY-MM-DD HH:mm」
-const fmtReviewTime = (ts: number | null | undefined) => {
-  if (ts == null) return "—";
-  const ms = ts < 1e12 ? ts * 1000 : ts;
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "—";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
-const TREND_COLORS = ["#1a73e8", "#34a853", "#fbbc04", "#ea4335", "#a142f4", "#24c1e0", "#ff6d01", "#7c8597"];
-// 建议备货自算（Temu 的 adviceQuantity 是黑盒）：
-//   今日预估 = 今日销量 ×(早上<12点 ×2 / 下午12-18点 ×1.5 / 晚上≥18点 ×1.3)，把"截至现在"的今日销量预判成全天量
-//   日均 = max(7天日均, 今日预估)；备货天数 = 日均>50 用 7 天、否则 10 天；建议备货 = max(0, 日均 × 天数 − 总库存)
-const RESTOCK_FAST_QTY = 50;     // 日均超过此值算畅销
-const RESTOCK_DAYS_NORMAL = 10;  // 普通品备货天数
-const RESTOCK_DAYS_FAST = 7;     // 畅销品备货天数
-const calcAdvice = (today: number, last7d: number, totalStock: number, hour: number) => {
-  const daily = Math.max((last7d || 0) / 7, (today || 0) * (hour < 12 ? 2 : hour < 18 ? 1.5 : 1.3));
-  const days = daily > RESTOCK_FAST_QTY ? RESTOCK_DAYS_FAST : RESTOCK_DAYS_NORMAL;
-  return Math.max(0, Math.ceil(daily * days - (totalStock || 0)));
-};
-// 滞销判定(商品运营全景):加入站点 > 20 天,且按近 7 日均销现有可用库存还能卖 > 20 天。
-//   可售天数 = 可用库存 ÷ (近7日销量 ÷ 7);无可用库存→0(没货可滞);有货但近7日0销量→∞(永远卖不动)。
-//   口径与「建议备货」一致——SPU 聚合所有 SKU 的可用库存与近7日销量。
-const SLOW_MOVING_DAYS = 20;          // 可售天数阈值
-const SLOW_MOVING_ONLINE_DAYS = 20;   // 加入站点天数阈值
-const sellThroughDays = (r: ProductPanelRow): number => {
-  const skus = r.skus_detail || [];
-  const stock = skus.reduce((a, s) => a + (s.stock || 0), 0);
-  if (stock <= 0) return 0;
-  const daily = skus.reduce((a, s) => a + (s.last7d || 0), 0) / 7;
-  if (daily <= 0) return Infinity;
-  return stock / daily;
-};
-const isSlowMoving = (r: ProductPanelRow): boolean =>
-  (r.onsales_duration ?? 0) > SLOW_MOVING_ONLINE_DAYS && sellThroughDays(r) > SLOW_MOVING_DAYS;
 
 export default function OperationsWorkbench() {
   const owViewKey = (suffix: string) => `temu.ops-workbench.${suffix}`;
@@ -276,7 +175,6 @@ export default function OperationsWorkbench() {
   const { rows: goodsCreatedRows }: { rows: Array<{ mall_id: string; store_code: string | null }> } = useGoodsCreatedToday(activeTab === "overview");
   const { rows: qcRows, loading: qcLoading }: { rows: QcRow[]; loading: boolean } = useOpenapiQc(activeTab === "qc" || activeTab === "pipeline");
   const { rows: qualityRows, shops: qualityShops, loading: qualityLoading }: { rows: QualityRow[]; shops: QualityShopRow[]; loading: boolean } = useQualityPanel(activeTab === "quality" || activeTab === "pipeline");
-  const { rows: reviewRows, loading: reviewLoading }: { rows: ReviewRow[]; loading: boolean } = useReviews(activeTab === "review");
   const { rows: hpfRows, loading: hpfLoading }: { rows: HpfRow[]; loading: boolean } = useHighPriceFlow(activeTab === "hpf" || activeTab === "pipeline");
   const { rows: lifecycleRows, loading: lifecycleLoading }: { rows: Array<{ mall_id: string; skc_id: string; status: string }>; loading: boolean } = useLifecycle(activeTab === "overview" || activeTab === "product");
   // 字典共享:店铺健康全局只拉一次,派生 owner 映射/过滤
@@ -294,8 +192,6 @@ export default function OperationsWorkbench() {
   const [searchInput, setSearchInput] = useSessionState(owViewKey("search"), "");
   // 搜索框防抖：输入框绑 searchInput 跟手，下游多个视图过滤用防抖后的 search（变量名不变，下游无需改）。
   const search = useDebouncedValue(searchInput, 250);
-  const [scoreFilter, setScoreFilter] = useSessionState(owViewKey("scoreFilter"), "all");
-  const [regionFilter, setRegionFilter] = useSessionState(owViewKey("reviewRegion"), "all");
   const [slowFilter, setSlowFilter] = useSessionState(owViewKey("slowFilter"), "all"); // 商品运营全景:全部 / 仅看滞销
   const [onsaleDaysFilter, setOnsaleDaysFilter] = useSessionState(owViewKey("onsaleDays"), "all"); // 加入站点天数筛选
   const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
@@ -1061,42 +957,6 @@ export default function OperationsWorkbench() {
     { title: "抓包时间", dataIndex: "captured_at", width: 150, sorter: (a, b) => (a.captured_at ?? 0) - (b.captured_at ?? 0), render: (v: number | null) => v ? new Date(v).toLocaleString("zh-CN", { hour12: false }) : "—" },
   ];
 
-  const reviewColumns: ColumnsType<ReviewRow> = [
-    { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "区域", dataIndex: "site", width: 60, align: "center", render: (v: string | null) => { const m: Record<string, string> = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" }; return v ? <Tag color={v === "agentseller-us" ? "blue" : v === "agentseller-eu" ? "purple" : "green"}>{m[v] || v}</Tag> : <span style={{ color: "#bbb" }}>—</span>; } },
-    { title: "评分", dataIndex: "score", width: 96, align: "center", sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0), render: (v: number | null) => {
-      if (v == null) return <span style={{ color: "#bbb" }}>—</span>;
-      const n = Math.max(0, Math.min(5, v));
-      const color = v <= 3 ? "#cf1322" : v >= 4 ? "#3f8600" : "#d4b106";
-      return <span style={{ color, fontWeight: 600, whiteSpace: "nowrap" }}>{"★".repeat(n)}<span style={{ color: "#999", fontWeight: 400, marginLeft: 2 }}>{v}</span></span>;
-    } },
-    { title: "评论内容", dataIndex: "comment", width: 440, render: (v: string | null, r) => (
-      <div>
-        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", color: r.score != null && r.score <= 3 ? "#cf1322" : undefined }}>{(r.comment_zh || v) || <span style={{ color: "#bbb" }}>（仅评分,无文字）</span>}</div>
-        {r.is_benefit ? <Tag color="orange" style={{ marginTop: 4 }}>福利评价</Tag> : null}
-      </div>
-    ) },
-    { title: "晒图", key: "pics", width: 80, align: "center", render: (_, r) => {
-      if (!r.pictures || !r.pictures.length) return <span style={{ color: "#bbb" }}>—</span>;
-      return (
-        <Image.PreviewGroup items={r.pictures}>
-          <div style={{ position: "relative", display: "inline-block", lineHeight: 0 }}>
-            <Image src={r.pictures[0]} width={56} height={56} style={{ objectFit: "cover", borderRadius: 4 }} />
-            {r.pictures.length > 1 ? <span style={{ position: "absolute", right: 2, bottom: 2, background: "rgba(0,0,0,0.6)", color: "#fff", fontSize: 10, padding: "0 4px", borderRadius: 3, lineHeight: "15px" }}>{r.pictures.length}</span> : null}
-          </div>
-        </Image.PreviewGroup>
-      );
-    } },
-    { title: "商品", key: "goods", width: 240, render: (_, r) => (
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.goods_name || "—"}</div>
-        <div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec_summary || ""}</div>
-      </div>
-    ) },
-    { title: "类目", dataIndex: "category_path", width: 150, ellipsis: true, render: (v: string | null) => v || "—" },
-    { title: "评价时间", dataIndex: "created_at_ts", width: 140, sorter: (a, b) => (a.created_at_ts ?? 0) - (b.created_at_ts ?? 0), defaultSortOrder: "descend", render: (v: number | null) => fmtReviewTime(v) },
-  ];
-
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => <div style={{ height: "100%", display: "flex", flexDirection: "column", justifyContent: "center" }}>{formatStoreNo(v === r.mall_id ? null : v, r.mall_id)}</div> },
     { title: "商品", key: "prod", width: 410, render: (_, r) => {
@@ -1171,11 +1031,7 @@ export default function OperationsWorkbench() {
   ];
 
   const commonFilters = (extra?: React.ReactNode) => (
-    <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-      <Select size="small" style={{ width: 130 }} value={storeFilter} onChange={setStoreFilter} options={[{ value: "all", label: "全部店铺" }, ...storeOptions.map((c) => ({ value: c, label: c }))]} />
-      {extra}
-      <Input.Search size="small" allowClear placeholder="搜货号 / SKC / SPU / 标题" style={{ width: 220 }} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
-    </div>
+    <OpsCommonFilters storeFilter={storeFilter} onStoreChange={setStoreFilter} storeOptions={storeOptions} searchInput={searchInput} onSearchChange={setSearchInput} extra={extra} />
   );
 
   const qcView = useMemo(() => {
@@ -1235,29 +1091,6 @@ export default function OperationsWorkbench() {
     }
     return { total: hpfView.length, avg: cnt ? Number((sum / cnt).toFixed(1)) : null, severe, shops: shops.size };
   }, [hpfView]);
-
-  const reviewView = useMemo(() => {
-    const kw = search.trim().toLowerCase();
-    return reviewRows.filter((r) => {
-      if (!inScope(r.store_code || r.mall_id)) return false;
-      if (storeFilter !== "all" && r.store_code !== storeFilter) return false;
-      if (scoreFilter === "bad" && !(r.score != null && r.score <= 3)) return false;
-      if (scoreFilter === "good" && !(r.score != null && r.score >= 4)) return false;
-      if (scoreFilter === "pic" && !(r.pictures && r.pictures.length)) return false;
-      if (regionFilter !== "all" && r.site !== regionFilter) return false;
-      if (!kw) return true;
-      return [r.goods_name, r.comment, r.spec_summary, r.category_path, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
-    });
-  }, [reviewRows, search, storeFilter, scoreFilter, regionFilter, inScope]);
-
-  const reviewAgg = useMemo(() => {
-    let sum = 0, scored = 0, bad = 0, pic = 0;
-    for (const r of reviewView) {
-      if (r.score != null) { sum += r.score; scored += 1; if (r.score <= 3) bad += 1; }
-      if (r.pictures && r.pictures.length) pic += 1;
-    }
-    return { total: reviewView.length, avg: scored ? Number((sum / scored).toFixed(2)) : null, bad, pic };
-  }, [reviewView]);
 
   const tabItems = [
     {
@@ -1536,24 +1369,7 @@ export default function OperationsWorkbench() {
     },
     {
       key: "review", label: "评价",
-      children: (
-        <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-            <Statistic title="评价数(当前筛选)" value={reviewAgg.total} />
-            <Statistic title="平均分" value={reviewAgg.avg ?? "—"} valueStyle={{ color: reviewAgg.avg != null && reviewAgg.avg < 4 ? "#cf1322" : "#3f8600" }} suffix={reviewAgg.avg != null ? "★" : ""} />
-            <Statistic title="差评 ≤3★" value={reviewAgg.bad} valueStyle={{ color: reviewAgg.bad > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="带图评价" value={reviewAgg.pic} />
-          </div>
-          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>商品评价:运营在 Temu 后台翻看评价页时,扩展自动抓取累积(非官方 API,覆盖取决于访问情况)。默认全部评价按<b>时间倒序</b>,差评(≤3★)标红。<b>福利评价</b>是商家给返利换的好评,单独标注。</div>
-          {commonFilters(
-            <>
-              <Select size="small" style={{ width: 120 }} value={regionFilter} onChange={setRegionFilter} options={[{ value: "all", label: "全部区域" }, { value: "agentseller", label: "全球" }, { value: "agentseller-us", label: "美区" }, { value: "agentseller-eu", label: "欧区" }]} />
-              <Select size="small" style={{ width: 130 }} value={scoreFilter} onChange={setScoreFilter} options={[{ value: "all", label: "全部评分" }, { value: "bad", label: "差评 ≤3★" }, { value: "good", label: "好评 ≥4★" }, { value: "pic", label: "带图评价" }]} />
-            </>,
-          )}
-          <Table<ReviewRow> dataSource={reviewView} columns={reviewColumns} rowKey={(r) => `${r.mall_id}|${r.review_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条评价` }} scroll={{ x: 1180 }} loading={reviewLoading} />
-        </div>
-      ),
+      children: <ReviewTab active={activeTab === "review"} storeFilter={storeFilter} search={search} commonFilters={commonFilters} />,
     },
     {
       key: "stock", label: "备货在途",
