@@ -48,6 +48,7 @@ import {
   AppstoreOutlined,
   UploadOutlined,
   WarningOutlined,
+  GiftOutlined,
 } from "@ant-design/icons";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 
@@ -484,6 +485,7 @@ export default function SelectionPlaza() {
 
   // ---- 上品 Drawer 状态（全局 store 驱动）----
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [comboDrawerOpen, setComboDrawerOpen] = useState(false);
   const taskState = useSyncExternalStore(
     listingTaskStore.subscribe,
     listingTaskStore.getState,
@@ -774,6 +776,37 @@ export default function SelectionPlaza() {
     if (!selectedPoolIds.size) return;
     openListingDrawer();
   }, [selectedPoolIds.size, openListingDrawer]);
+
+  const handleOpenCombo = useCallback(() => {
+    if (selectedPoolIds.size < 2) {
+      message.warning("请至少选择 2 个商品来创建套装");
+      return;
+    }
+    setComboDrawerOpen(true);
+  }, [selectedPoolIds.size]);
+
+  const handleStartCombo = useCallback(async () => {
+    const comboProducts = poolRows.filter((r) => selectedPoolIds.has(r.goods_id));
+    if (comboProducts.length < 2) {
+      message.warning("请至少选择 2 个商品");
+      return;
+    }
+    listingTaskStore.setOnComplete(() => {
+      void loadPool();
+      void loadPoolIds();
+    });
+    try {
+      const result = await listingTaskStore.startCombo(comboProducts);
+      if (result.ok) {
+        message.success(result.message || "套装草稿已创建");
+        setSelectedPoolIds(new Set());
+      } else {
+        message.error(result.message || "套装上品失败");
+      }
+    } catch (e: any) {
+      message.error(e?.message || "套装上品失败");
+    }
+  }, [poolRows, selectedPoolIds, loadPool, loadPoolIds]);
 
   useEffect(() => {
     void loadCategories();
@@ -1085,6 +1118,14 @@ export default function SelectionPlaza() {
             >
               {selectedPoolIds.size > 0 ? `批量上品(${selectedPoolIds.size})` : "批量上品"}
             </Button>
+            <Button
+              icon={<GiftOutlined />}
+              disabled={selectedPoolIds.size < 2}
+              onClick={handleOpenCombo}
+              style={{ borderColor: selectedPoolIds.size >= 2 ? "#722ed1" : undefined, color: selectedPoolIds.size >= 2 ? "#722ed1" : undefined }}
+            >
+              {selectedPoolIds.size >= 2 ? `创建套装(${selectedPoolIds.size})` : "创建套装"}
+            </Button>
           </Space>
         </div>
       )}
@@ -1165,7 +1206,7 @@ export default function SelectionPlaza() {
       <ListingDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        mode={listingMode}
+        mode={listingMode === "combo" ? "workflow" : listingMode}
         onModeChange={(m: "classic" | "workflow") => listingTaskStore.setMode(m)}
         products={drawerProducts}
         onRemoveProduct={removeDrawerProduct}
@@ -1179,8 +1220,20 @@ export default function SelectionPlaza() {
         onReset={resetListingDrawer}
       />
 
+      {/* 套装 Drawer */}
+      <ComboDrawer
+        open={comboDrawerOpen}
+        onClose={() => setComboDrawerOpen(false)}
+        products={poolRows.filter((r) => selectedPoolIds.has(r.goods_id))}
+        running={listingRunning && listingMode === "combo"}
+        progress={listingMode === "combo" ? listingProgress : null}
+        results={listingMode === "combo" ? listingResults : []}
+        onStart={handleStartCombo}
+      />
+
       {/* 浮动进度卡片：任务运行中且 Drawer 已关闭时显示 */}
-      {listingRunning && !drawerOpen && (() => {
+      {listingRunning && !drawerOpen && !comboDrawerOpen && (() => {
+        const isCombo = listingMode === "combo";
         const t = Number(listingProgress?.total) || 0;
         const c = Number(listingProgress?.completed) || 0;
         const pct = t > 0 ? Math.round((c / t) * 100) : 0;
@@ -1189,7 +1242,7 @@ export default function SelectionPlaza() {
         const step = listingProgress?.step || "处理中";
         return (
           <div
-            onClick={() => setDrawerOpen(true)}
+            onClick={() => isCombo ? setComboDrawerOpen(true) : setDrawerOpen(true)}
             style={{
               position: "fixed", bottom: 32, right: 32, zIndex: 1050,
               background: "#fff", borderRadius: 14,
@@ -1201,12 +1254,12 @@ export default function SelectionPlaza() {
             }}
           >
             <Progress type="circle" percent={pct} size={44} strokeWidth={6}
-              strokeColor={{ '0%': '#1677ff', '100%': '#36cfc9' }}
-              format={() => <span style={{ fontSize: 12, fontWeight: 700, color: "#1677ff" }}>{pct}%</span>}
+              strokeColor={isCombo ? { '0%': '#722ed1', '100%': '#b37feb' } : { '0%': '#1677ff', '100%': '#36cfc9' }}
+              format={() => <span style={{ fontSize: 12, fontWeight: 700, color: isCombo ? "#722ed1" : "#1677ff" }}>{pct}%</span>}
             />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: "#262626", display: "flex", alignItems: "center", gap: 6 }}>
-                上品中 {c}/{t}
+                {isCombo ? "套装上品中" : `上品中 ${c}/${t}`}
                 {listingPaused && <Tag color="warning" style={{ margin: 0, fontSize: 11, lineHeight: "18px", padding: "0 4px" }}>暂停</Tag>}
               </div>
               <div style={{ fontSize: 12, color: "#8c8c8c", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1447,6 +1500,159 @@ function ListingDrawer({
           </div>
         </Space>
       )}
+    </Drawer>
+  );
+}
+
+function ComboDrawer({
+  open, onClose, products, running, progress, results, onStart,
+}: {
+  open: boolean;
+  onClose: () => void;
+  products: ProductRow[];
+  running: boolean;
+  progress: any;
+  results: any[];
+  onStart: () => void;
+}) {
+  const count = products.length;
+  const totalUsd = products.reduce((s, p) => s + (Number(p.usd_price) || 0), 0);
+  const comboCny = Math.ceil(totalUsd * 7 * 100) / 100;
+
+  const isDone = !running && progress && ["completed", "failed", "interrupted"].includes(progress.status);
+
+  return (
+    <Drawer
+      title={<span><GiftOutlined style={{ marginRight: 8, color: "#722ed1" }} />创建套装</span>}
+      placement="right"
+      width={480}
+      open={open}
+      onClose={onClose}
+      destroyOnClose={false}
+    >
+      <Space direction="vertical" size={20} style={{ width: "100%" }}>
+        {/* 套装信息 */}
+        <div>
+          <Text strong style={{ display: "block", marginBottom: 8 }}>套装商品 ({count} 件)</Text>
+          <div style={{ maxHeight: 300, overflowY: "auto" }}>
+            {products.map((p) => (
+              <div
+                key={p.goods_id}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                  borderBottom: "1px solid #f5f5f5",
+                }}
+              >
+                <img
+                  src={p.main_image}
+                  alt=""
+                  style={{ width: 48, height: 48, borderRadius: 6, objectFit: "cover", background: "#f5f5f5", flexShrink: 0 }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {p.title_zh || p.title_en || "（无标题）"}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#8c8c8c" }}>
+                    {usd(p.usd_price)} · {p.category_zh || "未分类"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 定价预览 */}
+        <Card size="small" style={{ background: "#f9f0ff", border: "1px solid #d3adf7", borderRadius: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 12, color: "#8c8c8c" }}>单品总价(USD)</div>
+              <div style={{ fontSize: 16, fontWeight: 600 }}>{usd(totalUsd)}</div>
+            </div>
+            <div style={{ fontSize: 20, color: "#d3adf7" }}>→</div>
+            <div>
+              <div style={{ fontSize: 12, color: "#8c8c8c" }}>申报价(CNY)</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#722ed1" }}>¥{comboCny.toFixed(2)}</div>
+            </div>
+          </div>
+        </Card>
+
+        {/* 进度/结果 */}
+        {running && (() => {
+          const steps = [
+            { key: "下载商品图片", label: "下载商品图片" },
+            { key: "AI生图中", label: "AI 生成 9 张详情图" },
+            { key: "上传素材", label: "上传素材到平台" },
+            { key: "创建草稿", label: "创建商品草稿" },
+          ];
+          const currentStep = progress?.step || "";
+          const currentIdx = steps.findIndex((s) => s.key === currentStep);
+          return (
+            <div style={{ padding: "8px 0" }}>
+              {steps.map((s, i) => {
+                const done = currentIdx > i;
+                const active = currentIdx === i;
+                return (
+                  <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
+                    {done ? (
+                      <CheckCircleFilled style={{ color: "#52c41a", fontSize: 18 }} />
+                    ) : active ? (
+                      <LoadingOutlined style={{ color: "#722ed1", fontSize: 18 }} />
+                    ) : (
+                      <div style={{ width: 18, height: 18, borderRadius: 9, border: "2px solid #d9d9d9" }} />
+                    )}
+                    <span style={{ fontSize: 13, fontWeight: active ? 600 : 400, color: done ? "#52c41a" : active ? "#722ed1" : "#bfbfbf" }}>
+                      {s.label}
+                    </span>
+                  </div>
+                );
+              })}
+              {progress?.message && (
+                <div style={{ fontSize: 12, color: "#8c8c8c", marginTop: 8, paddingLeft: 28 }}>{progress.message}</div>
+              )}
+            </div>
+          );
+        })()}
+
+        {isDone && results.length > 0 && (
+          <div>
+            {results.map((item: any, i: number) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+                {item.success ? (
+                  <CheckCircleFilled style={{ color: "#52c41a", fontSize: 18 }} />
+                ) : (
+                  <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 18 }} />
+                )}
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{item.name || "套装商品"}</div>
+                  <div style={{ fontSize: 12, color: item.success ? "#52c41a" : "#ff4d4f" }}>
+                    {item.message || (item.success ? "草稿已创建" : "处理失败")}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 操作按钮 */}
+        {!running && !isDone && (
+          <Button
+            type="primary"
+            block
+            size="large"
+            icon={<GiftOutlined />}
+            disabled={count < 2}
+            onClick={onStart}
+            style={{ background: "#722ed1", borderColor: "#722ed1" }}
+          >
+            生成套装（{count} 件商品）
+          </Button>
+        )}
+        {isDone && (
+          <Button block type="primary" onClick={() => { listingTaskStore.reset(); onClose(); }}>
+            完成
+          </Button>
+        )}
+      </Space>
     </Drawer>
   );
 }

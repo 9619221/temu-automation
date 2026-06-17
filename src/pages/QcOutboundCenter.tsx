@@ -379,6 +379,7 @@ function stockStatusCellStyle(status?: string | null): { bg: string; color: stri
   if (/已入库/i.test(s)) return { bg: "#389e0d", color: "#fff" };
   if (/已收货/i.test(s)) return { bg: "#08979c", color: "#fff" };
   if (/已发货|已发|shipped/i.test(s)) return { bg: "#16a34a", color: "#fff" };
+  if (/发货中/i.test(s)) return { bg: "#e6f7ff", color: "#096dd9" };
   if (/待发货/i.test(s)) return { bg: "#bae0ff", color: "#003a8c" };
   if (/待接单/i.test(s)) return { bg: "#fa8c16", color: "#fff" };
   if (/已付款待审核/i.test(s)) return { bg: "#ffe58f", color: "#614700" };
@@ -1562,14 +1563,10 @@ export default function QcOutboundCenter() {
       title: "线上状态",
       key: "onlineStatus",
       width: 110,
-      onCell: (row) => {
-        const st = stockStatusCellStyle(row.rawCloud?.temu_status);
-        return { className: "status-cell-colored", style: { "--status-bg": st.bg, "--status-color": st.color } as any };
-      },
       render: (_value, row) => {
         const s = row.rawCloud?.temu_status;
         if (!s) return <Text type="secondary">-</Text>;
-        return <span className="status-cell-text">{s}</span>;
+        return <Text>{s}</Text>;
       },
     },
     {
@@ -1753,11 +1750,10 @@ export default function QcOutboundCenter() {
     {
       title: "发货信息",
       key: "shipInfo",
-      width: 240,
+      width: 180,
       render: (_value, row) => {
         const isCloud = Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
         if (isCloud) {
-          // 官方单：发货阶段标签 + 收货仓 + 发货单号(FH) + 运单号(EB) + 详情/撤销
           const stage = getShipStage(row);
           const st = row.soId ? officialShipState[row.soId] : null;
           const fh = st?.deliveryOrderSn || row.rawCloud?.delivery_order_sn;
@@ -1768,31 +1764,13 @@ export default function QcOutboundCenter() {
             : <Tag>待发货</Tag>;
           return (
             <Space direction="vertical" size={2} style={{ width: "100%" }}>
-              <Space size={4} wrap>
-                {stageTag}
-                <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handleShipPreview(row)}>详情</Button>
-                <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handlePrintLabel(row)}>打印条码</Button>
-                {fh ? (
-                  <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handlePrintBoxmark(row)}>打印箱唛</Button>
-                ) : null}
-                {stage === "created" && st?.deliveryOrderSn ? (
-                  <>
-                    <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openShipLogistics(row)}>物流下单</Button>
-                    <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handleOpenPackage(row)}>装箱</Button>
-                    <Button size="small" type="link" danger style={{ padding: 0 }} onClick={() => handleCancelShipOrderBySoId(row)}>撤销</Button>
-                  </>
-                ) : null}
-                {stage === "shipped" ? (
-                  <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handlePrintExpressNote(row)}>打印面单</Button>
-                ) : null}
-              </Space>
+              {stageTag}
               {row.rawCloud?.receive_warehouse_name ? <Text type="secondary" style={{ fontSize: 12 }}>仓：{row.rawCloud.receive_warehouse_name}</Text> : null}
               {fh ? <Text type="secondary" style={{ fontSize: 12 }}>FH：{fh}</Text> : null}
               {eb ? <Text type="secondary" style={{ fontSize: 12 }}>运单：{eb}</Text> : null}
             </Space>
           );
         }
-        // 聚水潭单：物流公司 + 物流单号 + 收货地
         const j = row.rawJst;
         if (!j) return <Text type="secondary">-</Text>;
         const addr = [j.receiver_state, j.receiver_city, j.receiver_district].filter(Boolean).join("·");
@@ -2026,7 +2004,17 @@ export default function QcOutboundCenter() {
                   <Button size="small" danger disabled={!canCreateOutbound || !selectedShipKeys.length} loading={shipBatchBusy} onClick={handleBatchUnship}>批量撤销</Button>
                   <Button size="small" onClick={() => setApplyPo((s) => ({ ...s, open: true }))}>申请备货</Button>
                   <Button size="small" disabled={!selectedShipRows.length} onClick={handleCancelPurchase}>取消备货单</Button>
-                  <Text type="secondary" style={{ fontSize: 12 }}>①② 官方流程(仅官方单) · ③ 本地确认发货扣库存 · 官方真发货在「发货信息」列点「物流下单」</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>①② 官方流程(仅官方单) · ③ 本地确认发货扣库存</Text>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <Text type="secondary">单行操作（选中官方单）</Text>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handleShipPreview(selectedShipRows[0])}>详情</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintLabel(selectedShipRows[0])}>打印条码</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintBoxmark(selectedShipRows[0])}>打印箱唛</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => openShipLogistics(selectedShipRows[0])}>物流下单</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handleOpenPackage(selectedShipRows[0])}>装箱</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} danger onClick={() => handleCancelShipOrderBySoId(selectedShipRows[0])}>撤销发货单</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintExpressNote(selectedShipRows[0])}>打印面单</Button>
                 </div>
                 <Table
                   className="erp-compact-table consign-unified-table"

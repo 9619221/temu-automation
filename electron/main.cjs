@@ -1912,9 +1912,11 @@ function normalizeAutoPricingTask(task = {}) {
   const results = Array.isArray(task.results) ? task.results.map((item) => compactAutoPricingResultForStore(item)) : [];
   const summary = summarizeAutoPricingResults(results);
   const taskId = typeof task.taskId === "string" ? task.taskId : `pricing_${Date.now()}`;
-  const flowType = task.flowType === "workflow" || task.mode === "workflow" || /^workflow_pack_/.test(taskId)
-    ? "workflow"
-    : "classic";
+  const flowType = task.flowType === "combo" || /^combo_/.test(taskId)
+    ? "combo"
+    : (task.flowType === "workflow" || task.mode === "workflow" || /^workflow_pack_/.test(taskId)
+      ? "workflow"
+      : "classic");
   return {
     taskId,
     flowType,
@@ -4940,6 +4942,109 @@ ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
     error.task = getAutoPricingProgressPayload(failedTask);
     throw error;
   } finally {
+    const latestTask = await syncAutoPricingTaskFromWorker(taskId, { markInterruptedOnIdle: true }).catch(() => null);
+    if (!latestTask || !latestTask.running) {
+      stopAutoPricingTaskSync();
+    }
+  }
+});
+
+ipcMain.handle("automation:generate-combo-listing", async (_e, params) => {
+  const existingTask = getAutoPricingTask(autoPricingCurrentTaskId);
+  if (isAutoPricingTaskActive(existingTask)) {
+    const syncedTask = await syncAutoPricingTaskFromWorker(existingTask.taskId, { markInterruptedOnIdle: true }).catch(() => null);
+    const activeTask = syncedTask || getAutoPricingTask(existingTask.taskId) || existingTask;
+    if (isAutoPricingTaskActive(activeTask)) {
+      return {
+        accepted: false,
+        taskId: activeTask.taskId,
+        message: "已有上品任务正在执行，请先等待完成。",
+        task: getAutoPricingProgressPayload(activeTask),
+      };
+    }
+  }
+
+  const now = new Date().toLocaleString("zh-CN");
+  const taskId = typeof params?.taskId === "string" && params.taskId.trim()
+    ? params.taskId.trim()
+    : `combo_${Date.now()}`;
+  const nextTask = upsertAutoPricingTask({
+    taskId,
+    flowType: "combo",
+    status: "running",
+    running: true,
+    paused: false,
+    total: 1,
+    completed: 0,
+    current: "套装上品处理中",
+    step: "套装上品",
+    message: "正在生成套装图片、上传素材并创建草稿",
+    results: [],
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    finishedAt: "",
+  });
+  startAutoPricingTaskSync();
+
+  let imageStudioUrl = "";
+  try {
+    const imageStudio = await ensureImageStudioService();
+    imageStudioUrl = imageStudio?.url || "";
+  } catch (err) {
+    console.error(`[Main] Image studio unavailable for combo listing: ${err?.message || err}`);
+    imageStudioUrl = workerAiImageServer || process.env.AI_IMAGE_SERVER || getImageStudioBaseUrl(imageStudioPort);
+  }
+  await ensureWorkerStarted({ aiImageServer: imageStudioUrl });
+  autoPricingTaskPromise = sendCmd("combo_listing", {
+    ...(params || {}),
+    taskId,
+    timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS,
+  }, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
+  try {
+    const result = await autoPricingTaskPromise;
+    const finishedAt = new Date().toLocaleString("zh-CN");
+    const results = Array.isArray(result?.results) ? result.results : [];
+    const finishedTask = upsertAutoPricingTask({
+      ...nextTask,
+      taskId,
+      flowType: "combo",
+      status: result?.success === false ? "failed" : "completed",
+      running: false,
+      paused: false,
+      total: 1,
+      completed: 1,
+      current: result?.success === false ? "处理未完成" : "已完成",
+      step: "套装上品",
+      message: result?.message || "套装上品完成",
+      results,
+      updatedAt: finishedAt,
+      finishedAt,
+    });
+    return {
+      ...(result || {}),
+      taskId,
+      task: getAutoPricingProgressPayload(finishedTask),
+    };
+  } catch (error) {
+    const failedAt = new Date().toLocaleString("zh-CN");
+    const failedTask = upsertAutoPricingTask({
+      ...nextTask,
+      taskId,
+      flowType: "combo",
+      status: "failed",
+      running: false,
+      paused: false,
+      current: "处理失败",
+      step: "套装上品",
+      message: error?.message || "套装上品处理失败",
+      updatedAt: failedAt,
+      finishedAt: failedAt,
+    });
+    error.task = getAutoPricingProgressPayload(failedTask);
+    throw error;
+  } finally {
+    autoPricingTaskPromise = null;
     const latestTask = await syncAutoPricingTaskFromWorker(taskId, { markInterruptedOnIdle: true }).catch(() => null);
     if (!latestTask || !latestTask.running) {
       stopAutoPricingTaskSync();

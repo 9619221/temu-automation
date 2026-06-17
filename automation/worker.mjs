@@ -1362,6 +1362,7 @@ const BROWSER_ACCOUNT_ACTIONS = new Set([
   "create_product_api",
   "batch_create_api",
   "workflow_pack_images",
+  "combo_listing",
   "auto_pricing",
   "auto_image_swap",
   "test_api",
@@ -10851,6 +10852,9 @@ async function handleRequest(body) {
       }
       return await generateWorkflowPackImages(params);
     }
+    case "combo_listing": {
+      return await generateComboListing(params);
+    }
     case "auto_pricing": {
       // 完整自动核价：CSV → AI生图 → 上传 → 提交核价
       // 每次新任务开始前清除致命登录错误标志，允许用户在「账号管理」改正密码后重试
@@ -15160,7 +15164,270 @@ async function generateWorkflowPackImages(params = {}) {
   return finalResult;
 }
 
-async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePaths = []) {
+// ========== 套装组合上品 (combo_listing) ==========
+
+function buildComboImagePlan(productCount) {
+  const packLabel = `${productCount}PCS SET`;
+  return {
+    imageType: "combo_set",
+    prompt: [
+      "Create a clean retail catalog product photo that shows ALL the different products from the reference images together as a bundle set.",
+      "Arrange all products naturally on a clean white background, ensuring each product is clearly visible and recognizable.",
+      "Show every product from the reference images — do not omit any item.",
+      `Add the plain text "${packLabel}" exactly once on the empty white background area, preferably near the top-right corner.`,
+      "The set-count text must stay on the white background only, must not overlap or touch any product.",
+      "Use simple dark gray or black sans-serif text only: no badge, no sticker, no label box, no border, no colored tag, no decorative shape.",
+      "Strictly preserve the exact product identity from each reference image.",
+      "Keep each product's original structure locked: same silhouette, color, material, texture, visible details.",
+      "Use soft studio lighting, a subtle natural shadow, and a centered square 1:1 composition.",
+      "Do not preserve any source size chart, dimension marks, measurement callouts, ruler, comparison graphic, captions, labels, background graphics, hands, packaging, or extra props.",
+      "Use a clean white background with clean corners and no watermark, logo, border, QR code, platform UI, hands, packaging, or extra props.",
+      `Do not render any other letters, numbers, labels, captions, or symbols besides "${packLabel}".`,
+    ].join(" "),
+  };
+}
+
+async function generateComboImage(imageBuffers, plan, taskId) {
+  const requestTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_REQUEST_TIMEOUT_MS", 10 * 60 * 1000);
+  const idleTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_IDLE_TIMEOUT_MS", 4 * 60 * 1000);
+  const maxRetries = Math.max(0, parsePositiveEnvInt("WORKFLOW_PACK_AI_MAX_RETRIES", 2));
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    try {
+      logWorkflowPack(taskId, `combo image request start attempt=${attempt}`);
+      const resp = await postMultipartViaNodeHttp(`${AI_IMAGE_GEN_URL}/api/generate`, {
+        fileBlobs: imageBuffers.map((item, i) => ({
+          buffer: item.buffer,
+          name: item.name || `product_${i + 1}.jpg`,
+          type: item.mimeType || "image/jpeg",
+        })),
+        fields: {
+          plans: JSON.stringify([plan]),
+          productMode: "combo",
+          imageLanguage: "en",
+          imageSize: "1000x1000",
+        },
+        extraHeaders: AI_AUTH_HEADERS,
+        timeoutMs: idleTimeoutMs,
+        totalTimeoutMs: requestTimeoutMs,
+      });
+
+      if (!resp.ok) {
+        const error = await formatAiImageError("Combo image generate failed", resp);
+        logWorkflowPack(taskId, `combo image http failed: ${error}`);
+        if (!shouldRetryAiImageRequest(error) || attempt > maxRetries) {
+          return { imageUrl: "", error };
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 3000));
+        continue;
+      }
+
+      const parsed = resp.body
+        ? await readWorkflowGenerateSSE(resp, [plan.imageType], idleTimeoutMs, taskId)
+        : parseWorkflowGenerateSSEText(await resp.text(), [plan.imageType], taskId);
+      const imageUrl = parsed.images?.[plan.imageType] || "";
+      if (imageUrl) {
+        logWorkflowPack(taskId, `combo image generated on attempt ${attempt}`);
+        return { imageUrl, error: "" };
+      }
+      const error = parsed.errors?.[plan.imageType] || "未返回图片";
+      logWorkflowPack(taskId, `combo image missing: ${error}`);
+      if (!shouldRetryAiImageRequest(error) || attempt > maxRetries) {
+        return { imageUrl: "", error };
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 3000));
+    } catch (err) {
+      const error = formatAiImageFetchError("Combo image generate failed", err, "/api/generate");
+      logWorkflowPack(taskId, `combo image fetch failed: ${error}`);
+      if (!shouldRetryAiImageRequest(error) || attempt > maxRetries) {
+        return { imageUrl: "", error };
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 3000));
+    }
+  }
+  return { imageUrl: "", error: "生成失败" };
+}
+
+function composeComboTitle(products) {
+  const categories = products.map((p) => p.category_zh).filter(Boolean);
+  const mainCategory = categories[0] || "";
+  const count = products.length;
+  const keywords = products
+    .map((p) => {
+      const title = String(p.title_zh || p.title_en || "").trim();
+      const short = title.replace(/[,，;；|/\\]+/g, " ").split(/\s+/).slice(0, 3).join(" ");
+      return short;
+    })
+    .filter(Boolean);
+  const zhTitle = `${mainCategory} ${count}件套装 ${keywords.join(" + ")}`.trim().slice(0, 120);
+  const enTitle = `${count}PCS Set ${keywords.map((k) => k.slice(0, 30)).join(" + ")}`.trim().slice(0, 120);
+  return { zhTitle, enTitle };
+}
+
+async function generateComboListing(params) {
+  const taskId = params?.taskId || `combo_${Date.now()}`;
+  const products = Array.isArray(params?.products) ? params.products : [];
+  if (products.length < 2) {
+    return { success: false, taskId, message: "至少需要 2 个商品才能创建套装", results: [] };
+  }
+
+  logWorkflowPack(taskId, `combo listing start: ${products.length} products`);
+  const outputDir = path.join(
+    process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming",
+    "temu-automation", "combo-images", taskId,
+  );
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  updateCurrentProgress({
+    taskId,
+    flowType: "combo",
+    running: true,
+    status: "running",
+    total: 1,
+    completed: 0,
+    step: "下载商品图片",
+    message: `正在下载 ${products.length} 个商品的图片`,
+  });
+
+  // Step 1: 下载所有商品的主图
+  const imagePaths = [];
+  for (let i = 0; i < products.length; i += 1) {
+    const p = products[i];
+    const imageUrl = String(p.main_image || "").trim();
+    if (!imageUrl) {
+      logWorkflowPack(taskId, `product ${i} has no main_image, skipping`);
+      continue;
+    }
+    const localPath = path.join(outputDir, `source_${i}.jpg`);
+    try {
+      await materializeWorkflowImageCandidate(imageUrl, localPath);
+      imagePaths.push(localPath);
+      logWorkflowPack(taskId, `product ${i} image downloaded`);
+    } catch (err) {
+      logWorkflowPack(taskId, `product ${i} image download failed: ${err?.message}`);
+    }
+  }
+
+  if (imagePaths.length < 2) {
+    const result = { success: false, taskId, message: "可用商品图片不足 2 张，无法生成套装图", results: [{ success: false, message: "图片下载不足" }] };
+    updateCurrentProgress({ running: false, status: "failed", step: "下载失败", message: result.message });
+    return result;
+  }
+
+  // Step 2: 计算价格和生成标题（提前算好，AI 生图需要标题）
+  const totalUsdPrice = products.reduce((sum, p) => sum + (Number(p.usd_price) || 0), 0);
+  const comboCnyPrice = Math.ceil(totalUsdPrice * 7 * 100) / 100;
+  const { zhTitle, enTitle } = composeComboTitle(products);
+  logWorkflowPack(taskId, `combo price: ${products.length} items, sum=$${totalUsdPrice.toFixed(2)}, cny=¥${comboCnyPrice.toFixed(2)}`);
+  logWorkflowPack(taskId, `combo title: ${zhTitle}`);
+
+  // Step 3: AI 生成 9 张详情图（标准流程：analyze → plans → generate）
+  updateCurrentProgress({
+    step: "AI生图中",
+    message: `正在用 AI 生成 ${REQUIRED_AI_DETAIL_IMAGE_COUNT} 张套装详情图`,
+  });
+  const sourceImagePath = imagePaths[0];
+  const extraImagePaths = imagePaths.slice(1);
+  const aiResult = await generateImagesWithAI(sourceImagePath, zhTitle, extraImagePaths);
+
+  if (!aiResult.success) {
+    const errMsg = aiResult.error || `图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张`;
+    const result = { success: false, taskId, message: `AI生图失败: ${errMsg}`, results: [{ success: false, message: errMsg }] };
+    updateCurrentProgress({ running: false, status: "failed", step: "AI生图失败", message: result.message });
+    return result;
+  }
+
+  // Step 4: 保存 AI 图片到本地
+  const localImages = {};
+  for (const type of AI_DETAIL_IMAGE_TYPE_ORDER) {
+    if (aiResult.images[type]) {
+      const imgPath = path.join(outputDir, `${type}_${Date.now()}.png`);
+      saveBase64Image(aiResult.images[type], imgPath);
+      localImages[type] = imgPath;
+    }
+  }
+  logWorkflowPack(taskId, `saved ${Object.keys(localImages).length} AI images locally`);
+
+  // Step 5: 上传到素材中心
+  updateCurrentProgress({
+    step: "上传素材",
+    message: `正在上传 ${Object.keys(localImages).length} 张图片到素材中心`,
+  });
+  const { kwcdnUrls, uploadErrors } = await uploadImagesToKwcdnConcurrently(localImages);
+  const orderedImageUrls = AI_DETAIL_IMAGE_TYPE_ORDER
+    .map(type => kwcdnUrls[type])
+    .filter(Boolean);
+  logWorkflowPack(taskId, `uploaded ${orderedImageUrls.length}/${Object.keys(localImages).length} images`);
+
+  if (orderedImageUrls.length === 0) {
+    const uploadErrSummary = Object.entries(uploadErrors).slice(0, 3).map(([t, e]) => `${t}: ${e}`).join("；");
+    const result = { success: false, taskId, message: `素材上传全部失败: ${uploadErrSummary}`, results: [{ success: false, message: "素材上传失败" }] };
+    updateCurrentProgress({ running: false, status: "failed", step: "上传失败", message: result.message });
+    return result;
+  }
+
+  // Step 6: 创建草稿
+  updateCurrentProgress({
+    step: "创建草稿",
+    message: "正在创建套装商品草稿",
+  });
+
+  const firstProduct = products[0] || {};
+  try {
+    const draftResult = await createProductViaAPI({
+      title: zhTitle,
+      rawTitle: enTitle,
+      imageUrls: orderedImageUrls,
+      price: comboCnyPrice,
+      categorySearch: firstProduct.category_zh || zhTitle,
+      categoryLockMode: "guided",
+      keepOpen: false,
+      config: params.config || {},
+    });
+
+    const comboResult = {
+      success: Boolean(draftResult?.success),
+      name: zhTitle,
+      title: zhTitle,
+      message: draftResult?.success ? "套装草稿已创建" : (draftResult?.message || "草稿创建失败"),
+      draftId: draftResult?.draftId || draftResult?.productDraftId || "",
+      productId: draftResult?.productId || "",
+    };
+
+    const finalResult = {
+      success: Boolean(draftResult?.success),
+      taskId,
+      message: comboResult.message,
+      results: [comboResult],
+      successCount: draftResult?.success ? 1 : 0,
+      failCount: draftResult?.success ? 0 : 1,
+    };
+    updateCurrentProgress({
+      running: false,
+      status: draftResult?.success ? "completed" : "failed",
+      completed: 1,
+      step: draftResult?.success ? "已完成" : "草稿创建失败",
+      message: comboResult.message,
+      results: [comboResult],
+    });
+    logWorkflowPack(taskId, `combo listing done: success=${draftResult?.success}, draftId=${comboResult.draftId}`);
+    return finalResult;
+  } catch (err) {
+    const failResult = {
+      success: false, taskId,
+      message: err?.message || "草稿创建失败",
+      results: [{ success: false, name: zhTitle, message: err?.message || "草稿创建失败" }],
+      successCount: 0, failCount: 1,
+    };
+    updateCurrentProgress({ running: false, status: "failed", step: "草稿创建失败", message: failResult.message });
+    return failResult;
+  }
+}
+
+// ========== 套装组合上品结束 ==========
+
+async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePaths = [], options = {}) {
+  const productMode = options.productMode || "single";
   const parsePositiveEnvInt = (name, fallback) => {
     const value = Number(process.env[name]);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -15197,7 +15464,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     routePath: "/api/analyze",
     request: () => postMultipartViaNodeHttp(`${AI_IMAGE_GEN_URL}/api/analyze`, {
       fileBlobs: allImageBlobs,
-      fields: { productMode: "single" },
+      fields: { productMode },
       extraHeaders: AI_AUTH_HEADERS,
     }),
     maxRetries: 2,
@@ -15240,7 +15507,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         imageTypes: AI_DETAIL_IMAGE_TYPE_ORDER,
         salesRegion: "us",
         imageSize: "1000x1000",
-        productMode: "single",
+        productMode,
       }),
     }),
     maxRetries: 2,
@@ -15320,7 +15587,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
           form.append("images", blob, img.name);
         }
         form.append("plans", JSON.stringify([plan]));
-        form.append("productMode", "single");
+        form.append("productMode", productMode);
         form.append("imageLanguage", "en");
         form.append("imageSize", "1000x1000");
         const controller = new AbortController();

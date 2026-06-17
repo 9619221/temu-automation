@@ -196,6 +196,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:filter-product-table", csvPath),
     generatePackImages: (params) =>
       ipcRenderer.invoke("automation:generate-pack-images", params),
+    generateComboListing: (params) =>
+      ipcRenderer.invoke("automation:generate-combo-listing", params),
     autoPricing: (params) =>
       ipcRenderer.invoke("automation:auto-pricing", params),
     startAutoPricing: (params) =>

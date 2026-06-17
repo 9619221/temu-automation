@@ -5,7 +5,7 @@ export interface ListingTaskState {
   paused: boolean;
   exporting: boolean;
   taskId: string;
-  mode: "classic" | "workflow";
+  mode: "classic" | "workflow" | "combo";
   progress: any;
   results: any[];
   products: any[];
@@ -101,7 +101,7 @@ const listingTaskStore = {
     onComplete = fn;
   },
 
-  setMode(mode: "classic" | "workflow") {
+  setMode(mode: "classic" | "workflow" | "combo") {
     patch({ mode });
   },
 
@@ -185,6 +185,69 @@ const listingTaskStore = {
       stopPolling();
       patch({ running: false, progress: { taskId, running: false, status: "failed" } });
       sendNotification("新上品流程失败", err?.message || "未知错误");
+      return { ok: false, message: err?.message || "失败" };
+    }
+  },
+
+  async startCombo(products: any[]) {
+    const taskId = `combo_${Date.now()}`;
+    const count = 1;
+    patch({
+      exporting: false,
+      running: true,
+      results: [],
+      taskId,
+      mode: "combo",
+      progress: {
+        taskId, running: true, status: "running", flowType: "combo",
+        total: count, completed: 0, current: "准备中",
+      },
+    });
+    startPolling(taskId);
+
+    try {
+      const response = await automationApi()?.generateComboListing?.({
+        taskId,
+        products: products.map((p: any) => ({
+          goods_id: p.goods_id,
+          title_zh: p.title_zh || "",
+          title_en: p.title_en || "",
+          main_image: p.main_image || "",
+          carousel_images: p.image_urls?.join?.(",") || "",
+          usd_price: Number(p.usd_price) || 0,
+          category_zh: p.category_zh || "",
+        })),
+      });
+
+      if (response?.accepted === false) {
+        stopPolling();
+        patch({ running: false });
+        return { ok: false, message: response?.message || "已有任务在运行" };
+      }
+
+      if (Array.isArray(response?.results)) patch({ results: response.results });
+      stopPolling();
+      patch({
+        running: false,
+        progress: {
+          taskId, running: false, flowType: "combo",
+          status: response?.success === false ? "failed" : "completed",
+          total: count,
+          completed: count,
+        },
+      });
+      onComplete?.();
+
+      if (response?.success) {
+        sendNotification("套装上品完成", `套装草稿已创建`);
+        return { ok: true, message: "套装草稿已创建" };
+      }
+      sendNotification("套装上品异常", response?.message || "未完成");
+      return { ok: false, message: response?.message || "未完成" };
+    } catch (err: any) {
+      stopPolling();
+      patch({ running: false, progress: { taskId, running: false, status: "failed" } });
+      sendNotification("套装上品失败", err?.message || "未知错误");
       return { ok: false, message: err?.message || "失败" };
     }
   },
