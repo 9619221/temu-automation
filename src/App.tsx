@@ -61,28 +61,15 @@ const AutoPurchase = lazyWithPreload(() => import("./pages/AutoPurchase"));
 const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
 // Settlement 页面已合并到多店报表的结算 Tab
 
-const CORE_ROUTE_PRELOADERS = [
+const LIGHT_ROUTE_PRELOADERS = [
   AppLayout.preload,
   ShopOverview.preload,
-  AfterSales.preload,
-  ProductList.preload,
-  ProductMasterData.preload,
-  AlibabaMapping.preload,
-  PurchaseCenter.preload,
-  WarehouseCenter.preload,
-  QcOutboundCenter.preload,
-  AutoPurchase.preload,
-  AutoShipMap.preload,
-  WorkItems.preload,
+  OperationsWorkbench.preload,
   AccountManager.preload,
+  PurchaseCenter.preload,
   Logs.preload,
   Settings.preload,
   UserManagement.preload,
-  PriceReview.preload,
-  CompetitorAnalysis.preload,
-  SelectionPlaza.preload,
-  ProductCreate.preload,
-  ProductDetail.preload,
 ];
 
 function PremiumRouteLoading() {
@@ -238,13 +225,13 @@ function App() {
     let cancelled = false;
 
     const preloadNext = () => {
-      if (cancelled || index >= CORE_ROUTE_PRELOADERS.length) return;
-      const preload = CORE_ROUTE_PRELOADERS[index++];
+      if (cancelled || index >= LIGHT_ROUTE_PRELOADERS.length) return;
+      const preload = LIGHT_ROUTE_PRELOADERS[index++];
       void preload().catch(() => {});
-      timer = setTimeout(preloadNext, 220);
+      timer = setTimeout(preloadNext, 300);
     };
 
-    timer = setTimeout(preloadNext, 900);
+    timer = setTimeout(preloadNext, 1600);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);

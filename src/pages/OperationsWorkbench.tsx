@@ -492,6 +492,7 @@ export default function OperationsWorkbench() {
   }, [diagnosed, inScope]);
 
   const diagView = useMemo(() => {
+    if (activeTab !== "product") return [] as DiagnosedRow[];
     let v = diagnosed.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (diagFilter === "urgent") v = v.filter((r) => r._level === 3);
@@ -502,10 +503,11 @@ export default function OperationsWorkbench() {
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b._level - a._level || b.last7d - a.last7d);
-  }, [diagnosed, storeFilter, diagFilter, search, inScope]);
+  }, [activeTab, diagnosed, storeFilter, diagFilter, search, inScope]);
 
   // 今日待办:把商品诊断 issues + 中高风险 + 可报活动汇成统一任务流(仅「我的店」范围)
   const todoTasks = useMemo<TodoTask[]>(() => {
+    if (activeTab !== "todo") return [];
     const out: TodoTask[] = [];
     for (const r of diagnosed) {
       if (!inScope(r.store_code || r.mall_id)) continue;
@@ -546,8 +548,9 @@ export default function OperationsWorkbench() {
       });
     }
     return out;
-  }, [diagnosed, riskRows, actRows, inScope]);
+  }, [activeTab, diagnosed, riskRows, actRows, inScope]);
   const todoCount = useMemo(() => {
+    if (activeTab !== "todo") return { product: 0, code: 0, risk: 0, activity: 0, urgent: 0, done: 0 };
     const c = { product: 0, code: 0, risk: 0, activity: 0, urgent: 0, done: 0 };
     for (const t of todoTasks) {
       const st = todoState[t.key];
@@ -556,8 +559,9 @@ export default function OperationsWorkbench() {
       c[t.type]++; if (t.level >= 3) c.urgent++;
     }
     return c;
-  }, [todoTasks, todoState]);
+  }, [activeTab, todoTasks, todoState]);
   const todoView = useMemo(() => {
+    if (activeTab !== "todo") return [] as (TodoTask & { __rk: number })[];
     let v = todoTasks.map((t) => ({ ...t, status: todoState[t.key] || null }));
     if (storeFilter !== "all") v = v.filter((t) => t.store === storeFilter);
     if (todoType !== "all") v = v.filter((t) => t.type === todoType);
@@ -566,7 +570,7 @@ export default function OperationsWorkbench() {
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((t) => t.object.toLowerCase().includes(q) || (t.sub || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b.level - a.level).map((t, i) => ({ ...t, __rk: i }));
-  }, [todoTasks, storeFilter, todoType, todoStatus, search, todoState]);
+  }, [activeTab, todoTasks, storeFilter, todoType, todoStatus, search, todoState]);
 
   // 库存补货：需补货 SKU（售罄/即将断货/有建议备货），紧急度排序
   const restockView = useMemo(() => {
@@ -611,12 +615,13 @@ export default function OperationsWorkbench() {
 
   // 活动概览顶部汇总(我的店范围):在售商品数 + 有活动可报商品数 + 可报活动机会总数
   const actSummary = useMemo(() => {
+    if (activeTab !== "activity") return { onSale: 0, withAct: 0, opp: 0, enrolled: 0 };
     let onSale = 0;
     for (const r of shopRows) { if (!inScope(r.store_code || r.mall_id)) continue; onSale += r.on_sale || 0; }
     let opp = 0, withAct = 0, enrolled = 0;
     for (const p of actProductView) { opp += p.act_count; if (p.act_count > 0) withAct++; enrolled += p.enrolled_count; }
     return { onSale, withAct, opp, enrolled };
-  }, [shopRows, inScope, actProductView]);
+  }, [activeTab, shopRows, inScope, actProductView]);
 
   // 报名弹窗:当前商品的可报活动行(派生 actRows 里同店同货号,逐个活动一行)
   const modalActRows = useMemo(() => {
@@ -632,11 +637,13 @@ export default function OperationsWorkbench() {
   // 上新生命周期阶段展示顺序(中文,与 selectStatusLabel 输出一致);「未发布」「价格申报中」各自合并多个状态码;各店概览按此顺序出列
   const LIFECYCLE_STAGE_ORDER = ["未发布", "待寄样", "价格申报中", "待创建首单", "已创建首单", "已发布到站点", "已下架/终止"];
   const overviewTrend = useMemo(() => {
+    if (activeTab !== "overview") return [] as { date: string; sales: number }[];
     const byDate = new Map<string, number>();
     for (const r of trendRows) { if (!inScope(r.store_code || r.mall_id)) continue; byDate.set(r.stat_date, (byDate.get(r.stat_date) || 0) + r.sales); }
     return [...byDate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, sales]) => ({ date, sales }));
-  }, [trendRows, inScope]);
+  }, [activeTab, trendRows, inScope]);
   const storeMatrix = useMemo(() => {
+    if (activeTab !== "overview") return [] as StoreMatrixRow[];
     const m = new Map<string, StoreMatrixRow>();
     const get = (code: string, mall_id: string, mall_name: string | null, owner: string | null) => {
       let e = m.get(code);
@@ -663,14 +670,15 @@ export default function OperationsWorkbench() {
     for (const r of goodsCreatedRows) { if (!inScope(r.store_code || r.mall_id)) continue; const e = byMall.get(r.mall_id); if (e) e.goods_created += 1; }
     // 各店概览只显示已建档的店（有真实店号）；没建档的店 store_code 被 mall_id 顶替，过滤掉
     return [...m.values()].filter((e) => e.store_code !== e.mall_id).sort((a, b) => (b.lack + b.soldout + b.high_risk * 5) - (a.lack + a.soldout + a.high_risk * 5));
-  }, [shopRows, riskRows, skuRows, stockRows, actRows, lifecycleRows, firstShipRows, goodsCreatedRows, inScope]);
+  }, [activeTab, shopRows, riskRows, skuRows, stockRows, actRows, lifecycleRows, firstShipRows, goodsCreatedRows, inScope]);
   const panelBase = useMemo(() => {
+    if (activeTab !== "product") return [] as ProductPanelRow[];
     let v = panelRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q) || (r.skc_codes || "").includes(q) || (r.sku_codes || "").includes(q));
     return v;
-  }, [panelRows, storeFilter, search, inScope]);
+  }, [activeTab, panelRows, storeFilter, search, inScope]);
   const slowCount = useMemo(() => panelBase.filter(isSlowMoving).length, [panelBase]);
   const panelView = useMemo(() => {
     let v = slowFilter === "slow" ? panelBase.filter(isSlowMoving) : panelBase;
@@ -688,23 +696,27 @@ export default function OperationsWorkbench() {
     return m;
   }, [shopRows]);
   const adView = useMemo(() => {
+    if (activeTab !== "store") return [] as (AdMallRow & { __rk: number; store_code: string | null })[];
     let v = adRows.map((r) => { const info = mallInfoMap.get(r.mall_id); return { ...r, store: info?.name || r.mall_id, store_code: info?.code || null }; });
     v = v.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     return v.sort((a, b) => (b.spend || 0) - (a.spend || 0)).map((r, i) => ({ ...r, __rk: i }));
-  }, [adRows, mallInfoMap, storeFilter, inScope]);
+  }, [activeTab, adRows, mallInfoMap, storeFilter, inScope]);
   const adAgg = useMemo(() => {
+    if (activeTab !== "store") return { impr: 0, clk: 0, spend: 0, amt: 0, ord: 0 };
     const sum = (k: keyof AdMallRow) => adView.reduce((s, r) => s + (Number(r[k]) || 0), 0);
     return { impr: sum("imprCnt"), clk: sum("clkCnt"), spend: sum("spend"), amt: sum("orderPayAmt"), ord: sum("orderPayCnt") };
-  }, [adView]);
+  }, [activeTab, adView]);
   const stockView = useMemo(() => {
+    if (activeTab !== "stock" && activeTab !== "overview") return [] as (StockOrderRow & { __rk: number })[];
     let v = stockRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.product_name || "").toLowerCase().includes(q) || (r.order_no || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [stockRows, storeFilter, search, inScope]);
+  }, [activeTab, stockRows, storeFilter, search, inScope]);
   const trendChart = useMemo(() => {
+    if (activeTab !== "store") return { data: [] as Record<string, number | string>[], stores: [] as string[] };
     const scoped = trendRows.filter((r) => inScope(r.store_code || r.mall_id));
     const dates = [...new Set(scoped.map((r) => r.stat_date))].sort();
     const totals = new Map<string, number>();
@@ -721,7 +733,7 @@ export default function OperationsWorkbench() {
       if (row) row[k] = r.sales;
     }
     return { data: dates.map((d) => byDate.get(d)!), stores };
-  }, [trendRows, storeFilter, inScope]);
+  }, [activeTab, trendRows, storeFilter, inScope]);
 
   const skuTitleCol = {
     title: "商品 · SKU / SKC / SPU", key: "sku", width: 300,
@@ -1035,6 +1047,7 @@ export default function OperationsWorkbench() {
   );
 
   const qcView = useMemo(() => {
+    if (activeTab !== "qc") return [] as QcRow[];
     const kw = search.trim().toLowerCase();
     return qcRows.filter((r) => {
       if (!inScope(r.store_code || r.mall_id)) return false;
@@ -1042,10 +1055,11 @@ export default function OperationsWorkbench() {
       if (!kw) return true;
       return [r.sku_name, r.ext_code, r.purchase_no, r.cat_name, r.flaw_summary, r.store_code, r.receipt_no].some((x) => String(x || "").toLowerCase().includes(kw));
     });
-  }, [qcRows, search, storeFilter, inScope]);
+  }, [activeTab, qcRows, search, storeFilter, inScope]);
 
   const [qualitySiteFilter, setQualitySiteFilter] = useSessionState(owViewKey("qualitySite"), "all");
   const qualityView = useMemo(() => {
+    if (activeTab !== "quality") return [] as QualityRow[];
     const kw = search.trim().toLowerCase();
     return qualityRows.filter((r) => {
       if (!inScope(r.store_code || r.mall_id)) return false;
@@ -1054,7 +1068,7 @@ export default function OperationsWorkbench() {
       if (!kw) return true;
       return [r.product_name, r.product_id, r.goods_id, r.category_name, r.afs_problems, r.rev_problems, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
     });
-  }, [qualityRows, search, storeFilter, qualitySiteFilter, inScope]);
+  }, [activeTab, qualityRows, search, storeFilter, qualitySiteFilter, inScope]);
 
   const qualityShopsView = useMemo(() => qualityShops.filter((s) => inScope(s.store_code || s.mall_id)), [qualityShops, inScope]);
 
@@ -1075,6 +1089,7 @@ export default function OperationsWorkbench() {
   }, [qualityView]);
 
   const hpfView = useMemo(() => {
+    if (activeTab !== "hpf") return [] as (HpfRow & { __rk: number })[];
     const kw = search.trim().toLowerCase();
     return hpfRows.filter((r) => {
       if (!inScope(r.store_code || r.mall_id)) return false;
@@ -1082,15 +1097,16 @@ export default function OperationsWorkbench() {
       if (!kw) return true;
       return [r.title, r.product_id, r.skc_id, r.sku_codes, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
     }).map((r, i) => ({ ...r, __rk: i }));
-  }, [hpfRows, search, storeFilter, inScope]);
+  }, [activeTab, hpfRows, search, storeFilter, inScope]);
   const hpfAgg = useMemo(() => {
+    if (activeTab !== "hpf") return { total: 0, avg: null as number | null, severe: 0, shops: 0 };
     let sum = 0, cnt = 0, severe = 0; const shops = new Set<string>();
     for (const r of hpfView) {
       if (r.decline_rate != null) { sum += r.decline_rate; cnt += 1; if (r.decline_rate >= 50) severe += 1; }
       shops.add(r.store_code || r.mall_id);
     }
     return { total: hpfView.length, avg: cnt ? Number((sum / cnt).toFixed(1)) : null, severe, shops: shops.size };
-  }, [hpfView]);
+  }, [activeTab, hpfView]);
 
   const tabItems = [
     {
@@ -1433,7 +1449,7 @@ export default function OperationsWorkbench() {
         bodyStyle={{ padding: 0 }}
       >
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
-        <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity") && !(HIDE_STOCK && t.key === "stock"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
+        <Tabs activeKey={activeTab} onChange={setActiveTab} destroyInactiveTabPane items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity") && !(HIDE_STOCK && t.key === "stock"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
       </Card>
       <div style={{ display: "none" }}>
         <Image.PreviewGroup items={flawPreviewImages} preview={{ visible: flawPreviewVisible, onVisibleChange: (v) => setFlawPreviewVisible(v) }} />

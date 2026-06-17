@@ -64,6 +64,7 @@ const {
 } = require("./clientRuntime.cjs");
 const skuCache = require("./skuCache.cjs");
 const accountCache = require("./accountCache.cjs");
+const supplierCache = require("./supplierCache.cjs");
 const mappingCache = require("./mappingCache.cjs");
 const purchaseRequestCache = require("./purchaseRequestCache.cjs");
 const purchaseReturnCache = require("./purchaseReturnCache.cjs");
@@ -1350,6 +1351,7 @@ function initializeErp(options = {}) {
   configureClientRuntime({ userDataDir: erpState.userDataDir });
   skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
   accountCache.configureAccountCache({ userDataDir: erpState.userDataDir });
+  supplierCache.configureSupplierCache({ userDataDir: erpState.userDataDir });
   mappingCache.configureMappingCache({ userDataDir: erpState.userDataDir });
   purchaseRequestCache.configurePurchaseRequestCache({ userDataDir: erpState.userDataDir });
   purchaseReturnCache.configurePurchaseReturnCache({ userDataDir: erpState.userDataDir });
@@ -4742,6 +4744,37 @@ function listSuppliers(params = {}) {
   return rows.map(toSupplier);
 }
 
+function listSupplierOptions(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const whereParts = ["supplier.id NOT LIKE 'jst:%'"];
+  if (companyId) {
+    whereParts.push("supplier.company_id = @company_id");
+  }
+  const whereSql = `WHERE ${whereParts.join(" AND ")}`;
+  return db.prepare(`
+    SELECT supplier.id, supplier.name
+    FROM erp_suppliers supplier
+    ${whereSql}
+    ORDER BY supplier.updated_at DESC, supplier.created_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all({
+    company_id: companyId,
+    limit: normalizeLimit(params.limit),
+    offset: normalizeOffset(params.offset),
+  }).map(toCamelRow);
+}
+
+function compactSupplierRows(rows = []) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => ({
+      id: optionalString(row?.id ?? row?.supplierId ?? row?.supplier_id),
+      name: optionalString(row?.name ?? row?.supplierName ?? row?.supplier_name) || undefined,
+    }))
+    .filter((row) => row.id);
+}
+
 function createSupplier(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
@@ -8100,6 +8133,16 @@ async function getPurchaseWorkbench(params = {}) {
     OR LOWER(COALESCE(po.payment_status, '')) IN ('paid', 'confirmed', 'success')
     OR NULLIF(TRIM(COALESCE(po.paid_at, '')), '') IS NOT NULL)`;
   const poActivePaidSql = `(${poPaidSignalSql} AND po.status NOT IN ('inbounded', 'closed', 'cancelled', 'delayed', 'exception'))`;
+  // 「线上未付」对账预警：系统已付（口径同「已付款」tab）、且是 1688 线上单（有 external_order_id），
+  // 但 1688 后台仍停在「等待买家付款」。external_order_status 历史上中英文混存（不同同步路径），两种写法都要覆盖。
+  const po1688WaitBuyerPaySql = `(
+    NULLIF(TRIM(COALESCE(po.external_order_id, '')), '') IS NOT NULL
+    AND (
+      LOWER(REPLACE(REPLACE(COALESCE(po.external_order_status, ''), '_', ''), ' ', '')) = 'waitbuyerpay'
+      OR TRIM(COALESCE(po.external_order_status, '')) = '等待买家付款'
+    )
+  )`;
+  const poPaidOnlineUnpaidSql = `(${poActivePaidSql} AND ${po1688WaitBuyerPaySql})`;
   const poDraftSql = `(po.status IN ('draft', 'pushed_pending_price') AND NOT ${poPaidSignalSql})`;
   const poPendingPaymentSql = `(po.status IN ('pending_finance_approval', 'approved_to_pay') AND NOT ${poPaidSignalSql})`;
   const poCompletedSql = `(po.status IN ('inbounded', 'closed'))`;
@@ -8156,6 +8199,9 @@ async function getPurchaseWorkbench(params = {}) {
       break;
     case "po_paid":
       poConditions.push(poActivePaidSql);
+      break;
+    case "po_paid_online_unpaid":
+      poConditions.push(poPaidOnlineUnpaidSql);
       break;
     case "po_completed":
       poConditions.push(poCompletedSql);
@@ -8594,6 +8640,7 @@ async function getPurchaseWorkbench(params = {}) {
       SUM(CASE WHEN ${poDraftSql} THEN 1 ELSE 0 END) AS draft_count,
       SUM(CASE WHEN ${poPendingPaymentSql} THEN 1 ELSE 0 END) AS pending_payment_count,
       SUM(CASE WHEN ${poActivePaidSql} THEN 1 ELSE 0 END) AS paid_count,
+      SUM(CASE WHEN ${poPaidOnlineUnpaidSql} THEN 1 ELSE 0 END) AS paid_online_unpaid_count,
       SUM(CASE WHEN po.status IN ('inbounded', 'closed') THEN 1 ELSE 0 END) AS completed_count,
       SUM(CASE WHEN po.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
       SUM(CASE WHEN po.status IN ('delayed', 'exception') THEN 1 ELSE 0 END) AS exception_count,
@@ -8606,6 +8653,7 @@ async function getPurchaseWorkbench(params = {}) {
     draft: Number(purchaseOrderStatusCounts.draft_count || 0),
     pendingPayment: Number(purchaseOrderStatusCounts.pending_payment_count || 0),
     paid: Number(purchaseOrderStatusCounts.paid_count || 0),
+    paidOnlineUnpaid: Number(purchaseOrderStatusCounts.paid_online_unpaid_count || 0),
     completed: Number(purchaseOrderStatusCounts.completed_count || 0),
     cancelled: Number(purchaseOrderStatusCounts.cancelled_count || 0),
     exception: Number(purchaseOrderStatusCounts.exception_count || 0),
@@ -21480,10 +21528,35 @@ function isUnsupportedRemotePurchaseAction(error) {
   return /Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(message);
 }
 
+// 把本机采集器（worker）抓取 1688 规格的失败原因，翻成运营看得懂的引导文案。
+// 用于 client 模式下本机没抓到、云端又没解析能力（只会甩「图搜密钥/ACL」误导文案）时替换报错。
+function buildClientWorkerSpecFailureError(diag = {}) {
+  switch (diag.reason) {
+    case "requires_login":
+      return new Error("本机采集器未登录 1688，读不到商品规格。请打开采集器浏览器登录 1688 后，再点一次「解析规格」。");
+    case "captcha":
+      return new Error("1688 对本机采集器弹了验证码，暂时读不到规格。请在采集器浏览器里手动通过验证后，再点一次「解析规格」。");
+    case "no_offer_id":
+      return new Error("没认出这个 1688 链接里的商品编号，请检查地址是否完整。");
+    case "timeout":
+    case "worker_error":
+    case "worker_unavailable":
+    case "empty":
+    case "no_spec_uncertain":
+      return new Error("本机采集器暂时没能读取该 1688 商品规格（可能没启动、正忙或网络超时）。请稍等几秒再点一次「解析规格」；若反复失败，确认采集器已开启并已登录 1688。");
+    default:
+      return null;
+  }
+}
+
 // 通过本地 Worker（带登录态浏览器）拉取 1688 商品页里的真实 SKU 三元组（specId/skuId/specAttrs）。
 // 这是绕过 1688 反爬 + 遨虾不返 cargoSpecId 的唯一可靠路径。worker.mjs 暴露 action="extract_1688_skus"。
-async function tryExtract1688SkusViaWorker(offerId) {
-  if (!erpState.workerInvoker || !offerId) return null;
+// diag 是出参：抓取失败时写入 reason（requires_login/captcha/timeout/...），供上层给运营准确提示。
+async function tryExtract1688SkusViaWorker(offerId, diag = {}) {
+  if (!erpState.workerInvoker || !offerId) {
+    diag.reason = "worker_unavailable";
+    return null;
+  }
   try {
     const workerResult = await erpState.workerInvoker(
       "extract_1688_skus",
@@ -21503,9 +21576,17 @@ async function tryExtract1688SkusViaWorker(offerId) {
       && !workerResult.requiresLogin) {
       return { ...workerResult, skus: [], noSpec: true };
     }
+    // 页面打开了但被挡（要登录/验证码），或抓取结果异常：记录原因供上层给运营准确提示。
+    if (workerResult && workerResult.requiresLogin) diag.reason = "requires_login";
+    else if (workerResult && workerResult.captcha) diag.reason = "captcha";
+    else if (workerResult) diag.reason = "no_spec_uncertain";
+    else diag.reason = "empty";
     return null;
   } catch (error) {
-    console.error("[preview_1688_url_specs] worker extract_1688_skus failed:", String(error?.message || error));
+    const message = String(error?.message || error);
+    diag.reason = /超时|timeout/i.test(message) ? "timeout" : "worker_error";
+    diag.message = message;
+    console.error("[preview_1688_url_specs] worker extract_1688_skus failed:", message);
     return null;
   }
 }
@@ -21554,6 +21635,8 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
 }
 
 async function performClientPreview1688UrlSpecs(payload = {}) {
+  // 本机采集器（worker）抓取失败的原因，留给后面云端也失败时给运营准确提示用。
+  const workerDiag = {};
   // 第一优先：本地 Worker（带 1688 登录态浏览器）抓真 specId。
   // 这是唯一能拿到 1688 fastCreateOrder 接受的 cargoSpecId 的路径——
   // 主控端裸 fetch 1688 详情页会被反爬挡住，遨虾接口只返 skuId。
@@ -21567,7 +21650,7 @@ async function performClientPreview1688UrlSpecs(payload = {}) {
         || extract1688OfferIdFromUrl(productUrlInput),
     );
     if (offerIdInput) {
-      const workerResult = await tryExtract1688SkusViaWorker(offerIdInput);
+      const workerResult = await tryExtract1688SkusViaWorker(offerIdInput, workerDiag);
       if (workerResult) {
         const detail = build1688DetailFromWorkerSkus(workerResult, offerIdInput, payload);
         const finalProductUrl = detail.productUrl;
@@ -21589,6 +21672,8 @@ async function performClientPreview1688UrlSpecs(payload = {}) {
           workbench: {},
         };
       }
+    } else {
+      workerDiag.reason = "no_offer_id";
     }
   }
 
@@ -21601,7 +21686,13 @@ async function performClientPreview1688UrlSpecs(payload = {}) {
     });
     return normalizePurchaseResultPoNumbers(response.result);
   } catch (error) {
-    if (!isUnsupportedRemotePurchaseAction(error)) throw error;
+    if (!isUnsupportedRemotePurchaseAction(error)) {
+      // 本机采集器没抓到（client 主路径），云端又没解析能力、只会甩「图搜密钥/ACL」误导文案——
+      // 拦下来换成运营看得懂的引导，把采集器的具体失败原因带出来；认不出原因才透传原错。
+      const friendly = buildClientWorkerSpecFailureError(workerDiag);
+      if (friendly) throw friendly;
+      throw error;
+    }
   }
 
   const fallbackPayload = await buildClientProductDetailMockPayload({
@@ -22294,6 +22385,24 @@ async function getMasterDataWorkbenchRuntime(params = {}) {
   };
   const { db } = requireErp();
   const actor = erpState.currentUser || {};
+  const part = optionalString(params.part);
+  if (part === "accounts") return { accounts: listAccounts(scopedParams) };
+  if (part === "suppliers") {
+    return {
+      suppliers: params.compact || params.forSelect
+        ? listSupplierOptions(scopedParams)
+        : listSuppliers(scopedParams),
+    };
+  }
+  if (part === "skus") return { skus: listSkus(scopedParams) };
+  if (part === "alibaba1688Addresses") {
+    await ensureDefault1688DeliveryAddresses(db, {
+      companyId: scopedParams.companyId,
+      actor,
+      wait: true,
+    });
+    return { alibaba1688Addresses: list1688DeliveryAddresses({ status: "active", companyId: scopedParams.companyId }) };
+  }
   await ensureDefault1688DeliveryAddresses(db, {
     companyId: scopedParams.companyId,
     actor,
@@ -22373,9 +22482,27 @@ async function deleteAccountRuntime(payload = {}, actor = {}) {
 }
 
 async function listSuppliersRuntime(params = {}) {
-  // 0.3.23 修 N+1：见 listAccountsRuntime 注释。
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    let cached = null;
+    try { cached = supplierCache.getCachedSuppliers(); } catch { cached = null; }
+    if (cached) {
+      void supplierCache.triggerSync(params).catch(() => {});
+      return params.compact || params.forSelect ? compactSupplierRows(cached) : cached;
+    }
+    try {
+      const suppliers = await supplierCache.triggerSync(params);
+      return params.compact || params.forSelect ? compactSupplierRows(suppliers) : suppliers;
+    } catch (error) {
+      let stale = null;
+      try { stale = supplierCache.getCachedSuppliers(); } catch { stale = null; }
+      if (stale) return params.compact || params.forSelect ? compactSupplierRows(stale) : stale;
+      throw error;
+    }
+  }
   const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "suppliers" });
-  return workbench.suppliers || [];
+  const suppliers = workbench.suppliers || [];
+  return params.compact || params.forSelect ? compactSupplierRows(suppliers) : suppliers;
 }
 
 async function listFeishuSupplierGoodsRuntime(params = {}) {
@@ -23248,6 +23375,7 @@ function startLanService(payload = {}) {
     upsertAccount,
     deleteAccount,
     listSuppliers,
+    listSupplierOptions,
     createSupplier,
     listSkus,
     listSkuStockDetails,
@@ -23468,6 +23596,7 @@ async function startErpHeadlessServer(options = {}) {
     upsertAccount,
     deleteAccount,
     listSuppliers,
+    listSupplierOptions,
     createSupplier,
     listSkus,
     listSkuStockDetails,
@@ -23644,12 +23773,42 @@ function listJushuitanRawRuntime(params = {}) {
 //   - 把 "reply was never sent"（promise 永不 settle）变成具体超时错误传给 renderer
 //   - 错误同时写到 <userData>/diagnostics/erp-ipc.log，现场可直接拷回查堆栈
 // 只在 registerErpIpcHandlers 内被用到，因此本函数定义紧跟在它之前。
+const ERP_IPC_SLOW_SUCCESS_MS = Number(process.env.ERP_IPC_SLOW_SUCCESS_MS) > 0
+  ? Number(process.env.ERP_IPC_SLOW_SUCCESS_MS)
+  : 800;
+const ERP_IPC_LARGE_RESPONSE_BYTES = Number(process.env.ERP_IPC_LARGE_RESPONSE_BYTES) > 0
+  ? Number(process.env.ERP_IPC_LARGE_RESPONSE_BYTES)
+  : 1_000_000;
+
+function appendErpIpcDiagnosticLine(line) {
+  try {
+    if (!erpState.userDataDir) return;
+    const dir = path.join(erpState.userDataDir, "diagnostics");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "erp-ipc.log"), line);
+  } catch {}
+}
+
+function shouldMeasureErpHandlerBytes(name, elapsedMs) {
+  return elapsedMs >= ERP_IPC_SLOW_SUCCESS_MS
+    || name === "erp:purchase:workbench"
+    || name === "erp:purchase:action";
+}
+
+function measureJsonBytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
+  } catch {
+    return 0;
+  }
+}
+
 function wrapErpHandler(name, fn, { timeoutMs = 180000 } = {}) {
   return async (event, ...args) => {
     const t0 = Date.now();
     let timer = null;
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         Promise.resolve().then(() => fn(event, ...args)),
         new Promise((_, reject) => {
           timer = setTimeout(
@@ -23659,6 +23818,14 @@ function wrapErpHandler(name, fn, { timeoutMs = 180000 } = {}) {
           if (timer.unref) timer.unref();
         }),
       ]);
+      const elapsedMs = Date.now() - t0;
+      const responseBytes = shouldMeasureErpHandlerBytes(name, elapsedMs) ? measureJsonBytes(result) : 0;
+      if (elapsedMs >= ERP_IPC_SLOW_SUCCESS_MS || responseBytes >= ERP_IPC_LARGE_RESPONSE_BYTES) {
+        const line = `[${new Date().toISOString()}] ${name} ok ${elapsedMs}ms responseBytes=${responseBytes}\n`;
+        try { console.warn(`[ERP-IPC] ${name} ok in ${elapsedMs}ms, responseBytes=${responseBytes}`); } catch {}
+        appendErpIpcDiagnosticLine(line);
+      }
+      return result;
     } catch (error) {
       const elapsedMs = Date.now() - t0;
       const message = error?.message || String(error);
@@ -23666,14 +23833,7 @@ function wrapErpHandler(name, fn, { timeoutMs = 180000 } = {}) {
       try {
         console.error(`[ERP-IPC] ${name} failed in ${elapsedMs}ms: ${message}\n${stack}`);
       } catch {}
-      try {
-        if (erpState.userDataDir) {
-          const dir = path.join(erpState.userDataDir, "diagnostics");
-          fs.mkdirSync(dir, { recursive: true });
-          const line = `[${new Date().toISOString()}] ${name} ${elapsedMs}ms ${message}\n${stack}\n\n`;
-          fs.appendFileSync(path.join(dir, "erp-ipc.log"), line);
-        }
-      } catch {}
+      appendErpIpcDiagnosticLine(`[${new Date().toISOString()}] ${name} ${elapsedMs}ms ${message}\n${stack}\n\n`);
       const wrapped = new Error(`[${name}] ${message}`);
       wrapped.cause = error;
       throw wrapped;
