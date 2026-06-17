@@ -5,14 +5,16 @@ const Database = require("better-sqlite3");
 const ERP_DB = process.env.ERP_DB || "/opt/temu-erp-data/erp.sqlite";
 const db = new Database(ERP_DB);
 db.pragma("busy_timeout=60000");
-const { refreshConsignAll } = require("../electron/erp/services/temuOpenApiConsign.cjs");
+const { refreshConsignAllChunked } = require("../electron/erp/services/temuOpenApiConsign.cjs");
 const t0 = Date.now();
-try {
-  const r = refreshConsignAll(db);
-  console.log(new Date().toISOString(), "openapi_consign refreshed", JSON.stringify(r), "in", Date.now() - t0, "ms");
-} catch (e) {
-  console.error(new Date().toISOString(), "refresh failed:", (e && e.message) || e);
-  process.exitCode = 1;
-} finally {
-  db.close();
-}
+(async () => {
+  try {
+    const r = await refreshConsignAllChunked(db, 500);
+    console.log(new Date().toISOString(), "openapi_consign refreshed", JSON.stringify(r), "in", Date.now() - t0, "ms");
+  } catch (e) {
+    console.error(new Date().toISOString(), "refresh failed:", (e && e.message) || e);
+    process.exitCode = 1;
+  } finally {
+    db.close();
+  }
+})();

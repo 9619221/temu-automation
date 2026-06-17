@@ -108,10 +108,13 @@ async function rebuildSnapshotInternal(db, opts = {}) {
   const logger = opts.log || log;
   const t0 = Date.now();
 
-  db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot");
-  db.exec(SNAPSHOT_DDL);
-  ensureDisplayStatusColumn(db);
-  ensureOnlineStatusColumn(db);
+  // 影子表：新数据写入 _new，写完原子交换，重建期间旧快照始终可读
+  db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot_new");
+  db.exec(`CREATE TABLE temu_consign_unified_snapshot_new (
+    company_id TEXT NOT NULL, so_id TEXT, source TEXT, jst_status TEXT,
+    display_status TEXT, online_status TEXT, order_key TEXT, search_blob TEXT,
+    payload_json TEXT NOT NULL, rebuilt_at INTEGER NOT NULL
+  )`);
 
   const companies = db
     .prepare("SELECT DISTINCT company_id FROM jst_consign_deliveries WHERE company_id IS NOT NULL")
@@ -125,58 +128,68 @@ async function rebuildSnapshotInternal(db, opts = {}) {
   const selectAll = db.prepare(`${cte}\nSELECT * FROM unified`);
   const rebuiltAt = t0;
 
-  const replaceCompany = db.transaction((companyId) => {
-    const rows = selectAll.all({ company_id: companyId });
-    db.prepare("DELETE FROM temu_consign_unified_snapshot WHERE company_id = ?").run(companyId);
-    const ins = db.prepare(`
-      INSERT INTO temu_consign_unified_snapshot
-        (company_id, so_id, source, jst_status, display_status, online_status, order_key, search_blob, payload_json, rebuilt_at)
-      VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @online_status, @order_key, @search_blob, @payload_json, @rebuilt_at)
-    `);
-    for (const row of rows) {
-      ins.run({
-        company_id: companyId,
-        so_id: row.so_id || null,
-        source: row.source || null,
-        jst_status: row.jst_status || null,
-        display_status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
-        online_status: row.cloud_temu_status || null,
-        order_key: row.jst_order_date || row.cloud_order_time || null,
-        search_blob: buildSearchBlob(row),
-        payload_json: JSON.stringify(toPayload(row)),
-        rebuilt_at: rebuiltAt,
-      });
-    }
-    return rows.length;
+  const BATCH_SIZE = 1000;
+  const ins = db.prepare(`
+    INSERT INTO temu_consign_unified_snapshot_new
+      (company_id, so_id, source, jst_status, display_status, online_status, order_key, search_blob, payload_json, rebuilt_at)
+    VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @online_status, @order_key, @search_blob, @payload_json, @rebuilt_at)
+  `);
+  const insertBatch = db.transaction((batch) => {
+    for (const p of batch) ins.run(p);
   });
 
   let totalRows = 0;
   for (const companyId of companies) {
     const c0 = Date.now();
-    let n = 0;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        n = replaceCompany.immediate(companyId);
-        break;
-      } catch (e) {
-        if (attempt < 2 && e && /database is locked|SQLITE_BUSY/.test(e.message)) {
-          logger(`  ${companyId}: busy, retry ${attempt + 1}/3 in 5s...`);
-          await new Promise((r) => setTimeout(r, 5000));
-          continue;
+    const rows = selectAll.all({ company_id: companyId });
+    const params = rows.map((row) => ({
+      company_id: companyId,
+      so_id: row.so_id || null,
+      source: row.source || null,
+      jst_status: row.jst_status || null,
+      display_status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
+      online_status: row.cloud_temu_status || null,
+      order_key: row.jst_order_date || row.cloud_order_time || null,
+      search_blob: buildSearchBlob(row),
+      payload_json: JSON.stringify(toPayload(row)),
+      rebuilt_at: rebuiltAt,
+    }));
+    for (let i = 0; i < params.length; i += BATCH_SIZE) {
+      const chunk = params.slice(i, i + BATCH_SIZE);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          insertBatch.immediate(chunk);
+          break;
+        } catch (e) {
+          if (attempt < 2 && e && /database is locked|SQLITE_BUSY/.test(e.message)) {
+            logger(`  ${companyId}: busy at row ${i}, retry ${attempt + 1}/3...`);
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+          throw e;
         }
-        throw e;
       }
+      await new Promise((r) => setImmediate(r));
     }
-    totalRows += n;
-    logger(`  ${companyId}: ${n} 行, ${((Date.now() - c0) / 1000).toFixed(1)}s`);
-    await new Promise((r) => setImmediate(r));
+    totalRows += rows.length;
+    logger(`  ${companyId}: ${rows.length} 行, ${((Date.now() - c0) / 1000).toFixed(1)}s`);
   }
 
-  if (companies.length) {
-    db.prepare(
-      `DELETE FROM temu_consign_unified_snapshot WHERE company_id NOT IN (${companies.map(() => "?").join(",")})`,
-    ).run(...companies);
-  }
+  // 原子交换：旧表在 COMMIT 前始终可读，COMMIT 瞬间切到新数据
+  db.transaction(() => {
+    db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot");
+    db.exec("ALTER TABLE temu_consign_unified_snapshot_new RENAME TO temu_consign_unified_snapshot");
+  }).immediate();
+  db.exec(`
+    CREATE INDEX idx_consign_unified_snap_company_order
+      ON temu_consign_unified_snapshot(company_id, order_key DESC, so_id DESC);
+    CREATE INDEX idx_consign_unified_snap_company_source
+      ON temu_consign_unified_snapshot(company_id, source);
+    CREATE INDEX idx_consign_unified_snap_company_status
+      ON temu_consign_unified_snapshot(company_id, display_status);
+    CREATE INDEX idx_consign_unified_snap_company_online_status
+      ON temu_consign_unified_snapshot(company_id, online_status);
+  `);
 
   logger(`完成：共 ${totalRows} 行, 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   return { totalRows, companies: companies.length, ms: Date.now() - t0 };

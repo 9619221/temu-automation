@@ -48,9 +48,9 @@ function openErpDatabaseReadonly(dbPathOrOptions = {}) {
   // 是主连接的事）。只保留对只读有意义的两项：query_only 强化只读约束、busy_timeout 防读阻塞。
   const db = new Database(dbPath, { readonly: true });
   db.pragma("query_only = ON");
-  db.pragma("busy_timeout = 10000");
+  db.pragma("busy_timeout = 3000");
   db.pragma("cache_size = -65536");
-  db.pragma("mmap_size = 268435456");
+  db.pragma("mmap_size = 1073741824");
   db.__erpDbPath = dbPath;
   return db;
 }

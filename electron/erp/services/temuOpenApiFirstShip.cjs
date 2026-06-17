@@ -117,14 +117,22 @@ async function refreshFirstShipAll(db, opts = {}) {
   let totalFirst = 0;
   const perMall = [];
   const errors = [];
-  for (const m of malls) {
-    try {
+  const CONCURRENCY = 4;
+  for (let i = 0; i < malls.length; i += CONCURRENCY) {
+    const batch = malls.slice(i, i + CONCURRENCY);
+    const results = await Promise.allSettled(batch.map(async (m) => {
       const rows = await collectFirstShipForMall(db, m, opts);
-      const n = upsertFirstShip(db, rows);
-      totalFirst += n;
-      if (n > 0) perMall.push({ mall: m.mall_id, first: n });
-    } catch (e) {
-      errors.push({ mall: m.mall_id, error: (e && e.message) || String(e) });
+      return { mall: m, rows };
+    }));
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const n = upsertFirstShip(db, r.value.rows);
+        totalFirst += n;
+        if (n > 0) perMall.push({ mall: r.value.mall.mall_id, first: n });
+      } else {
+        const mall_id = batch[results.indexOf(r)]?.mall_id;
+        errors.push({ mall: mall_id, error: (r.reason && r.reason.message) || String(r.reason) });
+      }
     }
   }
   return { malls: malls.length, first: totalFirst, perMall, errors };
