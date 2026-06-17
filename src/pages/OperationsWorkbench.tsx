@@ -10,6 +10,9 @@ import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
 import PipelineTab from "../components/PipelineTab";
+import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, useReviews, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
+import { useStoreScope } from "../hooks/useStoreScope";
+import { useOpsWorkbenchStore } from "../stores/opsWorkbenchStore";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -255,65 +258,36 @@ export default function OperationsWorkbench() {
   // 「商品全景」Tab(PipelineTab)自管数据,顶部统一刷新通过递增此信号触发它重新加载
   const [pipelineReloadSignal, setPipelineReloadSignal] = useState(0);
   // 「我的店」视角:按负责人(owner)过滤全局,记住上次选择
-  const [ownerFilter, setOwnerFilter] = useState<string>(() => { try { return localStorage.getItem("ow_owner") || "all"; } catch { return "all"; } });
-  const setOwner = useCallback((v: string) => { setOwnerFilter(v); try { localStorage.setItem("ow_owner", v); } catch { /* */ } }, []);
+  const ownerFilter = useOpsWorkbenchStore((s) => s.ownerFilter);
+  const setOwner = useOpsWorkbenchStore((s) => s.setOwnerFilter);
   // 合并 Tab 内的子段切换
   const [storeSeg, setStoreSeg] = useSessionState<string>(owViewKey("storeSeg"), "ad");
   const [prodSeg, setProdSeg] = useSessionState<string>(owViewKey("prodSeg"), "panel");
   const goProduct = useCallback((seg: string) => { setProdSeg(seg); setActiveTab("product"); }, []);
-  const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
-  const [skuLoading, setSkuLoading] = useState(false);
-  const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
-  const [riskLoading, setRiskLoading] = useState(false);
-  const [riskLoaded, setRiskLoaded] = useState(false);
-  const [actRows, setActRows] = useState<ActivityRow[]>([]); // 由 actProducts[].activities 摊平派生(今日待办/最小库存/报名弹窗复用既有 ActivityRow 逻辑)
-  const [actProducts, setActProducts] = useState<ActProductRow[]>([]); // 后端聚合好的商品概览(活动报名表格直接用,不再前端聚合)
-  const [actLoading, setActLoading] = useState(false);
-  const [actLoaded, setActLoaded] = useState(false);
-  const [shopRows, setShopRows] = useState<ShopHealthRow[]>([]);
-  const [shopLoading, setShopLoading] = useState(false);
-  const [shopLoaded, setShopLoaded] = useState(false);
-  const [adRows, setAdRows] = useState<AdMallRow[]>([]);
-  const [adLoading, setAdLoading] = useState(false);
-  const [adLoaded, setAdLoaded] = useState(false);
-  const [stockRows, setStockRows] = useState<StockOrderRow[]>([]);
-  const [stockLoading, setStockLoading] = useState(false);
-  const [stockLoaded, setStockLoaded] = useState(false);
-  const [trendRows, setTrendRows] = useState<TrendRow[]>([]);
-  const [trendLoading, setTrendLoading] = useState(false);
-  const [trendLoaded, setTrendLoaded] = useState(false);
-  const [panelRows, setPanelRows] = useState<ProductPanelRow[]>([]);
+  // 数据层:SWR hooks(enabled 对齐原 activeTab 条件;首次拉满即停;刷新走 reloadAllOpsReports)
+  const { rows: skuRows, loading: skuLoading, reload: loadSku }: { rows: SkuRow[]; loading: boolean; reload: () => void } = useSkuSales();
+  const { rows: riskRows, loading: riskLoading }: { rows: RiskRow[]; loading: boolean } = useRiskList(activeTab === "risk" || activeTab === "todo" || activeTab === "pipeline");
+  const { products: actProducts, rows: actRows, loading: actLoading }: { products: ActProductRow[]; rows: ActivityRow[]; loading: boolean } = useActivityList(activeTab === "activity" || activeTab === "todo");
+  const { rows: adRows, loading: adLoading }: { rows: AdMallRow[]; loading: boolean } = useAdReport(activeTab === "store");
+  const { rows: stockRows, loading: stockLoading, loaded: stockLoaded }: { rows: StockOrderRow[]; loading: boolean; loaded: boolean } = useStockOrders(activeTab === "stock");
+  const { rows: trendRows, loading: trendLoading }: { rows: TrendRow[]; loading: boolean } = useSalesTrend(!OFFICIAL_SOURCE && activeTab === "store");
+  const { rows: panelRows, loading: panelLoading }: { rows: ProductPanelRow[]; loading: boolean } = useProductPanel(activeTab === "product" || activeTab === "pipeline");
+  const { rows: firstShipRows }: { rows: FirstShipRow[] } = useFirstShipToday(activeTab === "overview");
+  const { rows: goodsCreatedRows }: { rows: Array<{ mall_id: string; store_code: string | null }> } = useGoodsCreatedToday(activeTab === "overview");
+  const { rows: qcRows, loading: qcLoading }: { rows: QcRow[]; loading: boolean } = useOpenapiQc(activeTab === "qc" || activeTab === "pipeline");
+  const { rows: qualityRows, shops: qualityShops, loading: qualityLoading }: { rows: QualityRow[]; shops: QualityShopRow[]; loading: boolean } = useQualityPanel(activeTab === "quality" || activeTab === "pipeline");
+  const { rows: reviewRows, loading: reviewLoading }: { rows: ReviewRow[]; loading: boolean } = useReviews(activeTab === "review");
+  const { rows: hpfRows, loading: hpfLoading }: { rows: HpfRow[]; loading: boolean } = useHighPriceFlow(activeTab === "hpf" || activeTab === "pipeline");
+  const { rows: lifecycleRows, loading: lifecycleLoading }: { rows: Array<{ mall_id: string; skc_id: string; status: string }>; loading: boolean } = useLifecycle(activeTab === "overview" || activeTab === "product");
+  // 字典共享:店铺健康全局只拉一次,派生 owner 映射/过滤
+  const { shopRows, shopLoading, ownerOptions, inScope }: { shopRows: ShopHealthRow[]; shopLoading: boolean; ownerOptions: string[]; inScope: (code: string | null | undefined) => boolean } = useStoreScope();
+  // 保留:销量趋势弹窗 / 疵点照片预览(非 report,组件局部 UI 态)
   const [trendOf, setTrendOf] = useState<{ productId: string; title: string } | null>(null);
   const [trendModalRows, setTrendModalRows] = useState<Array<{ date: string; qty: number; revenue: number }>>([]);
   const [trendModalLoading, setTrendModalLoading] = useState(false);
   const [flawPreviewVisible, setFlawPreviewVisible] = useState(false);
   const [flawPreviewImages, setFlawPreviewImages] = useState<string[]>([]);
-  const [panelLoading, setPanelLoading] = useState(false);
-  const [panelLoaded, setPanelLoaded] = useState(false);
-  const [firstShipRows, setFirstShipRows] = useState<FirstShipRow[]>([]);
-  const [firstShipLoaded, setFirstShipLoaded] = useState(false);
-  const [firstShipLoading, setFirstShipLoading] = useState(false);
-  const [goodsCreatedRows, setGoodsCreatedRows] = useState<Array<{ mall_id: string; store_code: string | null }>>([]);
-  const [goodsCreatedLoaded, setGoodsCreatedLoaded] = useState(false);
-  const [goodsCreatedLoading, setGoodsCreatedLoading] = useState(false);
-  const [qcRows, setQcRows] = useState<QcRow[]>([]);
-  const [qcLoaded, setQcLoaded] = useState(false);
-  const [qcLoading, setQcLoading] = useState(false);
-  const [qualityRows, setQualityRows] = useState<QualityRow[]>([]);
-  const [qualityShops, setQualityShops] = useState<QualityShopRow[]>([]);
-  const [qualityLoaded, setQualityLoaded] = useState(false);
-  const [qualityLoading, setQualityLoading] = useState(false);
-  const [reviewRows, setReviewRows] = useState<ReviewRow[]>([]);
-  const [reviewLoaded, setReviewLoaded] = useState(false);
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [hpfRows, setHpfRows] = useState<HpfRow[]>([]);
-  const [hpfLoaded, setHpfLoaded] = useState(false);
-  const [hpfLoading, setHpfLoading] = useState(false);
-  // 官方生命周期 / 选品状态行(含 mall_id),供总览「上新生命周期分布」按「我的店」过滤统计
-  const [lifecycleRows, setLifecycleRows] = useState<Array<{ mall_id: string; skc_id: string; status: string }>>([]);
-  const [lifecycleLoaded, setLifecycleLoaded] = useState(false);
-  const [lifecycleLoading, setLifecycleLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error] = useState<string | null>(null);
 
   const [storeFilter, setStoreFilter] = useSessionState(owViewKey("storeFilter"), "all");
   const [diagFilter, setDiagFilter] = useSessionState(owViewKey("diagFilter"), "all");
@@ -552,137 +526,6 @@ export default function OperationsWorkbench() {
     });
   }, [selActRows, effPrice, effStock]);
 
-  const loadSku = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
-    setSkuLoading(true);
-    try {
-      const resp = await window.electronAPI.erp.reports.skuSales({ includeTest: false });
-      if (resp.ok && resp.data) { setSkuRows((resp.data.rows || []) as SkuRow[]); setError(null); }
-      else setError(resp.error || "加载失败");
-    } catch (e: any) { setError(e?.message || String(e)); } finally { setSkuLoading(false); }
-  }, []);
-  const loadRisk = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.riskList) return;
-    setRiskLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.riskList({ includeTest: false }); if (resp.ok && resp.data) { setRiskRows((resp.data.rows || []) as RiskRow[]); setRiskLoaded(true); } } catch { /* */ } finally { setRiskLoading(false); }
-  }, []);
-  const loadAct = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.activityList) return;
-    setActLoading(true);
-    try {
-      const resp = await window.electronAPI.erp.reports.activityList({ includeTest: false });
-      if (resp.ok && resp.data) {
-        const products = ((resp.data as { products?: ActProductRow[] }).products || []) as ActProductRow[];
-        setActProducts(products);
-        // 摊平内嵌明细回 ActivityRow(从父商品补 mall/store/sku 等),供今日待办/最小库存/报名弹窗沿用既有逻辑
-        const flat: ActivityRow[] = [];
-        for (const p of products) for (const a of p.activities) {
-          flat.push({ mall_id: p.mall_id, store_code: p.store_code, mall_name: p.mall_name,
-            kind: a.kind, title: a.title, status: a.status, activity_id: a.activity_id,
-            product_id: p.product_id, activity_type: a.activity_type, sku_id: a.sku_id,
-            sku_ext_code: p.sku_ext_code, skc_id: p.skc_id, product_name: p.product_name, thumb: p.thumb,
-            signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
-            activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: flat.length });
-        }
-        setActRows(flat);
-        setActLoaded(true);
-      }
-    } catch { /* */ } finally { setActLoading(false); }
-  }, []);
-  const loadShop = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.shopHealth) return;
-    setShopLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.shopHealth({ includeTest: false }); if (resp.ok && resp.data) { setShopRows((resp.data.rows || []) as ShopHealthRow[]); setShopLoaded(true); } } catch { /* */ } finally { setShopLoading(false); }
-  }, []);
-
-  // 官方店铺维度广告/流量(近7天)：来自 ad_report_mall 快照
-  const loadAd = useCallback(async () => {
-    const api = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!api?.listRecords) return;
-    setAdLoading(true);
-    try {
-      const resp = await api.listRecords("ad_report_mall");
-      const rows: AdMallRow[] = ((resp?.rows || []) as any[]).map((r) => {
-        const sum = (r.raw && r.raw.summary) || {};
-        const g = (k: string) => (sum[k] && sum[k].total && sum[k].total.val != null) ? Number(sum[k].total.val) : null;
-        return {
-          mall_id: String(r.mall_id), store: String(r.mall_id),
-          imprCnt: g("imprCnt"), clkCnt: g("clkCnt"), ctr: g("ctr"), cartCnt: g("cartCnt"),
-          cvr: g("cvr"), orderPayCnt: g("orderPayCnt"), orderPayAmt: g("orderPayAmt"),
-          spend: g("spend"), roas: g("roas"), acos: g("acos"),
-        };
-      });
-      setAdRows(rows); setAdLoaded(true);
-    } catch { /* */ } finally { setAdLoading(false); }
-  }, []);
-  const loadStockOrders = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.stockOrders) return;
-    setStockLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.stockOrders({ includeTest: false }); if (resp.ok && resp.data) { setStockRows((resp.data.rows || []) as StockOrderRow[]); setStockLoaded(true); } } catch { /* */ } finally { setStockLoading(false); }
-  }, []);
-  const loadTrend = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.salesTrend) return;
-    setTrendLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.salesTrend({ includeTest: false }); if (resp.ok && resp.data) { setTrendRows((resp.data.rows || []) as TrendRow[]); setTrendLoaded(true); } } catch { /* */ } finally { setTrendLoading(false); }
-  }, []);
-
-  const loadPanel = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.productPanel) return;
-    setPanelLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.productPanel({ includeTest: false }); if (resp.ok && resp.data) { setPanelRows((resp.data.rows || []) as ProductPanelRow[]); setPanelLoaded(true); } } catch { /* */ } finally { setPanelLoading(false); }
-  }, []);
-
-  // 官方「生命周期 / 选品状态」(含 mall_id),供总览「上新生命周期分布」按「我的店」过滤统计;与商品管理页同源
-  const loadLifecycle = useCallback(async () => {
-    const api = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!api?.listRecords) return;
-    setLifecycleLoading(true);
-    try {
-      const lc = await api.listRecords("product_lifecycle");
-      const rows: Array<{ mall_id: string; skc_id: string; status: string }> = [];
-      for (const r of ((lc?.rows || []) as any[])) {
-        if (r?.product_skc_id != null && r?.status != null) rows.push({ mall_id: String(r.mall_id ?? ""), skc_id: String(r.product_skc_id), status: String(r.status) });
-      }
-      setLifecycleRows(rows); setLifecycleLoaded(true);
-    } catch { /* 生命周期非关键,失败不影响其它统计 */ } finally { setLifecycleLoading(false); }
-  }, []);
-
-  const loadFirstShip = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.firstShipToday) return;
-    setFirstShipLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.firstShipToday({ includeTest: false }); if (resp.ok && resp.data) { setFirstShipRows((resp.data.rows || []) as unknown as FirstShipRow[]); setFirstShipLoaded(true); } } catch { /* */ } finally { setFirstShipLoading(false); }
-  }, []);
-
-  const loadGoodsCreated = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.goodsCreatedToday) return;
-    setGoodsCreatedLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.goodsCreatedToday({ includeTest: false }); if (resp.ok && resp.data) { setGoodsCreatedRows((resp.data.rows || []) as unknown as Array<{ mall_id: string; store_code: string | null }>); setGoodsCreatedLoaded(true); } } catch { /* */ } finally { setGoodsCreatedLoading(false); }
-  }, []);
-
-  const loadQc = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.openapiQc) return;
-    setQcLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.openapiQc({ includeTest: false }); if (resp.ok && resp.data) { setQcRows((resp.data.rows || []) as unknown as QcRow[]); setQcLoaded(true); } } catch { /* */ } finally { setQcLoading(false); }
-  }, []);
-
-  const loadQuality = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.qualityPanel) return;
-    setQualityLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.qualityPanel({ includeTest: false }); if (resp.ok && resp.data) { setQualityRows((resp.data.rows || []) as unknown as QualityRow[]); setQualityShops((resp.data.shops || []) as unknown as QualityShopRow[]); setQualityLoaded(true); } } catch { /* */ } finally { setQualityLoading(false); }
-  }, []);
-
-  const loadReviews = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.reviews) return;
-    setReviewLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.reviews({ includeTest: false }); if (resp.ok && resp.data) { setReviewRows((resp.data.rows || []) as unknown as ReviewRow[]); setReviewLoaded(true); } } catch { /* */ } finally { setReviewLoading(false); }
-  }, []);
-
-  const loadHpf = useCallback(async () => {
-    if (!window.electronAPI?.erp?.reports?.highPriceFlow) return;
-    setHpfLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.highPriceFlow({ includeTest: false }); if (resp.ok && resp.data) { setHpfRows((resp.data.rows || []) as unknown as HpfRow[]); setHpfLoaded(true); } } catch { /* */ } finally { setHpfLoading(false); }
-  }, []);
-
   // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
   const openFlawImages = useCallback(async (mallId: string, qcBillId: string) => {
     if (!window.electronAPI?.erp?.reports?.qcFlawImages) return;
@@ -695,7 +538,6 @@ export default function OperationsWorkbench() {
     } catch { hide(); message.error("加载疵点照片失败"); }
   }, []);
 
-  useEffect(() => { loadSku(); }, [loadSku]);
   // 商品销量趋势弹窗:打开时按 product_id 拉逐日数据(走 cloud 抓包快照)
   useEffect(() => {
     if (!trendOf) return;
@@ -728,71 +570,10 @@ export default function OperationsWorkbench() {
       } catch { /* 后端不可用,保持 localStorage */ }
     })();
   }, []);
-  useEffect(() => {
-    const store = activeTab === "store";
-    const todo = activeTab === "todo"; // 今日待办依赖风险+活动+诊断(诊断走 skuRows,已在挂载时加载)
-    // shop 始终加载:owner 映射是「我的店」全局过滤的基础
-    if (!shopLoaded && !shopLoading) loadShop();
-    if (!OFFICIAL_SOURCE && store && !trendLoaded && !trendLoading) loadTrend();
-    if (store && !adLoaded && !adLoading) loadAd();
-    if (activeTab === "stock" && !stockLoaded && !stockLoading) loadStockOrders();
-    if ((activeTab === "risk" || todo) && !riskLoaded && !riskLoading) loadRisk();
-    if ((activeTab === "activity" || todo) && !actLoaded && !actLoading) loadAct();
-    if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
-    // 生命周期分布在「总览」展示,也供「商品」复用;两处任一激活即拉(独立 loading,不阻塞首屏其它统计)
-    if ((activeTab === "overview" || activeTab === "product") && !lifecycleLoaded && !lifecycleLoading) loadLifecycle();
-    // 今日首单发货:在总览展示,首屏拉(独立 loading,数据小不阻塞其它统计)
-    if (activeTab === "overview" && !firstShipLoaded && !firstShipLoading) loadFirstShip();
-    if (activeTab === "overview" && !goodsCreatedLoaded && !goodsCreatedLoading) loadGoodsCreated();
-    if (activeTab === "qc" && !qcLoaded && !qcLoading) loadQc();
-    if (activeTab === "quality" && !qualityLoaded && !qualityLoading) loadQuality();
-    if (activeTab === "review" && !reviewLoaded && !reviewLoading) loadReviews();
-    if (activeTab === "hpf" && !hpfLoaded && !hpfLoading) loadHpf();
-  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, lifecycleLoaded, lifecycleLoading, firstShipLoaded, firstShipLoading, goodsCreatedLoaded, goodsCreatedLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, reviewLoaded, reviewLoading, hpfLoaded, hpfLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel, loadLifecycle, loadFirstShip, loadGoodsCreated, loadQc, loadQuality, loadReviews, loadHpf]);
-
-  useEffect(() => {
-    if (activeTab !== "pipeline") return;
-    const lightTimer = window.setTimeout(() => {
-      if (!riskLoaded && !riskLoading) loadRisk();
-      if (!qcLoaded && !qcLoading) loadQc();
-      if (!qualityLoaded && !qualityLoading) loadQuality();
-      if (!hpfLoaded && !hpfLoading) loadHpf();
-    }, 700);
-    const panelTimer = window.setTimeout(() => {
-      if (!panelLoaded && !panelLoading) loadPanel();
-    }, 1600);
-    return () => {
-      window.clearTimeout(lightTimer);
-      window.clearTimeout(panelTimer);
-    };
-  }, [activeTab, riskLoaded, riskLoading, panelLoaded, panelLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, hpfLoaded, hpfLoading, loadRisk, loadPanel, loadQc, loadQuality, loadHpf]);
-
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
     return { ...r, _issues: issues, _level: issues.length ? Math.max(...issues.map((i) => i.level)) : 0 };
   }), [skuRows]);
-
-  // store_code / mall_id → owner 映射(来自店铺健康),用于「我的店」过滤
-  const storeOwnerMap = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of shopRows) {
-      if (!r.owner) continue;
-      if (r.store_code) m.set(r.store_code, r.owner);
-      if (r.mall_id) m.set(r.mall_id, r.owner);
-    }
-    return m;
-  }, [shopRows]);
-  const ownerOptions = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of shopRows) if (r.owner) s.add(r.owner);
-    return Array.from(s).sort();
-  }, [shopRows]);
-  // 当前 owner 视角下该店是否可见;选了具体 owner 但映射还没到(shop未加载)时不误杀,放行
-  const inScope = useCallback((code: string | null | undefined) => {
-    if (ownerFilter === "all") return true;
-    if (storeOwnerMap.size === 0) return true;
-    return storeOwnerMap.get(code || "") === ownerFilter;
-  }, [ownerFilter, storeOwnerMap]);
   const isPipelineStoreInScope = useCallback((storeCode?: string | null, mallId?: string | null) => {
     return inScope(storeCode || mallId);
   }, [inScope]);
@@ -1831,7 +1612,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); setQcLoaded(false); setQualityLoaded(false); setReviewLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "qc") loadQc(); else if (activeTab === "quality") loadQuality(); else if (activeTab === "review") loadReviews(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } else if (activeTab === "pipeline") setPipelineReloadSignal((n) => n + 1); message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { reloadAllOpsReports(); if (activeTab === "pipeline") setPipelineReloadSignal((n) => n + 1); message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >
