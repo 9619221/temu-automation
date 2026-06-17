@@ -907,7 +907,23 @@ export default function WarehouseCenter() {
       message.success(successText);
       return true;
     } catch (error: any) {
-      message.error(error?.message || "操作失败");
+      const msg = error?.message || "操作失败";
+      if (msg.includes("differs from current average") && !payload.allowCostJump) {
+        const m = msg.match(/inbound cost ([\d.]+) differs from current average ([\d.]+)/);
+        const newCost = m?.[1] ? Number(m[1]).toFixed(4) : "?";
+        const oldAvg = m?.[2] ? Number(m[2]).toFixed(4) : "?";
+        const pct = (m?.[1] && m?.[2]) ? ((Math.abs(Number(m[1]) - Number(m[2])) / Number(m[2])) * 100).toFixed(1) : "?";
+        setActingKey(null);
+        Modal.confirm({
+          title: "入库成本偏差较大",
+          content: `本次入库单价 ¥${newCost}，历史均价 ¥${oldAvg}，偏差 ${pct}%。确认继续入库？`,
+          okText: "确认入库",
+          cancelText: "取消",
+          onOk: () => runAction(key, { ...payload, allowCostJump: true }, successText),
+        });
+        return false;
+      }
+      message.error(msg);
       return false;
     } finally {
       setActingKey(null);
@@ -1415,7 +1431,7 @@ export default function WarehouseCenter() {
     },
   }), [role, selectedReceiptIds]);
 
-  const runBulkInbound = useCallback(async () => {
+  const runBulkInbound = useCallback(async (extraPayload?: Record<string, any>) => {
     if (!erp) return false;
     const receiptIds = selectedActionableRows.map((row) => row.id);
     if (!receiptIds.length) {
@@ -1425,7 +1441,7 @@ export default function WarehouseCenter() {
     const params = buildWorkbenchParams();
     setActingKey("bulk-inbound");
     try {
-      const result = await erp.warehouse.action({ action: "confirm_inbound_bulk", receiptIds, ...params });
+      const result = await erp.warehouse.action({ action: "confirm_inbound_bulk", receiptIds, ...params, ...extraPayload });
       applyWorkbench(result?.workbench || await erp.warehouse.workbench(params), params);
       setReceiptDetailDrawerOpen(false);
       setSelectedReceiptId(null);
@@ -1444,7 +1460,19 @@ export default function WarehouseCenter() {
       message.success(`已批量处理 ${result?.result?.count || receiptIds.length} 单`);
       return true;
     } catch (error: any) {
-      message.error(error?.message || "批量处理失败");
+      const msg = error?.message || "批量处理失败";
+      if (msg.includes("differs from current average") && !extraPayload?.allowCostJump) {
+        setActingKey(null);
+        Modal.confirm({
+          title: "入库成本偏差较大",
+          content: "批量入库中有商品的入库成本与历史均价偏差超过 50%，确认继续入库？",
+          okText: "确认入库",
+          cancelText: "取消",
+          onOk: () => runBulkInbound({ allowCostJump: true }),
+        });
+        return false;
+      }
+      message.error(msg);
       return false;
     } finally {
       setActingKey(null);

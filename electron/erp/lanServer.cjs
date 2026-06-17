@@ -10,10 +10,15 @@ const DEFAULT_BIND_ADDRESS = "0.0.0.0";
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-const PURCHASE_WB_CACHE_TTL_MS = 30_000;
-const PURCHASE_WB_STALE_TTL_MS = 120_000;
+const PURCHASE_WB_CACHE_TTL_MS = 60_000;
+const PURCHASE_WB_STALE_TTL_MS = 300_000;
 const _purchaseWbCache = new Map();
 const _purchaseWbInflight = new Map();
+
+const OUTBOUND_WB_CACHE_TTL_MS = 60_000;
+const OUTBOUND_WB_STALE_TTL_MS = 300_000;
+let _outboundWbCache = null;
+let _outboundWbInflight = null;
 let _purchaseWbGate = Promise.resolve();
 function _purchaseWbCacheKey(payload, user) {
   const key = JSON.stringify({ p: payload, u: user?.companyId || "" });
@@ -513,7 +518,8 @@ cloud_agg AS (
     MIN(order_time) AS cloud_order_time,
     MIN(latest_ship_at) AS cloud_latest_ship_at,
     MIN(logistics_info) AS cloud_logistics_info,
-    COUNT(*) AS cloud_item_count
+    COUNT(*) AS cloud_item_count,
+    NULL AS cloud_shop_name
   FROM cloud.temu_stock_order_snapshot
   WHERE stock_order_no IS NOT NULL AND stock_order_no != ''
   GROUP BY stock_order_no
@@ -570,7 +576,8 @@ jst_left AS (
     c.cloud_order_time,
     c.cloud_latest_ship_at,
     c.cloud_logistics_info,
-    c.cloud_item_count
+    c.cloud_item_count,
+    c.cloud_shop_name
   FROM jst_base j
   LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
   LEFT JOIN jst_ship_agg sa ON sa.o_id = j.o_id
@@ -627,7 +634,8 @@ cloud_only AS (
     c.cloud_order_time,
     c.cloud_latest_ship_at,
     c.cloud_logistics_info,
-    c.cloud_item_count
+    c.cloud_item_count,
+    c.cloud_shop_name
   FROM cloud_agg c
   LEFT JOIN erp_consign_local_state ls
     ON ls.mall_id = c.cloud_mall_id AND ls.so_id = c.cloud_so
@@ -677,13 +685,13 @@ const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
            ELSE NULL END AS cloud_logistics_info,
       sku_count AS cloud_item_count,
       receive_address_json AS cloud_receive_address_json,
-      m.send_address_json AS cloud_send_address_json
+      m.send_address_json AS cloud_send_address_json,
+      COALESCE(m.store_code, m.mall_name) AS cloud_shop_name
     FROM erp_temu_openapi_consign c
     LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
   ),`;
 const _CLOUD_AGG_SCRAPE_RE = /cloud_agg AS \([\s\S]*?GROUP BY stock_order_no\s*\n\),/;
 function buildUnifiedConsignCte() {
-  if (process.env.OPENAPI_CONSIGN !== "1") return UNIFIED_CONSIGN_CTE;
   if (!_CLOUD_AGG_SCRAPE_RE.test(UNIFIED_CONSIGN_CTE)) return UNIFIED_CONSIGN_CTE;
   return UNIFIED_CONSIGN_CTE.replace(_CLOUD_AGG_SCRAPE_RE, _CLOUD_AGG_OFFICIAL);
 }
@@ -778,7 +786,7 @@ function unifiedRowToPayload(row) {
   } : null;
   return {
     soId: row.so_id,
-    shopName: row.jst_shop_name || row.cloud_mall_id || null,
+    shopName: row.cloud_shop_name || row.jst_shop_name || row.cloud_mall_id || null,
     // 本地确认发货后 local_status_override 优先展示（已发货）。
     status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
     itemAmount,
@@ -806,7 +814,7 @@ function unifiedRowToPayload(row) {
 const CONSIGN_SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
-  const { companyId, page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
+  const { companyId, page, pageSize, offset, search, statusFilter, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
   const tableExists = db
     .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'")
     .get();
@@ -823,16 +831,26 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'display_status'")
     .get();
   const statusCol = hasDisplayStatus ? "display_status" : "jst_status";
+  let hasOnlineStatus = db
+    .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'online_status'")
+    .get();
+  if (!hasOnlineStatus) {
+    try {
+      db.exec("ALTER TABLE temu_consign_unified_snapshot ADD COLUMN online_status TEXT");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_online_status ON temu_consign_unified_snapshot(company_id, online_status)");
+      db.exec(`UPDATE temu_consign_unified_snapshot SET online_status = json_extract(payload_json, '$.rawCloud.temu_status') WHERE online_status IS NULL`);
+      hasOnlineStatus = true;
+    } catch { /* 补列失败不影响主逻辑 */ }
+  }
 
   const buildWhere = (includeSource) => {
     const values = { company_id: companyId };
     const cond = ["company_id = @company_id"];
     if (search) { values.search = `%${search}%`; cond.push("search_blob LIKE @search"); }
     if (statusFilter) { values.status_filter = statusFilter; cond.push(`${statusCol} = @status_filter`); }
-    // 店铺 / 商品编码：快照无独立列，统一用 search_blob LIKE（其中已含 shop_name + sku 字段）。
+    if (onlineStatusFilter && hasOnlineStatus) { values.online_status_filter = onlineStatusFilter; cond.push("online_status = @online_status_filter"); }
     if (shopFilter) { values.shop_like = `%${shopFilter}%`; cond.push("search_blob LIKE @shop_like"); }
     if (skuCodeFilter) { values.sku_like = `%${skuCodeFilter}%`; cond.push("search_blob LIKE @sku_like"); }
-    // 下单时间：快照 order_key = COALESCE(jst_order_date, cloud_order_time)，正好用于区间筛。
     if (dateFrom) { values.date_from = dateFrom; cond.push("order_key >= @date_from"); }
     if (dateTo) { values.date_to = dateTo; cond.push("order_key <= @date_to"); }
     if (includeSource && (source === "cloud" || source === "jst" || source === "both")) {
@@ -852,7 +870,6 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
 
   const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM temu_consign_unified_snapshot ${rowsQ.where}`).get(rowsQ.values);
 
-  // breakdown 与在线一致：不含 source 过滤
   const bdQ = buildWhere(false);
   const bdRows = db.prepare(`
     SELECT source, COUNT(*) AS n FROM temu_consign_unified_snapshot ${bdQ.where} GROUP BY source
@@ -864,7 +881,6 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
   }
 
-  // 状态分布：只受搜索约束，按显示状态(display_status，回退 jst_status)分组，与筛选口径一致。
   const sbValues = { company_id: companyId };
   const sbCond = ["company_id = @company_id"];
   if (search) { sbValues.search = `%${search}%`; sbCond.push("search_blob LIKE @search"); }
@@ -877,6 +893,17 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     statusBreakdown[key] = Number(r.n || 0);
   }
 
+  const onlineStatusBreakdown = {};
+  if (hasOnlineStatus) {
+    for (const r of db.prepare(`
+      SELECT online_status AS status, COUNT(*) AS n FROM temu_consign_unified_snapshot
+      WHERE ${sbCond.join(" AND ")} AND online_status IS NOT NULL AND online_status != ''
+      GROUP BY online_status
+    `).all(sbValues)) {
+      onlineStatusBreakdown[String(r.status)] = Number(r.n || 0);
+    }
+  }
+
   return {
     ok: true,
     rows: rows.map((r) => JSON.parse(r.payload_json)),
@@ -885,6 +912,7 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     pageSize,
     sourceBreakdown,
     statusBreakdown,
+    onlineStatusBreakdown,
     fromSnapshot: true,
   };
 }
@@ -906,6 +934,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const offset = (page - 1) * pageSize;
   const search = String(params.search || "").trim();
   const statusFilter = String(params.status || "").trim();
+  const onlineStatusFilter = String(params.onlineStatus || params.online_status || "").trim();
   const shopFilter = String(params.shop || "").trim();
   const skuCodeFilter = String(params.skuCode || params.sku_code || "").trim();
   const dateFrom = String(params.dateFrom || params.date_from || "").trim();
@@ -913,10 +942,9 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const source = String(params.source || "all").toLowerCase();
   const companyId = params.companyId || params.company_id || "company_default";
 
-  // 优先读物化快照（毫秒级）；读不到/太旧/异常则回退到下方在线 CTE（正确但慢）。
   try {
     const snapshot = readConsignDeliveriesUnifiedFromSnapshot(db, {
-      companyId, page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source,
+      companyId, page, pageSize, offset, search, statusFilter, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source,
     });
     if (snapshot) return snapshot;
   } catch (snapErr) {
@@ -938,13 +966,15 @@ function runConsignDeliveriesUnified(db, params = {}) {
   if (searchClause) filterConditions.push(searchClause);
   if (statusFilter) {
     baseValues.status_filter = statusFilter;
-    // 状态用「显示状态」= COALESCE(local_status_override, jst_status, cloud_temu_status)：
-    // 本地确认发货后优先按覆盖状态（已发货）筛；否则聚水潭(jst)内部状态；cloud-only 兜底用 Temu 状态。
     filterConditions.push("COALESCE(local_status_override, jst_status, cloud_temu_status) = @status_filter");
+  }
+  if (onlineStatusFilter) {
+    baseValues.online_status = onlineStatusFilter;
+    filterConditions.push("cloud_temu_status = @online_status");
   }
   if (shopFilter) {
     baseValues.shop_like = `%${shopFilter}%`;
-    filterConditions.push("COALESCE(jst_shop_name, cloud_mall_id) LIKE @shop_like");
+    filterConditions.push("COALESCE(cloud_shop_name, jst_shop_name, cloud_mall_id) LIKE @shop_like");
   }
   if (skuCodeFilter) {
     baseValues.sku_like = `%${skuCodeFilter}%`;
@@ -990,8 +1020,6 @@ function runConsignDeliveriesUnified(db, params = {}) {
     else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
   }
 
-  // 状态分布：基于显示状态(COALESCE(local_status_override, jst_status, cloud_temu_status))，
-  // 只受搜索约束，与筛选口径一致，保证下拉始终能列出全部真实可筛状态值。
   const statusBreakdownWhere = searchClause ? `WHERE ${searchClause}` : "";
   const statusBreakdownSql = `${buildUnifiedConsignCte()}
     SELECT COALESCE(local_status_override, jst_status, cloud_temu_status) AS status, COUNT(*) AS n
@@ -1003,6 +1031,20 @@ function runConsignDeliveriesUnified(db, params = {}) {
     statusBreakdown[key] = Number(r.n || 0);
   }
 
+  const onlineStatusBreakdown = {};
+  try {
+    const onlineBdWhere = searchClause
+      ? `WHERE ${searchClause} AND cloud_temu_status IS NOT NULL AND cloud_temu_status != ''`
+      : "WHERE cloud_temu_status IS NOT NULL AND cloud_temu_status != ''";
+    const onlineBdSql = `${buildUnifiedConsignCte()}
+      SELECT cloud_temu_status AS status, COUNT(*) AS n
+      FROM unified ${onlineBdWhere}
+      GROUP BY cloud_temu_status`;
+    for (const r of db.prepare(onlineBdSql).all(baseValues)) {
+      onlineStatusBreakdown[String(r.status)] = Number(r.n || 0);
+    }
+  } catch { /* 旧 CTE 无 cloud_temu_status 时静默降级 */ }
+
   return {
     ok: true,
     rows: rows.map(unifiedRowToPayload),
@@ -1011,6 +1053,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
     pageSize,
     sourceBreakdown,
     statusBreakdown,
+    onlineStatusBreakdown,
   };
 }
 
@@ -1117,6 +1160,7 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
     pageSize,
     sourceBreakdown: { cloud_only: 0, jst_only: total, both: 0 },
     statusBreakdown,
+    onlineStatusBreakdown: {},
   };
 }
 
@@ -6253,8 +6297,17 @@ async function handleRequest({
     // ===== 选品广场：实时搜索代理 + 选品池（读 /opt/temu-erp-data/yunqi_products.db）=====
     if (pathname === "/api/erp/reports/yunqi-search") {
       if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
-      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: await require("./services/yunqiLiveProxy.cjs").liveSearch(p || {}) }); }
-      catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      try {
+        const p = await readOptionalPayload(req);
+        let data;
+        try {
+          const raceTimer = new Promise((_, rej) => setTimeout(() => rej(new Error("_live_timeout")), 8000));
+          data = await Promise.race([require("./services/yunqiLiveProxy.cjs").liveSearch(p || {}), raceTimer]);
+        } catch {
+          data = require("./services/yunqiCloud.cjs").searchProducts(p || {});
+        }
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
     if (pathname === "/api/erp/reports/yunqi-token-status") {
@@ -6351,10 +6404,32 @@ async function handleRequest({
     }
 
     if (pathname === "/api/outbound/workbench") {
-      writeJson(res, 200, {
-        ok: true,
-        workbench: await getOutboundWorkbench({ user: session.user }),
-      });
+      const now = Date.now();
+      if (_outboundWbCache && (now - _outboundWbCache.ts) < OUTBOUND_WB_CACHE_TTL_MS) {
+        writeJson(res, 200, _outboundWbCache.data);
+        return;
+      }
+      if (_outboundWbCache && (now - _outboundWbCache.ts) < OUTBOUND_WB_STALE_TTL_MS) {
+        writeJson(res, 200, _outboundWbCache.data);
+        if (!_outboundWbInflight) {
+          _outboundWbInflight = getOutboundWorkbench({ user: session.user })
+            .then((wb) => { _outboundWbCache = { data: { ok: true, workbench: wb }, ts: Date.now() }; })
+            .catch((e) => console.error(`[outbound/workbench] BG_REVALIDATE fail: ${e?.message || e}`))
+            .finally(() => { _outboundWbInflight = null; });
+        }
+        return;
+      }
+      if (!_outboundWbInflight) {
+        _outboundWbInflight = getOutboundWorkbench({ user: session.user })
+          .then((wb) => { _outboundWbCache = { data: { ok: true, workbench: wb }, ts: Date.now() }; return _outboundWbCache.data; })
+          .finally(() => { _outboundWbInflight = null; });
+      }
+      try {
+        const result = await _outboundWbInflight || _outboundWbCache?.data;
+        writeJson(res, 200, result || { ok: true, workbench: await getOutboundWorkbench({ user: session.user }) });
+      } catch (e) {
+        writeJson(res, 200, { ok: true, workbench: await getOutboundWorkbench({ user: session.user }) });
+      }
       return;
     }
 

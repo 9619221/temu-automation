@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS temu_consign_unified_snapshot (
   source         TEXT,
   jst_status     TEXT,
   display_status TEXT,
+  online_status  TEXT,
   order_key      TEXT,
   search_blob    TEXT,
   payload_json   TEXT NOT NULL,
@@ -70,6 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_source
   ON temu_consign_unified_snapshot(company_id, source);
 CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_status
   ON temu_consign_unified_snapshot(company_id, display_status);
+CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_online_status
+  ON temu_consign_unified_snapshot(company_id, online_status);
 `;
 
 // display_status（= COALESCE(jst_status, cloud_temu_status)，与在线/读取侧筛选口径一致）
@@ -81,10 +84,20 @@ function ensureDisplayStatusColumn(db) {
   if (!has) db.exec("ALTER TABLE temu_consign_unified_snapshot ADD COLUMN display_status TEXT");
 }
 
+function ensureOnlineStatusColumn(db) {
+  const has = db
+    .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'online_status'")
+    .get();
+  if (!has) {
+    db.exec("ALTER TABLE temu_consign_unified_snapshot ADD COLUMN online_status TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_online_status ON temu_consign_unified_snapshot(company_id, online_status)");
+  }
+}
+
 // search_blob：把在线 LIKE 命中的字段拼起来，让快照侧用单列 LIKE 复现搜索。
 function buildSearchBlob(row) {
   return [
-    row.so_id, row.jst_shop_name, row.jst_outer_deliver_no, row.jst_supplier_name,
+    row.so_id, row.cloud_shop_name, row.jst_shop_name, row.jst_outer_deliver_no, row.jst_supplier_name,
     row.jst_sku_info, row.jst_skus, row.jst_logistics_company, row.jst_l_id,
     row.cloud_mall_id, row.cloud_site, row.cloud_delivery_order_sn,
     row.cloud_product_name, row.cloud_spec_name, row.cloud_sku_ext_code,
@@ -98,6 +111,7 @@ async function rebuildSnapshotInternal(db, opts = {}) {
   db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot");
   db.exec(SNAPSHOT_DDL);
   ensureDisplayStatusColumn(db);
+  ensureOnlineStatusColumn(db);
 
   const companies = db
     .prepare("SELECT DISTINCT company_id FROM jst_consign_deliveries WHERE company_id IS NOT NULL")
@@ -116,8 +130,8 @@ async function rebuildSnapshotInternal(db, opts = {}) {
     db.prepare("DELETE FROM temu_consign_unified_snapshot WHERE company_id = ?").run(companyId);
     const ins = db.prepare(`
       INSERT INTO temu_consign_unified_snapshot
-        (company_id, so_id, source, jst_status, display_status, order_key, search_blob, payload_json, rebuilt_at)
-      VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @order_key, @search_blob, @payload_json, @rebuilt_at)
+        (company_id, so_id, source, jst_status, display_status, online_status, order_key, search_blob, payload_json, rebuilt_at)
+      VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @online_status, @order_key, @search_blob, @payload_json, @rebuilt_at)
     `);
     for (const row of rows) {
       ins.run({
@@ -126,6 +140,7 @@ async function rebuildSnapshotInternal(db, opts = {}) {
         source: row.source || null,
         jst_status: row.jst_status || null,
         display_status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
+        online_status: row.cloud_temu_status || null,
         order_key: row.jst_order_date || row.cloud_order_time || null,
         search_blob: buildSearchBlob(row),
         payload_json: JSON.stringify(toPayload(row)),

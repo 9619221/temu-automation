@@ -19545,7 +19545,7 @@ function calculateLineLandedCost(line) {
   return unitCost;
 }
 
-function createBatchesForReceipt({ db, services, receipt, actor }) {
+function createBatchesForReceipt({ db, services, receipt, actor, allowCostJump }) {
   const lines = getInboundLinesForBatchCreation(db, receipt.id);
   const pendingLines = lines.filter((line) => !line.batch_id && Number(line.received_qty || 0) > 0);
   if (!pendingLines.length) {
@@ -19578,7 +19578,7 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
     });
 
     // 同步刷新 SKU 维度的移动加权均价 + 总库存
-    services.inventory.applySkuCostChange(line.sku_id, Number(line.received_qty || 0), landedCost);
+    services.inventory.applySkuCostChange(line.sku_id, Number(line.received_qty || 0), landedCost, { allowCostJump });
 
     batches.push(toCamelRow(batch));
   });
@@ -19769,7 +19769,7 @@ function confirmInboundReceiptCountWithoutBatch({ db, services, receipt, actor }
   return { receipt: toCamelRow(current), batches: [], issue };
 }
 
-function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor }) {
+function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor, allowCostJump }) {
   let current = receipt;
   if (current.status !== "counted") {
     throw new Error("请先完成核数后再确认入库");
@@ -19788,7 +19788,7 @@ function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor }
     return { receipt: toCamelRow(current), batches: [], issue };
   }
   writeInboundReceiptFlowEvent(db, current, actor, "confirm_inbound", `仓库确认入库：${current.receipt_no || current.id}`);
-  const batches = createBatchesForReceipt({ db, services, receipt: current, actor });
+  const batches = createBatchesForReceipt({ db, services, receipt: current, actor, allowCostJump });
   current = getInboundReceipt(db, current.id);
   syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: true });
   try {
@@ -19802,7 +19802,7 @@ function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor }
   return { receipt: toCamelRow(current), batches };
 }
 
-function advanceInboundReceiptOneStepWithoutBatch({ db, services, receipt, actor }) {
+function advanceInboundReceiptOneStepWithoutBatch({ db, services, receipt, actor, allowCostJump }) {
   const current = receipt;
   if (current.status === "pending_arrival") {
     return registerInboundReceiptArrivalWithoutBatch({ db, services, receipt: current, actor });
@@ -19818,7 +19818,7 @@ function advanceInboundReceiptOneStepWithoutBatch({ db, services, receipt, actor
     });
   }
   if (current.status === "counted") {
-    return confirmInboundReceiptFinalWithoutBatch({ db, services, receipt: current, actor });
+    return confirmInboundReceiptFinalWithoutBatch({ db, services, receipt: current, actor, allowCostJump });
   }
   throw new Error(`${current.status || "当前状态"}不可批量处理`);
 }
@@ -20056,6 +20056,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           services,
           receipt: getInboundReceipt(db, receiptId),
           actor,
+          allowCostJump: !!payload.allowCostJump,
         });
       }
       case "confirm_inbound_bulk": {
@@ -20077,6 +20078,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
             services,
             receipt: before,
             actor,
+            allowCostJump: !!payload.allowCostJump,
           });
           receipts.push(result.receipt);
         });

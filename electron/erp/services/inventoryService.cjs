@@ -513,6 +513,7 @@ class InventoryService {
       }
       const costJumpLimit = Number.isFinite(Number(opts.costJumpLimit)) ? Number(opts.costJumpLimit) : 0.5;
       if (!opts.allowCostJump && oldAvg > 0 && Math.abs(unitCost - oldAvg) / oldAvg > costJumpLimit) {
+        const pctDiff = ((Math.abs(unitCost - oldAvg) / oldAvg) * 100).toFixed(1);
         const message = `SKU ${skuId} inbound cost ${unitCost} differs from current average ${oldAvg} by more than ${(costJumpLimit * 100).toFixed(0)}%`;
         this.recordCostEvent({
           skuId,
@@ -531,7 +532,10 @@ class InventoryService {
           message,
           raw: { addedQty, addedUnitCost, costJumpLimit },
         });
-        throw new Error(message);
+        const err = new Error(message);
+        err.code = "COST_JUMP";
+        err.details = { skuId, unitCost, oldAvg, pctDiff, costJumpLimit };
+        throw err;
       }
       newAvg = newQty > 0 ? (oldQty * oldAvg + qty * unitCost) / newQty : 0;
     }

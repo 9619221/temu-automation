@@ -127,8 +127,8 @@ interface ConsignDeliverUnifiedResult {
   page: number;
   pageSize: number;
   sourceBreakdown: { cloud_only: number; jst_only: number; both: number };
-  // 各「显示状态」条数，仅受搜索约束；旧服务器不返回，做缺省兜底。
   statusBreakdown?: Record<string, number>;
+  onlineStatusBreakdown?: Record<string, number>;
 }
 
 interface AccountRow {
@@ -214,6 +214,7 @@ interface OutboundCache {
 type UnifiedRowSource = "cloud" | "jst" | "both";
 
 const JST_STATUS_OPTIONS = ["已发货", "取消", "已付款待审核", "异常", "发货中", "待付款"];
+const TEMU_ONLINE_STATUS_OPTIONS = ["已付款待审核", "待发货", "已发货", "已收货", "取消", "异常", "其他"];
 
 // v3：新增「送货数」「入库数」独立列。升版本让旧客户端的列配置重置为含新列的全可见默认，
 // 否则旧 localStorage 的 visible 不含新 key，新列默认隐藏、用户仍看不到。
@@ -371,6 +372,22 @@ function stockStatusColor(status?: string | null) {
   return "processing";
 }
 
+function stockStatusCellStyle(status?: string | null): { bg: string; color: string } {
+  const s = String(status || "");
+  if (!s) return { bg: "#f5f5f5", color: "#bfbfbf" };
+  if (/取消|cancel/i.test(s)) return { bg: "#cf1322", color: "#fff" };
+  if (/已入库/i.test(s)) return { bg: "#389e0d", color: "#fff" };
+  if (/已收货/i.test(s)) return { bg: "#08979c", color: "#fff" };
+  if (/已发货|已发|shipped/i.test(s)) return { bg: "#16a34a", color: "#fff" };
+  if (/待发货/i.test(s)) return { bg: "#bae0ff", color: "#003a8c" };
+  if (/待接单/i.test(s)) return { bg: "#fa8c16", color: "#fff" };
+  if (/已付款待审核/i.test(s)) return { bg: "#ffe58f", color: "#614700" };
+  if (/待|未|pending|wait/i.test(s)) return { bg: "#faad14", color: "#fff" };
+  if (/完成|done|complete/i.test(s)) return { bg: "#389e0d", color: "#fff" };
+  if (/其他/i.test(s)) return { bg: "#722ed1", color: "#fff" };
+  return { bg: "#597ef7", color: "#fff" };
+}
+
 // 鼠标落在目标行的上半 → 插到它前面；下半 → 插到它后面（拖到最后一行的下半即落到末尾）。
 function insertPosByY(clientY: number, rect: DOMRect): "before" | "after" {
   return clientY < rect.top + rect.height / 2 ? "before" : "after";
@@ -508,7 +525,9 @@ export default function QcOutboundCenter() {
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useSessionState(qcViewKey("tab"), "cloud");
   const [stockStatus, setStockStatus] = useSessionState(qcViewKey("status"), "");
+  const [onlineStatus, setOnlineStatus] = useSessionState(qcViewKey("onlineStatus"), "");
   const [stockShop, setStockShop] = useSessionState(qcViewKey("shop"), "");
+  const [mallOptions, setMallOptions] = useState<{ value: string; label: string }[]>([]);
   const [stockSkuCode, setStockSkuCode] = useSessionState(qcViewKey("skuCode"), "");
   const [stockDateRange, setStockDateRange] = useSessionState<any>(qcViewKey("dateRange"), null, {
     serialize: (value) =>
@@ -579,6 +598,7 @@ export default function QcOutboundCenter() {
     pageSize: number;
     search: string;
     status: string;
+    onlineStatus?: string;
     shop?: string;
     skuCode?: string;
     dateFrom?: string;
@@ -594,6 +614,7 @@ export default function QcOutboundCenter() {
         pageSize: params.pageSize,
         search: params.search || undefined,
         status: params.status || undefined,
+        onlineStatus: params.onlineStatus || undefined,
         shop: params.shop || undefined,
         skuCode: params.skuCode || undefined,
         dateFrom: params.dateFrom || undefined,
@@ -621,11 +642,24 @@ export default function QcOutboundCenter() {
   }, []);
 
   useEffect(() => {
+    erp?.reports?.mallDict?.().then((resp: any) => {
+      const malls: any[] = resp?.data?.malls || resp?.malls || [];
+      setMallOptions(
+        malls
+          .filter((m: any) => m.store_code && m.status !== "test")
+          .sort((a: any, b: any) => (a.store_code || "").localeCompare(b.store_code || ""))
+          .map((m: any) => ({ value: m.store_code, label: `${m.store_code}店铺` })),
+      );
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     void loadUnified({
       page: unifiedPage,
       pageSize: unifiedPageSize,
       search: stockQuery,
       status: stockStatus,
+      onlineStatus,
       shop: stockShop,
       skuCode: stockSkuCode,
       dateFrom: consignDateBound(stockDateRange?.[0], false),
@@ -633,7 +667,7 @@ export default function QcOutboundCenter() {
       source: unifiedSource,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
+  }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, onlineStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
 
   const previewStockOrderPlan = async (
     row = stockOrderTarget,
@@ -694,6 +728,7 @@ export default function QcOutboundCenter() {
         pageSize: unifiedPageSize,
         search: stockQuery,
         status: stockStatus,
+        onlineStatus,
         shop: stockShop,
         skuCode: stockSkuCode,
         dateFrom: consignDateBound(stockDateRange?.[0], false),
@@ -729,12 +764,15 @@ export default function QcOutboundCenter() {
   const resolveUnifiedRowLink = useCallback((row: ConsignDeliverUnifiedRow) => (
     unifiedRowKeys(row).map((key) => stockOrderLinkIndex.get(key)).find(Boolean)
   ), [stockOrderLinkIndex]);
-  const unifiedRows = unifiedSnapshot.rows;
-  const unifiedTotal = unifiedSnapshot.total;
+  const hasServerOnlineFilter = !!unifiedSnapshot.onlineStatusBreakdown && Object.keys(unifiedSnapshot.onlineStatusBreakdown).length > 0;
+  const unifiedRows = useMemo(() => {
+    const rows = unifiedSnapshot.rows;
+    if (!onlineStatus || hasServerOnlineFilter) return rows;
+    return rows.filter((r) => r.rawCloud?.temu_status === onlineStatus);
+  }, [unifiedSnapshot.rows, onlineStatus, hasServerOnlineFilter]);
+  const unifiedTotal = (!onlineStatus || hasServerOnlineFilter) ? unifiedSnapshot.total : unifiedRows.length;
 
-  // 状态筛选下拉选项：优先用服务器返回的真实状态分布（含条数）；
-  // 旧服务器无 statusBreakdown 时回退到静态列表，保证不报错。
-  const statusFilterOptions = useMemo(() => {
+  const erpStatusFilterOptions = useMemo(() => {
     const breakdown = unifiedSnapshot.statusBreakdown;
     const entries = breakdown ? Object.entries(breakdown).filter(([key]) => key && key !== "(空)") : [];
     if (entries.length) {
@@ -744,6 +782,17 @@ export default function QcOutboundCenter() {
     }
     return JST_STATUS_OPTIONS.map((value) => ({ label: value, value }));
   }, [unifiedSnapshot.statusBreakdown]);
+
+  const onlineStatusFilterOptions = useMemo(() => {
+    const breakdown = unifiedSnapshot.onlineStatusBreakdown;
+    const entries = breakdown ? Object.entries(breakdown).filter(([key]) => key && key !== "(空)") : [];
+    if (entries.length) {
+      return entries
+        .sort((a, b) => b[1] - a[1])
+        .map(([status, count]) => ({ label: `${status}（${formatQty(count)}）`, value: status }));
+    }
+    return TEMU_ONLINE_STATUS_OPTIONS.map((value) => ({ label: value, value }));
+  }, [unifiedSnapshot.onlineStatusBreakdown]);
 
   // 列配置即时生效：所有改动直接写入 unifiedColumnConfig + localStorage，无草稿、无「保存」按钮。
   const persistUnifiedColumnConfig = useCallback((next: UnifiedColumnConfig) => {
@@ -1144,10 +1193,15 @@ export default function QcOutboundCenter() {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
     const rows = selectedShipRows;
     if (!rows.length) { message.warning("请先勾选官方单"); return; }
+    const SHIPPED_STATUSES = ["已发货", "已收货", "已入库", "取消"];
+    const eligible = rows.filter((r) => { const s = r.rawCloud?.temu_status || ""; return s && !SHIPPED_STATUSES.some((x) => s.includes(x)); });
+    const skipped = rows.length - eligible.length;
+    if (!eligible.length) { message.warning(`所选 ${rows.length} 单均已发货或已取消，无法加入发货台`); return; }
+    if (skipped) message.info(`跳过 ${skipped} 单（已发货/已取消），处理 ${eligible.length} 单`);
     setShipBatchBusy(true);
-    const hide = message.loading(`加入发货台中…（${rows.length} 单）`, 0);
+    const hide = message.loading(`加入发货台中…（${eligible.length} 单）`, 0);
     let ok = 0, already = 0, fail = 0;
-    for (const row of rows) {
+    for (const row of eligible) {
       try {
         const r = await erp.inventory.action({ action: "consign_official_staging_add", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
         if (r?.alreadyIn) already++; else ok++;
@@ -1159,7 +1213,7 @@ export default function QcOutboundCenter() {
     }
     hide();
     setShipBatchBusy(false);
-    message[fail ? "warning" : "success"](`加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}`);
+    message[fail ? "warning" : "success"](`加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}`);
   }, [selectedShipRows, erp]);
 
   // 批量「创建发货单」：成功后写 officialShipState（含确认发货所需子仓/地址参数）。
@@ -1167,10 +1221,15 @@ export default function QcOutboundCenter() {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
     const rows = selectedShipRows;
     if (!rows.length) { message.warning("请先勾选官方单"); return; }
+    const SHIPPED_STATUSES = ["已发货", "已收货", "已入库", "取消"];
+    const eligible = rows.filter((r) => { const s = r.rawCloud?.temu_status || ""; return s && !SHIPPED_STATUSES.some((x) => s.includes(x)); });
+    const skipped = rows.length - eligible.length;
+    if (!eligible.length) { message.warning(`所选 ${rows.length} 单均已发货或已取消，无法创建发货单`); return; }
+    if (skipped) message.info(`跳过 ${skipped} 单（已发货/已取消），处理 ${eligible.length} 单`);
     setShipBatchBusy(true);
-    const hide = message.loading(`创建发货单中…（${rows.length} 单）`, 0);
+    const hide = message.loading(`创建发货单中…（${eligible.length} 单）`, 0);
     let ok = 0, fail = 0; const fails: string[] = [];
-    for (const row of rows) {
+    for (const row of eligible) {
       try {
         const r = await erp.inventory.action({ action: "consign_official_ship_create", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
         if (!r?.deliveryOrderSn) throw new Error("未返回发货单号");
@@ -1180,8 +1239,8 @@ export default function QcOutboundCenter() {
     }
     hide();
     setShipBatchBusy(false);
-    if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
-    else message.success(`创建发货单完成：成功 ${ok} 单`);
+    if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}。${fails.slice(0, 3).join("；")}`);
+    else message.success(`创建发货单完成：成功 ${ok} 单${skipped ? `、跳过 ${skipped}` : ""}`);
   }, [selectedShipRows, erp]);
 
   // 撤销单个发货单（发货信息列用）。
@@ -1280,7 +1339,7 @@ export default function QcOutboundCenter() {
     setShipBatchBusy(false);
     setUnifiedSnapshot((snap) => ({
       ...snap,
-      rows: snap.rows.map((r) => (r.soId && doneIds.has(r.soId)) ? { ...r, inventoryDeducted: false, localStatusOverride: null, status: r.rawJst?.status || r.rawCloud?.temu_status || r.status } : r),
+      rows: snap.rows.map((r) => (r.soId && doneIds.has(r.soId)) ? { ...r, inventoryDeducted: false, localStatusOverride: null, status: r.rawCloud?.temu_status || r.rawJst?.status || r.status } : r),
     }));
     setSelectedShipKeys([]);
     if (fail) message.warning(`撤销完成：成功 ${ok}、跳过 ${skip}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
@@ -1486,7 +1545,7 @@ export default function QcOutboundCenter() {
             ...r,
             inventoryDeducted: ship,
             localStatusOverride: ship ? "已发货" : null,
-            status: ship ? "已发货" : (r.rawJst?.status || r.rawCloud?.temu_status || r.status),
+            status: ship ? "已发货" : (r.rawCloud?.temu_status || r.rawJst?.status || r.status),
           };
         }),
       }));
@@ -1503,19 +1562,28 @@ export default function QcOutboundCenter() {
       title: "线上状态",
       key: "onlineStatus",
       width: 110,
+      onCell: (row) => {
+        const st = stockStatusCellStyle(row.rawCloud?.temu_status);
+        return { className: "status-cell-colored", style: { "--status-bg": st.bg, "--status-color": st.color } as any };
+      },
       render: (_value, row) => {
-        const s = row.rawCloud?.temu_status; // Temu 平台备货单状态(官方)
-        return s ? <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag> : <Text type="secondary">-</Text>;
+        const s = row.rawCloud?.temu_status;
+        if (!s) return <Text type="secondary">-</Text>;
+        return <span className="status-cell-text">{s}</span>;
       },
     },
     {
       title: "erp状态",
       key: "erpStatus",
       width: 110,
+      onCell: (row) => {
+        const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核";
+        const st = stockStatusCellStyle(s);
+        return { className: "status-cell-colored", style: { "--status-bg": st.bg, "--status-color": st.color } as any };
+      },
       render: (_value, row) => {
-        // erp状态=自研系统处理进度: 本地确认 > 聚水潭历史 > 聚水潭无数据时(Temu取消→「取消」不误标废单, 否则→「已付款待审核」待处理)
-        const s = row.localStatusOverride || row.rawJst?.status || (row.rawCloud?.temu_status === "取消" ? "取消" : "已付款待审核");
-        return <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag>;
+        const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核";
+        return <span className="status-cell-text">{s}</span>;
       },
     },
     {
@@ -1538,7 +1606,11 @@ export default function QcOutboundCenter() {
       title: "店铺",
       key: "shop",
       width: 160,
-      render: (_value, row) => <Text>{row.shopName || "-"}</Text>,
+      render: (_value, row) => {
+        const raw = row.shopName || "";
+        const m = raw.match(/(?:temu-?)?(\d{2,4})\s*店铺?$/i) || raw.match(/^(\d{2,4})$/);
+        return <Text>{m ? `${m[1]}店铺` : (raw || "-")}</Text>;
+      },
     },
     {
       title: "商品信息",
@@ -1814,6 +1886,7 @@ export default function QcOutboundCenter() {
                   pageSize: unifiedPageSize,
                   search: stockQuery,
                   status: stockStatus,
+                  onlineStatus,
                   shop: stockShop,
                   skuCode: stockSkuCode,
                   dateFrom: consignDateBound(stockDateRange?.[0], false),
@@ -1864,15 +1937,20 @@ export default function QcOutboundCenter() {
                     }}
                     style={{ maxWidth: 520 }}
                   />
-                  <Input
+                  <Select
                     allowClear
+                    showSearch
                     placeholder="店铺"
-                    style={{ width: 160 }}
-                    value={stockShop}
-                    onChange={(event) => {
-                      setStockShop(event.target.value);
+                    style={{ width: 200 }}
+                    value={stockShop || undefined}
+                    onChange={(val) => {
+                      setStockShop(val || "");
                       setUnifiedPage(1);
                     }}
+                    options={mallOptions}
+                    filterOption={(input, option) =>
+                      (option?.label ?? "").toLowerCase().includes(input.toLowerCase())
+                    }
                   />
                   <Input
                     allowClear
@@ -1895,10 +1973,22 @@ export default function QcOutboundCenter() {
                   />
                   <Select
                     allowClear
-                    placeholder="按状态过滤"
-                    style={{ width: 180 }}
+                    placeholder="线上状态"
+                    style={{ width: 170 }}
+                    value={onlineStatus || undefined}
+                    options={onlineStatusFilterOptions}
+                    getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                    onChange={(value) => {
+                      setOnlineStatus(value || "");
+                      setUnifiedPage(1);
+                    }}
+                  />
+                  <Select
+                    allowClear
+                    placeholder="erp状态"
+                    style={{ width: 170 }}
                     value={stockStatus || undefined}
-                    options={statusFilterOptions}
+                    options={erpStatusFilterOptions}
                     getPopupContainer={(trigger) => trigger.parentElement || document.body}
                     onChange={(value) => {
                       setStockStatus(value || "");
@@ -1951,7 +2041,7 @@ export default function QcOutboundCenter() {
                   loading={unifiedLoading}
                   columns={cloudStockColumns}
                   dataSource={unifiedRows}
-                  scroll={{ x: 2560 }}
+                  scroll={{ x: 2560, y: "max(300px, calc(100vh - 400px))" }}
                   // 悬停即后台预取明细，点开时多半已缓存，避免每次展开都等一次跨区请求。
                   onRow={(row) => ({ onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); } })}
                   expandable={{
@@ -2191,7 +2281,11 @@ export default function QcOutboundCenter() {
               placeholder="选店铺"
               value={applyPo.mallId || undefined}
               onChange={(v) => setApplyPo((s) => ({ ...s, mallId: v }))}
-              options={Array.from(new Map(unifiedRows.filter((r) => r.rawCloud?.mall_id).map((r) => [String(r.rawCloud?.mall_id), String((r.rawCloud as any)?.shop_name || (r.rawCloud as any)?.mall_name || r.rawCloud?.mall_id)])).entries()).map(([value, label]) => ({ value, label }))}
+              options={Array.from(new Map(unifiedRows.filter((r) => r.rawCloud?.mall_id).map((r) => [String(r.rawCloud?.mall_id), r.shopName])).entries()).map(([value, name]) => {
+                const raw = name || "";
+                const sm = raw.match(/(?:temu-?)?(\d{2,4})\s*店铺?$/i) || raw.match(/^(\d{2,4})$/);
+                return { value, label: sm ? `${sm[1]}店铺` : (raw || value) };
+              })}
             />
           </div>
           <div>
