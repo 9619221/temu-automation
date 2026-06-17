@@ -286,6 +286,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     selectionIds: () => ipcRenderer.invoke("yunqi-db:selection-ids"),
     categories: () => ipcRenderer.invoke("yunqi-db:categories"),
     exportAutoPrice: (params) => ipcRenderer.invoke("yunqi-db:export-auto-price", params),
+    exportForListing: (params) => ipcRenderer.invoke("yunqi-db:export-for-listing", params),
   },
 
   // 每次调用前显式切到对应 profile，保证普通版/GPT 版不会串用生图凭证。

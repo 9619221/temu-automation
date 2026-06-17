@@ -627,7 +627,10 @@ r.post("/v1/batch", authMiddleware, async (req, res) => {
     const parser_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
     // 飞书等非业务路径整条不落库；Temu 大响应(>200KB)只存元数据、body_json 置空
     const skipRow = NON_BUSINESS_PATH_RE.test(url_path);
-    const body_json = (!parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
+    // perf/perf-discovery 是浏览器性能监控事件，无任何 parser 消费（PARSERS 全按业务 url_path 匹配），
+    // 「接口发现」面板只用其元数据、不读 body_json → 落库直接清空响应体，省约 40% capture_events 体积。
+    const isPerfEvent = String(it.kind || "").startsWith("perf");
+    const body_json = (isPerfEvent || !parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
     return { id: crypto.randomUUID(), url, url_path, method, body_json, parser_json, skipRow, it };
   };
 

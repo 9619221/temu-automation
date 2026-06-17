@@ -35,11 +35,16 @@ function envNumber(name, fallback) {
 
 let purchaseSchedulerTimer = null;
 let purchaseSchedulerRunning = false;
-let settlementSchedulerTimer = null;
-let settlementSchedulerRunning = false;
-
 async function tickPurchaseAutoSync() {
   if (purchaseSchedulerRunning) return;
+  if (cronScheduler) {
+    const status = cronScheduler.getStatus();
+    const running = Object.entries(status).find(([k, v]) => k !== "_queueLength" && v && v.running);
+    if (running) {
+      console.log(`[order-sync] skipped: cron "${running[0]}" is running`);
+      return;
+    }
+  }
   purchaseSchedulerRunning = true;
   try {
     const maxAgeHours = envNumber("ERP_PURCHASE_AUTO_SYNC_MAX_AGE_HOURS", 168);
@@ -80,41 +85,6 @@ function startPurchaseAutoSyncScheduler() {
   setImmediate(() => { tickPurchaseAutoSync().catch((e) => console.warn("[order-sync] initial tick failed:", e?.message || e)); });
 }
 
-async function tickSettlementIncomeSync(erpDbPath) {
-  if (settlementSchedulerRunning) return;
-  settlementSchedulerRunning = true;
-  try {
-    const { runOnce } = require("./sync-temu-settlement-income.cjs");
-    const result = runOnce({ erpDbPath });
-    if (result && result.attached === false) {
-      console.warn("[settlement-income-sync] cloud db not attached, skipped");
-    } else if (result && result.ok === false) {
-      console.warn(`[settlement-income-sync] tick did not complete: income_ok=${result.income?.ok} detail_ok=${result.detail?.ok}`);
-    } else if (result && Number(result.rows) > 0) {
-      console.log(`[settlement-income-sync] tick malls=${result.malls || 0} rows=${result.rows || 0}`);
-    }
-  } catch (e) {
-    console.warn("[settlement-income-sync] tick failed:", e?.message || e);
-  } finally {
-    settlementSchedulerRunning = false;
-  }
-}
-
-function startSettlementIncomeSyncScheduler(erpDbPath) {
-  if (!envFlag("ERP_SETTLEMENT_INCOME_AUTO_SYNC", true)) {
-    console.log("[settlement-income-sync] scheduler disabled (ERP_SETTLEMENT_INCOME_AUTO_SYNC=0)");
-    return;
-  }
-  const intervalMin = Math.max(1, envNumber("ERP_SETTLEMENT_INCOME_SYNC_INTERVAL_MIN", 15));
-  settlementSchedulerTimer = setInterval(() => {
-    tickSettlementIncomeSync(erpDbPath).catch((e) => console.warn("[settlement-income-sync] interval tick failed:", e?.message || e));
-  }, intervalMin * 60 * 1000);
-  console.log(`[settlement-income-sync] scheduler started, interval=${intervalMin}min`);
-  setImmediate(() => {
-    tickSettlementIncomeSync(erpDbPath).catch((e) => console.warn("[settlement-income-sync] initial tick failed:", e?.message || e));
-  });
-}
-
 // ─── 串行子进程调度器（替代 6 个独立 cron 进程） ───
 
 let cronScheduler = null;
@@ -133,10 +103,10 @@ function setupCronScheduler(erpDbPath) {
   scheduler.register("sku-sales", 15 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-sku-sales.cjs"), envBase);
 
-  scheduler.register("product-panel", 10 * 60 * 1000,
+  scheduler.register("product-panel", 20 * 60 * 1000,
     path.join(scriptsDir, "refresh-product-panel.cjs"), { ...envBase, CLOUD_DB });
 
-  scheduler.register("ops-reports", 10 * 60 * 1000,
+  scheduler.register("ops-reports", 20 * 60 * 1000,
     path.join(scriptsDir, "refresh-ops-reports.cjs"), { ...envBase, CLOUD_DB });
 
   scheduler.register("openapi-consign", 6 * 60 * 60 * 1000,
@@ -153,6 +123,12 @@ function setupCronScheduler(erpDbPath) {
 
   scheduler.register("qc", 3 * 60 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-qc.cjs"), { ...envBase, QC_SINCE_DAYS: "7" });
+
+  if (envFlag("ERP_SETTLEMENT_INCOME_AUTO_SYNC", true)) {
+    const settlementIntervalMin = Math.max(1, envNumber("ERP_SETTLEMENT_INCOME_SYNC_INTERVAL_MIN", 30));
+    scheduler.register("settlement-income", settlementIntervalMin * 60 * 1000,
+      path.join(scriptsDir, "sync-temu-settlement-income.cjs"), envBase);
+  }
 
   cronScheduler = scheduler;
   return { scheduler };
@@ -179,10 +155,9 @@ async function main() {
   for (const url of result.lanStatus.lanUrls || []) {
     console.log("[ERP Server] LAN:", url);
   }
-  // 30s: order-sync / settlement-sync（轻量网络+小写入）
+  // 30s: order-sync（轻量网络+小写入；settlement-income 已移入 cron 子进程调度）
   setTimeout(() => {
     try { startPurchaseAutoSyncScheduler(); } catch (e) { console.warn("[order-sync] start failed:", e?.message || e); }
-    try { startSettlementIncomeSyncScheduler(result.initResult.dbPath); } catch (e) { console.warn("[settlement-income-sync] start failed:", e?.message || e); }
   }, 30 * 1000);
 
   // 45s: prewarm（18MB大查询）。有 worker 池时走 worker，主线程不阻塞；否则主线程直跑（原行为）。
@@ -198,7 +173,7 @@ async function main() {
   // 120s: cron 串行调度器（各任务再依次错开 10s；在 prewarm 完成后启动，避免争磁盘）
   try {
     const cron = setupCronScheduler(result.initResult.dbPath);
-    if (cron) cron.scheduler.start(120 * 1000);
+    if (cron) cron.scheduler.start(300 * 1000);
   } catch (e) {
     console.warn("[cron-scheduler] setup failed:", e?.message || e);
   }
@@ -207,7 +182,6 @@ async function main() {
 function shutdown(signal) {
   console.log(`[ERP Server] received ${signal}, shutting down...`);
   if (purchaseSchedulerTimer) { clearInterval(purchaseSchedulerTimer); purchaseSchedulerTimer = null; }
-  if (settlementSchedulerTimer) { clearInterval(settlementSchedulerTimer); settlementSchedulerTimer = null; }
   if (cronScheduler) { cronScheduler.stop(); cronScheduler = null; }
   Promise.resolve(closeErp()).finally(() => process.exit(0));
 }

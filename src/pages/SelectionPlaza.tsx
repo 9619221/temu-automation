@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import listingTaskStore from "../stores/listingTaskStore";
 import {
   Alert,
   Badge,
@@ -7,11 +8,13 @@ import {
   Cascader,
   Checkbox,
   Col,
+  Drawer,
   Empty,
   Image,
   Input,
   InputNumber,
   Popconfirm,
+  Progress,
   Row,
   Select,
   Space,
@@ -25,17 +28,24 @@ import {
 import {
   CheckCircleFilled,
   ClearOutlined,
+  CloseCircleOutlined,
   DeleteOutlined,
   DollarOutlined,
   EditOutlined,
   FireOutlined,
   LinkOutlined,
+  LoadingOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
   RiseOutlined,
+  RocketOutlined,
   SearchOutlined,
   ShoppingOutlined,
   StarFilled,
+  AppstoreOutlined,
   UploadOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
@@ -62,7 +72,6 @@ const STATUS_META: Record<string, { label: string; color: string; hex: string }>
   listed: { label: "已上架", color: "green", hex: "#52c41a" },
   dropped: { label: "已弃用", color: "default", hex: "#8c8c8c" },
 };
-const STATUS_KEYS = ["want", "sourcing", "sourced", "listing", "listed", "dropped"];
 
 const SORT_OPTIONS = [
   { value: "daily_sales", label: "日销量" },
@@ -414,14 +423,7 @@ const ProductCard = memo(function ProductCard({ item, inPool, pool, onAdd, onRem
 
       {/* 操作按钮 */}
       {pool ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "nowrap" }}>
-          <Select
-            size="small"
-            value={item.status || "want"}
-            style={{ flex: 1, minWidth: 0 }}
-            onChange={(v) => onStatusChange?.(v)}
-            options={STATUS_KEYS.map((k) => ({ value: k, label: STATUS_META[k].label }))}
-          />
+        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
           <Tooltip title="打开商品页">
             <Button size="small" type="text" icon={<LinkOutlined />} onClick={onOpen} />
           </Tooltip>
@@ -475,11 +477,24 @@ export default function SelectionPlaza() {
   const [poolRows, setPoolRows] = useState<ProductRow[]>([]);
   const [poolSummary, setPoolSummary] = useState<Record<string, number>>({});
   const [poolIds, setPoolIds] = useState<Set<string>>(new Set());
-  const [poolStatusFilter, setPoolStatusFilter] = useState<string>("");
+  const poolStatusFilter = "";
 
   const [activeTab, setActiveTab] = useState("plaza");
   const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(new Set());
-  const [exportLoading, setExportLoading] = useState(false);
+
+  // ---- 上品 Drawer 状态（全局 store 驱动）----
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const taskState = useSyncExternalStore(
+    listingTaskStore.subscribe,
+    listingTaskStore.getState,
+  );
+  const listingMode = taskState.mode;
+  const drawerProducts = taskState.products;
+  const listingExporting = taskState.exporting;
+  const listingRunning = taskState.running;
+  const listingPaused = taskState.paused;
+  const listingProgress = taskState.progress;
+  const listingResults = taskState.results;
 
   // ---- 数据加载 ----
 
@@ -601,6 +616,7 @@ export default function SelectionPlaza() {
         mall_name: item.mall_name,
         mall_mode: item.mall_mode,
         source_keyword: keyword || "",
+        opt_ids: item.opt_ids || [],
       });
       if (r?.ok) {
         message.success("已加入选品池");
@@ -615,22 +631,26 @@ export default function SelectionPlaza() {
   };
 
   const removeFromPool = async (goodsId: string) => {
+    const gid = String(goodsId);
+    setPoolIds((prev) => { const n = new Set(prev); n.delete(gid); return n; });
+    setPoolRows((prev) => prev.filter((r) => String(r.goods_id) !== gid));
     try {
       await api?.selectionRemove({ goodsId });
       message.success("已移出选品池");
-      setPoolIds((prev) => { const n = new Set(prev); n.delete(String(goodsId)); return n; });
-      void loadPool();
     } catch (e: any) {
       message.error(e?.message || "移除失败");
+      void loadPool();
+      void loadPoolIds();
     }
   };
 
   const changeStatus = async (goodsId: string, status: string) => {
+    setPoolRows((prev) => prev.map((r) => String(r.goods_id) === String(goodsId) ? { ...r, status } : r));
     try {
       await api?.selectionUpdate({ goodsId, status });
-      void loadPool();
     } catch (e: any) {
       message.error(e?.message || "更新状态失败");
+      void loadPool();
     }
   };
 
@@ -659,10 +679,7 @@ export default function SelectionPlaza() {
   }, []);
 
   // 全选 / 取消全选（仅限可上品的 want / sourced 状态）
-  const eligiblePoolRows = useMemo(
-    () => poolRows.filter((r) => r.status === "want" || r.status === "sourced"),
-    [poolRows],
-  );
+  const eligiblePoolRows = poolRows;
 
   const toggleSelectAll = useCallback(() => {
     if (selectedPoolIds.size >= eligiblePoolRows.length && eligiblePoolRows.length > 0) {
@@ -672,23 +689,91 @@ export default function SelectionPlaza() {
     }
   }, [selectedPoolIds.size, eligiblePoolRows]);
 
-  // 批量上品
-  const handleBatchExport = useCallback(async () => {
-    if (!selectedPoolIds.size) return;
-    setExportLoading(true);
+  // ---- 上品 Drawer 逻辑（通过全局 store）----
+
+  useEffect(() => {
+    listingTaskStore.setOnComplete(() => {
+      void loadPool();
+      void loadPoolIds();
+    });
+  }, [loadPool, loadPoolIds]);
+
+  const openListingDrawer = useCallback(() => {
+    if (listingRunning) {
+      setDrawerOpen(true);
+      return;
+    }
+    const products = poolRows.filter((r) => selectedPoolIds.has(r.goods_id));
+    listingTaskStore.setProducts(products);
+    listingTaskStore.reset();
+    listingTaskStore.setProducts(products);
+    setDrawerOpen(true);
+  }, [listingRunning, poolRows, selectedPoolIds]);
+
+  const removeDrawerProduct = useCallback((goodsId: string) => {
+    listingTaskStore.removeProduct(goodsId);
+  }, []);
+
+  const resetListingDrawer = useCallback(() => {
+    const products = poolRows.filter((r) => selectedPoolIds.has(r.goods_id));
+    listingTaskStore.reset();
+    listingTaskStore.setProducts(products);
+  }, [poolRows, selectedPoolIds]);
+
+  const handleStartListing = useCallback(async () => {
+    if (!drawerProducts.length) return;
+    listingTaskStore.setOnComplete(() => {
+      void loadPool();
+      void loadPoolIds();
+    });
+
     try {
-      const goodsIds = Array.from(selectedPoolIds);
-      await (window.electronAPI as any)?.yunqiDb?.exportAutoPrice?.({ goodsIds });
-      message.success(`已提交 ${goodsIds.length} 个商品的批量上品任务`);
+      const goodsIds = drawerProducts.map((p: any) => p.goods_id);
+      const exportResult = await api?.exportForListing?.({ goodsIds });
+      if (!exportResult?.ok) {
+        message.error(exportResult?.reason || exportResult?.error || "导出失败");
+        return;
+      }
+
+      const csvPath = exportResult.csvPath!;
+      const count = exportResult.count!;
+
+      if (listingMode === "classic") {
+        const result = await listingTaskStore.startClassic(csvPath, count);
+        if (!result.ok) {
+          message.warning(result.message);
+        } else {
+          message.success("AI 生图上品已开始");
+        }
+      } else {
+        const result = await listingTaskStore.startWorkflow(csvPath, count);
+        if (result.ok) {
+          message.success(result.message || "新上品流程完成");
+        } else {
+          message.error(result.message || "新上品流程失败");
+        }
+      }
+
       setSelectedPoolIds(new Set());
     } catch (e: any) {
-      message.error(e?.message || "批量上品失败");
-    } finally {
-      setExportLoading(false);
+      message.error(e?.message || "上品失败");
+      listingTaskStore.reset();
     }
-  }, [selectedPoolIds]);
+  }, [drawerProducts, listingMode, loadPool, loadPoolIds]);
 
-  // ---- 生命周期 ----
+  const handleToggleListingPause = useCallback(async () => {
+    try {
+      await listingTaskStore.togglePause();
+      message.success(listingPaused ? "已继续" : "暂停请求已发送");
+    } catch (e: any) {
+      message.error(e?.message || "操作失败");
+    }
+  }, [listingPaused]);
+
+  const handleBatchExport = useCallback(() => {
+    if (!selectedPoolIds.size) return;
+    openListingDrawer();
+  }, [selectedPoolIds.size, openListingDrawer]);
 
   useEffect(() => {
     void loadCategories();
@@ -698,10 +783,6 @@ export default function SelectionPlaza() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    void loadPool();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [poolStatusFilter]);
 
   // 触底自动加载更多
   useEffect(() => {
@@ -798,6 +879,7 @@ export default function SelectionPlaza() {
       <style>{`
         .sp-card{transition:transform .18s ease,box-shadow .22s ease}
         .sp-card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.08),0 12px 28px rgba(0,0,0,0.1)!important}
+        @keyframes listingBubblePulse{0%,100%{box-shadow:0 4px 16px rgba(22,119,255,0.35)}50%{box-shadow:0 4px 24px rgba(22,119,255,0.55)}}
       `}</style>
 
       {/* 筛选区 */}
@@ -951,37 +1033,6 @@ export default function SelectionPlaza() {
         .sp-card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.08),0 12px 28px rgba(0,0,0,0.1)!important}
       `}</style>
 
-      {/* 状态看板 */}
-      <Card style={CARD_STYLE} styles={{ body: { padding: 12 } }}>
-        <Row gutter={[8, 8]}>
-          {[
-            { value: "", label: "全部", hex: BLUE, count: poolSummary.total || 0 },
-            ...STATUS_KEYS.map((k) => ({ value: k, label: STATUS_META[k].label, hex: STATUS_META[k].hex, count: poolSummary[k] || 0 })),
-          ].map((s) => {
-            const active = poolStatusFilter === s.value;
-            return (
-              <Col key={s.value || "all"} flex="1 1 0" style={{ minWidth: 84 }}>
-                <div
-                  onClick={() => setPoolStatusFilter(s.value)}
-                  style={{
-                    cursor: "pointer",
-                    borderRadius: 8,
-                    padding: "10px 10px 8px",
-                    border: active ? `2px solid ${s.hex}` : "1px solid #f0f0f0",
-                    background: active ? `${s.hex}0a` : "#fafafa",
-                    transition: "all .15s ease",
-                    textAlign: "center",
-                  }}
-                >
-                  <div style={{ fontSize: 22, fontWeight: 700, color: s.hex, lineHeight: 1.1 }}>{intFmt(s.count)}</div>
-                  <div style={{ fontSize: 12, color: active ? s.hex : "#8c8c8c", marginTop: 3, fontWeight: active ? 600 : 400 }}>{s.label}</div>
-                </div>
-              </Col>
-            );
-          })}
-        </Row>
-      </Card>
-
       {/* 批量上品工具栏 */}
       {poolRows.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
@@ -995,19 +1046,46 @@ export default function SelectionPlaza() {
             </Checkbox>
             {selectedPoolIds.size > 0 && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                已选 {selectedPoolIds.size} 件（仅"想上"和"已找到货源"状态可上品）
+                已选 {selectedPoolIds.size} 件
               </Text>
             )}
           </Space>
-          <Button
-            type="primary"
-            icon={<UploadOutlined />}
-            disabled={selectedPoolIds.size === 0}
-            loading={exportLoading}
-            onClick={handleBatchExport}
-          >
-            {selectedPoolIds.size > 0 ? `批量上品(${selectedPoolIds.size})` : "批量上品"}
-          </Button>
+          <Space size={8}>
+            <Popconfirm
+              title={`确定移出选中的 ${selectedPoolIds.size} 件商品？`}
+              onConfirm={async () => {
+                const ids = [...selectedPoolIds];
+                setPoolIds((prev) => { const n = new Set(prev); ids.forEach((id) => n.delete(id)); return n; });
+                setPoolRows((prev) => prev.filter((r) => !selectedPoolIds.has(String(r.goods_id))));
+                setSelectedPoolIds(new Set());
+                try {
+                  await Promise.all(ids.map((id) => api?.selectionRemove({ goodsId: id })));
+                  message.success(`已移出 ${ids.length} 件商品`);
+                } catch {
+                  message.error("部分移出失败");
+                  void loadPool();
+                  void loadPoolIds();
+                }
+              }}
+              disabled={selectedPoolIds.size === 0}
+            >
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                disabled={selectedPoolIds.size === 0}
+              >
+                批量删除{selectedPoolIds.size > 0 ? `(${selectedPoolIds.size})` : ""}
+              </Button>
+            </Popconfirm>
+            <Button
+              type="primary"
+              icon={<UploadOutlined />}
+              disabled={selectedPoolIds.size === 0}
+              onClick={handleBatchExport}
+            >
+              {selectedPoolIds.size > 0 ? `批量上品(${selectedPoolIds.size})` : "批量上品"}
+            </Button>
+          </Space>
         </div>
       )}
 
@@ -1019,7 +1097,6 @@ export default function SelectionPlaza() {
       ) : (
         <div style={PRODUCT_GRID_STYLE}>
           {poolRows.map((item) => {
-            const isEligible = item.status === "want" || item.status === "sourced";
             const isSelected = selectedPoolIds.has(item.goods_id);
             return (
               <div
@@ -1033,18 +1110,16 @@ export default function SelectionPlaza() {
                   transition: "outline .15s ease",
                 }}
               >
-                {isEligible && (
-                  <Checkbox
-                    checked={isSelected}
-                    onChange={() => togglePoolSelect(item.goods_id)}
-                    style={{
-                      position: "absolute",
-                      top: 8,
-                      left: 8,
-                      zIndex: 2,
-                    }}
-                  />
-                )}
+                <Checkbox
+                  checked={isSelected}
+                  onChange={() => togglePoolSelect(item.goods_id)}
+                  style={{
+                    position: "absolute",
+                    top: 8,
+                    left: 8,
+                    zIndex: 2,
+                  }}
+                />
                 <ProductCard
                   item={item}
                   inPool
@@ -1086,7 +1161,293 @@ export default function SelectionPlaza() {
         />
       </Space>
 
+      {/* 上品 Drawer */}
+      <ListingDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        mode={listingMode}
+        onModeChange={(m: "classic" | "workflow") => listingTaskStore.setMode(m)}
+        products={drawerProducts}
+        onRemoveProduct={removeDrawerProduct}
+        exporting={listingExporting}
+        running={listingRunning}
+        paused={listingPaused}
+        progress={listingProgress}
+        results={listingResults}
+        onStart={handleStartListing}
+        onTogglePause={handleToggleListingPause}
+        onReset={resetListingDrawer}
+      />
+
+      {/* 浮动进度卡片：任务运行中且 Drawer 已关闭时显示 */}
+      {listingRunning && !drawerOpen && (() => {
+        const t = Number(listingProgress?.total) || 0;
+        const c = Number(listingProgress?.completed) || 0;
+        const pct = t > 0 ? Math.round((c / t) * 100) : 0;
+        const ok = listingResults.filter((r: any) => r.success).length;
+        const fail = listingResults.filter((r: any) => !r.success).length;
+        const step = listingProgress?.step || "处理中";
+        return (
+          <div
+            onClick={() => setDrawerOpen(true)}
+            style={{
+              position: "fixed", bottom: 32, right: 32, zIndex: 1050,
+              background: "#fff", borderRadius: 14,
+              padding: "14px 18px", cursor: "pointer",
+              boxShadow: "0 6px 24px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06)",
+              display: "flex", alignItems: "center", gap: 14,
+              minWidth: 220, border: "1px solid #f0f0f0",
+              transition: "box-shadow 0.2s",
+            }}
+          >
+            <Progress type="circle" percent={pct} size={44} strokeWidth={6}
+              strokeColor={{ '0%': '#1677ff', '100%': '#36cfc9' }}
+              format={() => <span style={{ fontSize: 12, fontWeight: 700, color: "#1677ff" }}>{pct}%</span>}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#262626", display: "flex", alignItems: "center", gap: 6 }}>
+                上品中 {c}/{t}
+                {listingPaused && <Tag color="warning" style={{ margin: 0, fontSize: 11, lineHeight: "18px", padding: "0 4px" }}>暂停</Tag>}
+              </div>
+              <div style={{ fontSize: 12, color: "#8c8c8c", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {step}
+              </div>
+              {(ok > 0 || fail > 0) && (
+                <div style={{ display: "flex", gap: 8, marginTop: 4, fontSize: 12 }}>
+                  {ok > 0 && <span style={{ color: "#52c41a" }}><CheckCircleFilled style={{ marginRight: 2 }} />{ok}</span>}
+                  {fail > 0 && <span style={{ color: "#ff4d4f" }}><CloseCircleOutlined style={{ marginRight: 2 }} />{fail}</span>}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
+  );
+}
+
+// ---------- 上品 Drawer ----------
+
+function ListingDrawer({
+  open, onClose, mode, onModeChange, products, onRemoveProduct,
+  exporting, running, paused, progress, results,
+  onStart, onTogglePause, onReset,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mode: "classic" | "workflow";
+  onModeChange: (m: "classic" | "workflow") => void;
+  products: ProductRow[];
+  onRemoveProduct: (goodsId: string) => void;
+  exporting: boolean;
+  running: boolean;
+  paused: boolean;
+  progress: any;
+  results: any[];
+  onStart: () => void;
+  onTogglePause: () => void;
+  onReset: () => void;
+}) {
+  const isDone = !running && progress && ["completed", "failed", "interrupted"].includes(progress.status);
+  const isActive = running || exporting;
+  const showSetup = !isActive && !isDone;
+
+  const total = Number(progress?.total) || products.length || 0;
+  const completed = Number(progress?.completed) || 0;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return (
+    <Drawer
+      title={<span><RocketOutlined style={{ marginRight: 8 }} />批量上品</span>}
+      placement="right"
+      width={480}
+      open={open}
+      onClose={onClose}
+      destroyOnClose={false}
+    >
+      {showSetup ? (
+        <Space direction="vertical" size={20} style={{ width: "100%" }}>
+          {/* 模式切换 */}
+          <div>
+            <Text strong style={{ display: "block", marginBottom: 8 }}>上品模式</Text>
+            <div style={{ display: "flex", gap: 12 }}>
+              {([
+                { key: "classic" as const, icon: <PictureOutlined />, title: "AI 生图上品", desc: "AI 生成商品图 → 上传 → 创建草稿" },
+                { key: "workflow" as const, icon: <AppstoreOutlined />, title: "新上品流程", desc: "2/3/4PCS 白底组合图 → 素材中心 → 草稿" },
+              ] as const).map((opt) => {
+                const selected = mode === opt.key;
+                return (
+                  <div
+                    key={opt.key}
+                    onClick={() => onModeChange(opt.key)}
+                    style={{
+                      flex: 1,
+                      padding: "12px 14px",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      border: selected ? "2px solid #1677ff" : "2px solid #f0f0f0",
+                      background: selected ? "#e6f4ff" : "#fafafa",
+                      transition: "all 0.2s",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontSize: 18, color: selected ? "#1677ff" : "#8c8c8c" }}>{opt.icon}</span>
+                      <span style={{ fontWeight: 600, fontSize: 14, color: selected ? "#1677ff" : "#262626" }}>{opt.title}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#8c8c8c", lineHeight: 1.4 }}>{opt.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 商品清单 */}
+          <div>
+            <Text strong>已选商品 ({products.length})</Text>
+            <div style={{ marginTop: 8, maxHeight: 400, overflowY: "auto" }}>
+              {products.map((p) => (
+                <div
+                  key={p.goods_id}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                    borderBottom: "1px solid #f5f5f5",
+                  }}
+                >
+                  <img
+                    src={p.main_image}
+                    alt=""
+                    style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover", background: "#f5f5f5", flexShrink: 0 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.title_zh || p.title_en || "（无标题）"}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#8c8c8c" }}>
+                      {usd(p.usd_price)} · {p.category_zh || "未分类"}
+                    </div>
+                  </div>
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => onRemoveProduct(p.goods_id)}
+                  />
+                </div>
+              ))}
+              {products.length === 0 && (
+                <Empty description="没有已选商品" style={{ padding: "24px 0" }} />
+              )}
+            </div>
+          </div>
+
+          {/* 开始按钮 */}
+          <Button
+            type="primary"
+            block
+            size="large"
+            icon={<RocketOutlined />}
+            disabled={!products.length}
+            onClick={onStart}
+          >
+            开始上品（{products.length} 个商品）
+          </Button>
+        </Space>
+      ) : (
+        <Space direction="vertical" size={20} style={{ width: "100%" }}>
+          {/* 进度 */}
+          <div>
+            {exporting ? (
+              <div style={{ textAlign: "center", padding: "24px 0" }}>
+                <Spin indicator={<LoadingOutlined style={{ fontSize: 28 }} />} />
+                <div style={{ marginTop: 12, color: "#8c8c8c" }}>正在准备商品数据...</div>
+              </div>
+            ) : (
+              <>
+                <div style={{ marginBottom: 8, fontWeight: 500 }}>
+                  {isDone
+                    ? (progress?.status === "completed" ? "上品已完成" : "上品未完成")
+                    : paused
+                      ? "已暂停"
+                      : `正在处理第 ${Math.min(completed + 1, total)} / ${total} 个商品`}
+                </div>
+                <Progress
+                  percent={percent}
+                  status={
+                    isDone
+                      ? (progress?.status === "completed" ? "success" : "exception")
+                      : paused ? "normal" : "active"
+                  }
+                  strokeColor={paused ? "#faad14" : undefined}
+                />
+                {isDone && (
+                  <div style={{ marginTop: 8 }}>
+                    <Tag color="green">
+                      成功 {results.filter((r) => r.success).length}
+                    </Tag>
+                    <Tag color="red">
+                      失败 {results.filter((r) => !r.success).length}
+                    </Tag>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* 结果列表 */}
+          {results.length > 0 && (
+            <div style={{ maxHeight: 360, overflowY: "auto" }}>
+              {results.map((item: any, i: number) => (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 0",
+                    borderBottom: "1px solid #f5f5f5",
+                  }}
+                >
+                  {item.success ? (
+                    <CheckCircleFilled style={{ color: "#52c41a", fontSize: 16, marginTop: 2, flexShrink: 0 }} />
+                  ) : (
+                    <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 16, marginTop: 2, flexShrink: 0 }} />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.name || item.title || item.productName || `商品 ${i + 1}`}
+                    </div>
+                    <div style={{ fontSize: 12, color: item.success ? "#52c41a" : "#ff4d4f" }}>
+                      {item.message || (item.success ? "草稿已创建" : "处理失败")}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 操作按钮 */}
+          <div style={{ display: "flex", gap: 8 }}>
+            {running && !exporting && (
+              <Button
+                block
+                icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                onClick={onTogglePause}
+              >
+                {paused ? "继续" : "暂停"}
+              </Button>
+            )}
+            {isDone && (
+              <>
+                <Button block onClick={onReset}>
+                  新一批
+                </Button>
+                <Button block type="primary" onClick={onClose}>
+                  完成
+                </Button>
+              </>
+            )}
+          </div>
+        </Space>
+      )}
+    </Drawer>
   );
 }
 

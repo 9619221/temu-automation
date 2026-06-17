@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { migrate } from "./db/migrate.js";
+import { getDb } from "./db/connection.js";
 import authRoute from "./routes/auth.js";
 import ingestRoute from "./routes/ingest.js";
 import hookRoute from "./routes/hook.js";
@@ -12,6 +13,13 @@ import notifyRoute from "./routes/notify.js";
 import aiRoute from "./routes/ai.js";
 
 dotenv.config();
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -47,6 +55,26 @@ app.use((err, _req, res, _next) => {
   console.error("[err]", err);
   res.status(500).json({ error: err.message || "internal" });
 });
+
+// 定期清理：防止 capture_events 等表无限膨胀
+const CLEANUP_INTERVAL = 6 * 3600_000;
+function runCleanup() {
+  try {
+    const db = getDb();
+    const now = Date.now();
+    const del = db.prepare("DELETE FROM capture_events WHERE received_at < ?").run(now - 3 * 86400_000);
+    const nul = db.prepare("UPDATE capture_events SET body_json = NULL WHERE body_json IS NOT NULL AND received_at < ?").run(now - 2 * 3600_000);
+    const rsk = db.prepare("UPDATE temu_operation_risk_snapshot SET raw_json = NULL WHERE raw_json IS NOT NULL AND first_seen_at < datetime('now', '-7 days')").run();
+    const stk = db.prepare("UPDATE temu_stock_order_snapshot SET raw_json = NULL WHERE raw_json IS NOT NULL AND first_seen_at < datetime('now', '-7 days')").run();
+    const hb = db.prepare("DELETE FROM agent_heartbeats WHERE received_at < ?").run(now - 30 * 86400_000);
+    db.pragma("wal_checkpoint(TRUNCATE)");
+    console.log(`[cleanup] capture_events: -${del.changes} rows, body_json nulled: ${nul.changes}, risk raw: ${rsk.changes}, stock raw: ${stk.changes}, heartbeats: -${hb.changes}`);
+  } catch (e) {
+    console.error("[cleanup] error:", e.message);
+  }
+}
+setInterval(runCleanup, CLEANUP_INTERVAL);
+setTimeout(runCleanup, 60_000);
 
 const PORT = Number(process.env.PORT || 8788);
 // 默认只绑本机回环：公网只能经 Caddy TLS 反代进来，杜绝直连明文端口。

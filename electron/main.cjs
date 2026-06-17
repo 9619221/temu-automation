@@ -5561,6 +5561,57 @@ ipcMain.handle("yunqi-db:export-auto-price", async (_e, params) => {
   }
 });
 
+ipcMain.handle("yunqi-db:export-for-listing", async (_e, params) => {
+  const goodsIds = params?.goodsIds || [];
+  if (!goodsIds.length) return { ok: false, reason: "无选中商品" };
+
+  let csvRows, resultGoodsIds;
+
+  if (__yunqiIsClient()) {
+    const listResult = await __yunqiRemote("/api/erp/reports/yunqi-selection-list?status=", { method: "GET" });
+    const allRows = listResult?.rows || [];
+    const idSet = new Set(goodsIds.map(String));
+    const matched = allRows.filter(r => idSet.has(String(r.goods_id)));
+    if (!matched.length) return { ok: false, reason: "没有可上品的商品" };
+    csvRows = matched.map(r => ({
+      "商品标题（中文）": r.title_zh || "",
+      "商品标题（英文）": r.title_en || "",
+      "商品主图": r.main_image || "",
+      "商品轮播图": r.carousel_images || "",
+      "美元价格($)": r.usd_price || 0,
+      "分类（中文）": r.category_zh || "",
+      "后台分类": r.backend_category || r.category_zh || "",
+      "goods_id": r.goods_id,
+      "product_url": r.product_url || "",
+    }));
+    resultGoodsIds = matched.map(r => r.goods_id);
+    try {
+      for (const r of matched) {
+        await __yunqiRemote("/api/erp/reports/yunqi-selection-update", { method: "POST", body: { goodsId: r.goods_id, status: "listing" } });
+      }
+    } catch (_) {}
+  } else {
+    const exportResult = await sendCmd("yunqi_db_export_auto_price", { goodsIds });
+    if (!exportResult?.ok) return exportResult;
+    csvRows = exportResult.csvRows || [];
+    resultGoodsIds = exportResult.goodsIds || goodsIds;
+  }
+
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    if (!csvRows.length) return { ok: false, reason: "导出行为空" };
+    const headers = Object.keys(csvRows[0]);
+    const csvLines = [headers.join(","), ...csvRows.map(r => headers.map(h => `"${String(r[h] || "").replace(/"/g, '""')}"`).join(","))];
+    const tmpPath = path.join(os.tmpdir(), `selection-listing-${Date.now()}.csv`);
+    fs.writeFileSync(tmpPath, "﻿" + csvLines.join("\n"), "utf-8");
+    return { ok: true, csvPath: tmpPath, count: csvRows.length, goodsIds: resultGoodsIds };
+  } catch (e) {
+    return { ok: false, error: `导出失败: ${e?.message || String(e)}` };
+  }
+});
+
 // ============ 核价筛选器 IPC ============
 ipcMain.handle("price-review:scan-now", async (_e, params) => {
   const credentials = getActiveWorkerCredentials();

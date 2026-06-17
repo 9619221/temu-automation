@@ -133,7 +133,7 @@ async function liveSearch(params = {}) {
   if (keyword) searchBody.keyword = keyword;
   if (optId) searchBody.opt_ids = [String(optId)];
 
-  const resp = await proxyPost("/search", searchBody);
+  const resp = await proxyPost("/search", searchBody, 90000);
   if (resp.statusCode === 401) {
     const err = new Error("搜索登录已过期，请点击「刷新登录」重新获取");
     err.statusCode = 401;

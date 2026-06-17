@@ -97,6 +97,7 @@ const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
 const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
 const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v3";
+const PURCHASE_WORKBENCH_CACHE_WRITE_DEBOUNCE_MS = 500;
 const PURCHASE_ORDER_DEFAULT_PAGE_SIZE = 20;
 const PURCHASE_REQUEST_REASON_SOURCING = "找品";
 const PURCHASE_REQUEST_REASON_OPTIMIZATION = "优化";
@@ -415,6 +416,7 @@ interface PurchaseOrderCounts {
   draft?: number;
   pendingPayment?: number;
   paid?: number;
+  paidOnlineUnpaid?: number;
   completed?: number;
   cancelled?: number;
   exception?: number;
@@ -782,17 +784,31 @@ function getInitialPurchaseWorkbenchCache(): PurchaseWorkbench {
   return initialPurchaseWorkbenchCache || {};
 }
 
+let purchaseWorkbenchCacheWriteTimer: number | null = null;
+let pendingPurchaseWorkbenchCache: PurchaseWorkbench | null = null;
+
 function writeCachedPurchaseWorkbench(workbench: PurchaseWorkbench) {
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      PURCHASE_WORKBENCH_CACHE_KEY,
-      JSON.stringify(compactPurchaseWorkbenchForCache(workbench)),
-    );
-  } catch {
-    // Cache is only a speed hint; ignore quota or privacy-mode failures.
+  pendingPurchaseWorkbenchCache = workbench;
+  if (purchaseWorkbenchCacheWriteTimer !== null) {
+    window.clearTimeout(purchaseWorkbenchCacheWriteTimer);
   }
+  purchaseWorkbenchCacheWriteTimer = window.setTimeout(() => {
+    const nextWorkbench = pendingPurchaseWorkbenchCache;
+    pendingPurchaseWorkbenchCache = null;
+    purchaseWorkbenchCacheWriteTimer = null;
+    if (!nextWorkbench) return;
+    try {
+      window.localStorage.setItem(
+        PURCHASE_WORKBENCH_CACHE_KEY,
+        JSON.stringify(compactPurchaseWorkbenchForCache(nextWorkbench)),
+      );
+    } catch {
+      // Cache is only a speed hint; ignore quota or privacy-mode failures.
+    }
+  }, PURCHASE_WORKBENCH_CACHE_WRITE_DEBOUNCE_MS);
 }
+
 
 function hasWorkbenchSnapshot(workbench: PurchaseWorkbench) {
   return Boolean(
@@ -1491,6 +1507,12 @@ function externalOrderIndicatesPaid(status?: string | null) {
   return /WAIT_?SELLER_?SEND|WAIT_?BUYER_?RECEIVE|PAID|PAYED|SUCCESS|SELLER_?SEND|SHIPPED/.test(text);
 }
 
+// 1688 后台仍停在「等待买家付款」。external_order_status 历史中英文混存，两种写法都覆盖。
+function externalOrderWaitsBuyerPay(status?: string | null) {
+  const text = String(status || "").trim();
+  return text.replace(/[_\s]/g, "").toLowerCase() === "waitbuyerpay" || text === "等待买家付款";
+}
+
 function externalPaymentNeedsFinanceConfirm(row: PurchaseOrderRow) {
   return Boolean(row.externalOrderId)
     && externalOrderIndicatesPaid(row.externalOrderStatus)
@@ -1727,6 +1749,7 @@ type PurchaseQueueKey =
   | "po_draft"
   | "po_pending_payment"
   | "po_paid"
+  | "po_paid_online_unpaid"
   | "po_completed"
   | "po_cancelled"
   | "po_exception";
@@ -2969,6 +2992,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     ),
     [purchaseOrders],
   );
+  // 「线上未付」对账预警：本地已付，但 1688 仍在等待买家付款。角标以后端 counts 为准，这里仅前端兜底。
+  const paidOnlineUnpaidOrderRows = useMemo(
+    () => paidOrderRows.filter((row) =>
+      Boolean(row.externalOrderId) && externalOrderWaitsBuyerPay(row.externalOrderStatus)),
+    [paidOrderRows],
+  );
   const completedOrderRows = useMemo(
     () => purchaseOrders.filter(isCompletedOrder),
     [purchaseOrders],
@@ -2991,6 +3020,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const orderCountDraft = Number(purchaseOrderCounts.draft ?? unsubmittedOrderRows.length);
   const orderCountPendingPayment = Number(purchaseOrderCounts.pendingPayment ?? confirmedPendingPaymentOrderRows.length);
   const orderCountPaid = Number(purchaseOrderCounts.paid ?? paidOrderRows.length);
+  const orderCountPaidOnlineUnpaid = Number(purchaseOrderCounts.paidOnlineUnpaid ?? paidOnlineUnpaidOrderRows.length);
   const orderCountCompleted = Number(purchaseOrderCounts.completed ?? completedOrderRows.length);
   const orderCountCancelled = Number(purchaseOrderCounts.cancelled ?? cancelledOrderRows.length);
   const orderCountException = Number(purchaseOrderCounts.exception ?? exceptionOrderRows.length);
@@ -3011,6 +3041,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       { key: "po_draft", title: "待提交", count: orderCountDraft, kind: "order" },
       { key: "po_pending_payment", title: "待付款", count: orderCountPendingPayment, kind: "order" },
       { key: "po_paid", title: "已付款", count: orderCountPaid, kind: "order" },
+      { key: "po_paid_online_unpaid", title: "线上未付", count: orderCountPaidOnlineUnpaid, kind: "order" },
       { key: "po_completed", title: "已完成", count: orderCountCompleted, kind: "order" },
       { key: "po_cancelled", title: "已取消", count: orderCountCancelled, kind: "order" },
       { key: "po_exception", title: "异常", count: orderCountException, kind: "order" },
@@ -3033,6 +3064,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     orderCountDraft,
     orderCountException,
     orderCountPaid,
+    orderCountPaidOnlineUnpaid,
     orderCountPendingPayment,
     optimizedRequestRows,
     sourcedRequestRows,
@@ -3049,6 +3081,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         return confirmedPendingPaymentOrderRows;
       case "po_paid":
         return paidOrderRows;
+      case "po_paid_online_unpaid":
+        return paidOnlineUnpaidOrderRows;
       case "po_completed":
         return completedOrderRows;
       case "po_cancelled":
@@ -3066,6 +3100,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     confirmedPendingPaymentOrderRows,
     unsubmittedOrderRows,
     exceptionOrderRows,
+    paidOnlineUnpaidOrderRows,
     paidOrderRows,
     purchaseOrders,
   ]);
@@ -3440,7 +3475,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
     const promise = (async () => {
       try {
-        const workbench = await erp.purchase.workbench(FULL_PURCHASE_WORKBENCH_PARAMS);
+        const supplementalParams = activeWorkArea === "orders"
+          ? { ...FULL_PURCHASE_WORKBENCH_PARAMS, includePurchaseRequests: false }
+          : FULL_PURCHASE_WORKBENCH_PARAMS;
+        const workbench = await erp.purchase.workbench(supplementalParams);
         applyWorkbench(workbench);
         syncWorkbenchOptions(workbench);
       } catch {
@@ -3451,7 +3489,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     })();
     supplementalWorkbenchPromiseRef.current = promise;
     await promise;
-  }, [applyWorkbench, syncWorkbenchOptions]);
+  }, [activeWorkArea, applyWorkbench, syncWorkbenchOptions]);
 
   // 推单 Modal:切到一个还没本地地址的 1688 账号时,自动触发一次同步,
   // 用 pickerAutoSyncedRef 限制每个账号本周期最多自动同步一次,避免循环。
@@ -3535,7 +3573,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       // 0.3.25 性能：FULL_PURCHASE_WORKBENCH_PARAMS 关掉了 includeOptions（详见 86 行注释），
       // suppliers 不再随 workbench 返回，这里 fire-and-forget 单独拉一次给新建采购单 Modal 用。
       if (sideLoads) {
-        void erp.supplier.list({ limit: 500 })
+        void erp.supplier.list({ limit: 500, compact: true })
           .then((supplierRows: unknown) => {
             if (Array.isArray(supplierRows) && supplierRows.length) setSuppliers(supplierRows as SupplierOption[]);
           })

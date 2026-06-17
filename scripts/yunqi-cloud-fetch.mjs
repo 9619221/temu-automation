@@ -168,6 +168,25 @@ async function fetchAndStore(page, { wareHouseType, keyword, label }) {
     } else {
       for (const wht of [0, 1]) total += await fetchAndStore(page, { wareHouseType: wht, keyword: "", label: wht === 0 ? "全托管" : "半托管" });
     }
+    // 用 opt_ids + categories 表回填 backend_category
+    try {
+      const d = getDb();
+      const cats = d.prepare("SELECT cat_id, cat_name FROM categories").all();
+      const catMap = Object.fromEntries(cats.map((r) => [String(r.cat_id), r.cat_name]));
+      const rows = d.prepare("SELECT id, opt_ids FROM products WHERE (backend_category IS NULL OR backend_category = '') AND opt_ids != '' AND opt_ids != '[]'").all();
+      if (rows.length) {
+        const upd = d.prepare("UPDATE products SET backend_category = ? WHERE id = ?");
+        let filled = 0;
+        for (const r of rows) {
+          try {
+            const ids = JSON.parse(r.opt_ids);
+            const path = ids.map(String).map((id) => catMap[id]).filter(Boolean).join(">");
+            if (path) { upd.run(path, r.id); filled++; }
+          } catch {}
+        }
+        log(`backend_category 回填: ${filled}/${rows.length} 条`);
+      }
+    } catch (e) { log("backend_category 回填失败:", e.message); }
     log(`✅ 抓取完成 | 本轮入库 ${total} | 云端库现有 ${getRowCount()} 商品`);
   } finally {
     await browser.close();

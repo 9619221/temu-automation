@@ -21,13 +21,27 @@ function db() {
     );
     CREATE INDEX IF NOT EXISTS idx_sel_status ON selection_pool(status);
   `);
+  try { _db.exec("ALTER TABLE selection_pool ADD COLUMN backend_category TEXT DEFAULT ''"); } catch {}
   return _db;
+}
+
+function buildCategoryPath(optIds) {
+  if (!Array.isArray(optIds) || !optIds.length) return "";
+  const d = db();
+  const ids = optIds.map(String);
+  const rows = d.prepare(`SELECT cat_id, cat_name, cat_level, parent_cat_id FROM categories WHERE cat_id IN (${ids.map(() => "?").join(",")})`).all(...ids);
+  if (!rows.length) return "";
+  const byId = Object.fromEntries(rows.map((r) => [String(r.cat_id), r]));
+  const parts = [];
+  for (const id of ids) { const r = byId[id]; if (r) parts.push(r.cat_name); }
+  return parts.join(">");
 }
 
 // products_latest：物化「每个 goods_id 最新一行」，供 searchProducts 免去每次全表去重。
 // products 由抓取服务写入（只增不改历史），MAX(id) 单调增；据此惰性重建——抓取后首次
 // 搜索重建一次，平时仅多一次主键 MAX 检查。重建为 DROP+CREATE AS SELECT，单进程同步无并发。
 let _latestMaxId = null;
+let _ftsReady = false;
 function ensureLatest(d) {
   let curMax;
   try { curMax = d.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM products").get().m; }
@@ -39,6 +53,14 @@ function ensureLatest(d) {
   for (const col of ["daily_sales", "weekly_sales", "monthly_sales", "total_sales", "usd_price", "usd_gmv", "score", "total_comments", "mall_mode"]) {
     try { d.exec(`CREATE INDEX IF NOT EXISTS idx_pl_${col} ON products_latest(${col})`); } catch { /* 列缺失则跳过 */ }
   }
+  // FTS5 trigram 全文搜索索引：替代 LIKE '%关键词%' 全表扫描
+  _ftsReady = false;
+  try {
+    d.exec("DROP TABLE IF EXISTS products_fts");
+    d.exec("CREATE VIRTUAL TABLE products_fts USING fts5(title_zh, title_en, category_zh, tokenize='trigram')");
+    d.exec("INSERT INTO products_fts(rowid, title_zh, title_en, category_zh) SELECT id, COALESCE(title_zh,''), COALESCE(title_en,''), COALESCE(category_zh,'') FROM products_latest");
+    _ftsReady = true;
+  } catch { /* FTS5 不可用则降级到 LIKE */ }
   _latestMaxId = curMax;
   return true;
 }
@@ -49,12 +71,28 @@ function searchProducts(params = {}) {
   const { keyword = "", category = "", optId = "", mallMode = "", minPrice = null, maxPrice = null, minDailySales = null, sortBy = "daily_sales", sortOrder = "DESC", page = 1, pageSize = 24 } = params || {};
   const conds = [];
   const vals = [];
-  if (keyword) { conds.push("(title_zh LIKE ? OR title_en LIKE ?)"); vals.push(`%${keyword}%`, `%${keyword}%`); }
+  if (keyword) {
+    if (_ftsReady) {
+      conds.push("id IN (SELECT rowid FROM products_fts WHERE products_fts MATCH ?)");
+      vals.push(`"${keyword.replace(/"/g, '""')}"`);
+    } else {
+      conds.push("(title_zh LIKE ? OR title_en LIKE ?)");
+      vals.push(`%${keyword}%`, `%${keyword}%`);
+    }
+  }
   // optId：真·按类目筛。商品 opt_ids 存为 JSON 如 ["580","1099","2708"]，选「汽车(580)」即筛 opt_ids 含 580。
   // 带引号匹配（%"580"%）防 580 误中 5801；选一级筛全部子类商品（子类商品 opt_ids 也含一级 id）。
   if (optId) { conds.push("opt_ids LIKE ?"); vals.push(`%"${optId}"%`); }
   // category：保留「按词筛标题」兜底（无 opt_id 时输入"厨房/充电"筛标题）
-  if (category) { conds.push("(category_zh LIKE ? OR title_zh LIKE ? OR title_en LIKE ?)"); vals.push(`%${category}%`, `%${category}%`, `%${category}%`); }
+  if (category) {
+    if (_ftsReady) {
+      conds.push("id IN (SELECT rowid FROM products_fts WHERE products_fts MATCH ?)");
+      vals.push(`"${category.replace(/"/g, '""')}"`);
+    } else {
+      conds.push("(category_zh LIKE ? OR title_zh LIKE ? OR title_en LIKE ?)");
+      vals.push(`%${category}%`, `%${category}%`, `%${category}%`);
+    }
+  }
   if (mallMode) { conds.push("mall_mode = ?"); vals.push(mallMode); }
   if (minPrice != null && minPrice !== "") { conds.push("usd_price >= ?"); vals.push(Number(minPrice)); }
   if (maxPrice != null && maxPrice !== "") { conds.push("usd_price <= ?"); vals.push(Number(maxPrice)); }
@@ -118,19 +156,22 @@ function addSelection(item = {}) {
   const d = db();
   const now = new Date().toISOString();
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const optIds = Array.isArray(item.opt_ids) ? item.opt_ids : [];
+  const backCat = String(item.backend_category || "") || buildCategoryPath(optIds) || String(item.category_zh || "");
   d.prepare(`
-    INSERT INTO selection_pool (goods_id, sku_id, title_zh, title_en, main_image, product_url, usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode, status, note, source_keyword, added_at, updated_at)
-    VALUES (@goods_id,@sku_id,@title_zh,@title_en,@main_image,@product_url,@usd_price,@daily_sales,@weekly_sales,@monthly_sales,@usd_gmv,@score,@category_zh,@mall_name,@mall_mode,@status,@note,@source_keyword,@added_at,@updated_at)
+    INSERT INTO selection_pool (goods_id, sku_id, title_zh, title_en, main_image, product_url, usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode, backend_category, status, note, source_keyword, added_at, updated_at)
+    VALUES (@goods_id,@sku_id,@title_zh,@title_en,@main_image,@product_url,@usd_price,@daily_sales,@weekly_sales,@monthly_sales,@usd_gmv,@score,@category_zh,@mall_name,@mall_mode,@backend_category,@status,@note,@source_keyword,@added_at,@updated_at)
     ON CONFLICT(goods_id) DO UPDATE SET
       title_zh=excluded.title_zh, main_image=excluded.main_image, product_url=excluded.product_url,
       usd_price=excluded.usd_price, daily_sales=excluded.daily_sales, weekly_sales=excluded.weekly_sales,
       monthly_sales=excluded.monthly_sales, usd_gmv=excluded.usd_gmv, score=excluded.score,
-      mall_name=excluded.mall_name, mall_mode=excluded.mall_mode, updated_at=excluded.updated_at
+      mall_name=excluded.mall_name, mall_mode=excluded.mall_mode, backend_category=excluded.backend_category, updated_at=excluded.updated_at
   `).run({
     goods_id: goodsId, sku_id: String(item.sku_id || ""), title_zh: String(item.title_zh || ""), title_en: String(item.title_en || ""),
     main_image: String(item.main_image || ""), product_url: String(item.product_url || `https://www.temu.com/goods.html?goods_id=${goodsId}`),
     usd_price: num(item.usd_price), daily_sales: num(item.daily_sales), weekly_sales: num(item.weekly_sales), monthly_sales: num(item.monthly_sales),
     usd_gmv: num(item.usd_gmv), score: num(item.score), category_zh: String(item.category_zh || ""), mall_name: String(item.mall_name || ""), mall_mode: String(item.mall_mode || ""),
+    backend_category: backCat,
     status: SELECTION_STATUSES.includes(item.status) ? item.status : "want", note: String(item.note || ""), source_keyword: String(item.source_keyword || ""),
     added_at: now, updated_at: now,
   });

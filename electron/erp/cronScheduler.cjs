@@ -35,7 +35,7 @@ class CronScheduler {
 
   start(initialDelayMs = 60000) {
     this._stopped = false;
-    const STAGGER = 10000;
+    const STAGGER = 30000;
     let offset = 0;
     for (const [name, task] of this._tasks) {
       const delay = initialDelayMs + offset;

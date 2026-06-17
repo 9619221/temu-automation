@@ -9,7 +9,10 @@ function registerPurchaseHandlers(ipcMain, deps) {
     "erp:purchase:workbench",
     wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})),
   );
-  ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
+  ipcMain.handle(
+    "erp:purchase:action",
+    wrapErpHandler("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {})),
+  );
 }
 
 module.exports = { registerPurchaseHandlers };

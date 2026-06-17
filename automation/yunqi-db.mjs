@@ -856,7 +856,7 @@ export function exportSelectionForAutoPricing(goodsIds = []) {
            p.carousel_images, p.backend_category, p.product_url
       FROM selection_pool sp
       LEFT JOIN products p ON p.goods_id = sp.goods_id
-     WHERE sp.goods_id IN (${ph}) AND sp.status IN ('want', 'sourced')
+     WHERE sp.goods_id IN (${ph}) AND sp.status IN ('want', 'sourced', 'listing')
   `).all(...goodsIds);
   if (!rows.length) return { ok: false, reason: "没有可上品的商品(需 want/sourced 状态)" };
 
@@ -867,7 +867,7 @@ export function exportSelectionForAutoPricing(goodsIds = []) {
     "商品轮播图": r.carousel_images || "",
     "美元价格($)": r.usd_price || 0,
     "分类（中文）": r.category_zh || "",
-    "后台分类": r.backend_category || "",
+    "后台分类": r.backend_category || r.category_zh || "",
     "goods_id": r.goods_id,
     "product_url": r.product_url || "",
   }));

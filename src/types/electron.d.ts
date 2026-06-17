@@ -264,6 +264,7 @@ interface ConsignDeliverUnifiedParams {
   pageSize?: number;
   search?: string;
   status?: string;
+  onlineStatus?: string;
   shop?: string;
   skuCode?: string;
   dateFrom?: string;
@@ -350,9 +351,8 @@ interface ConsignDeliverUnifiedResult {
     jst_only: number;
     both: number;
   };
-  // 各「显示状态」(jst_status || cloud_temu_status) 的条数，仅受搜索约束。
-  // 旧服务器不返回此字段，前端需做缺省兜底。
   statusBreakdown?: Record<string, number>;
+  onlineStatusBreakdown?: Record<string, number>;
 }
 
 interface ErpStatus {
@@ -404,6 +404,8 @@ interface ErpListParams {
   search?: string;
   limit?: number;
   offset?: number;
+  compact?: boolean;
+  forSelect?: boolean;
   inboundReceiptLimit?: number;
   inboundReceiptOffset?: number;
   inventoryBatchLimit?: number;
@@ -1503,6 +1505,7 @@ interface YunqiDbAPI {
   selectionList: (params?: { status?: string }) => Promise<{ rows: any[]; summary: Record<string, number> }>;
   selectionIds: () => Promise<string[]>;
   categories: () => Promise<Array<{ cat_id: number; cat_name: string; cat_en_name: string; cat_level: number; parent_cat_id: number; is_leaf: number }>>;
+  exportForListing: (params: { goodsIds: string[] }) => Promise<{ ok: boolean; csvPath?: string; count?: number; goodsIds?: string[]; reason?: string; error?: string }>;
 }
 
 interface AutoImageSwapResultItem {
