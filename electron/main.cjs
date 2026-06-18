@@ -2369,6 +2369,17 @@ function getImageStudioBaseUrl(port = imageStudioPort) {
   return `http://${AUTO_IMAGE_HOST}:${port}`;
 }
 
+function getImageStudioFallbackUrl() {
+  try {
+    const rt = require("./erp/clientRuntime.cjs");
+    if (rt.isClientMode()) {
+      const cfg = rt.readRuntimeConfig();
+      if (cfg.serverUrl) return cfg.serverUrl.replace(/\/+$/, "") + "/agent";
+    }
+  } catch {}
+  return workerAiImageServer || process.env.AI_IMAGE_SERVER || getImageStudioBaseUrl(imageStudioPort);
+}
+
 function updateImageStudioStatus(patch = {}) {
   if (Number.isInteger(patch.port) && patch.port > 0) {
     imageStudioPort = patch.port;
@@ -4891,7 +4902,7 @@ ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
     imageStudioUrl = imageStudio?.url || "";
   } catch (err) {
     console.error(`[Main] Image studio unavailable, workflow pack image generation may fail: ${err?.message || err}`);
-    imageStudioUrl = workerAiImageServer || process.env.AI_IMAGE_SERVER || getImageStudioBaseUrl(imageStudioPort);
+    imageStudioUrl = getImageStudioFallbackUrl();
   }
   await ensureWorkerStarted({ aiImageServer: imageStudioUrl });
   try {
@@ -4993,7 +5004,7 @@ ipcMain.handle("automation:generate-combo-listing", async (_e, params) => {
     imageStudioUrl = imageStudio?.url || "";
   } catch (err) {
     console.error(`[Main] Image studio unavailable for combo listing: ${err?.message || err}`);
-    imageStudioUrl = workerAiImageServer || process.env.AI_IMAGE_SERVER || getImageStudioBaseUrl(imageStudioPort);
+    imageStudioUrl = getImageStudioFallbackUrl();
   }
   await ensureWorkerStarted({ aiImageServer: imageStudioUrl });
   autoPricingTaskPromise = sendCmd("combo_listing", {
@@ -5071,7 +5082,7 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
     imageStudioUrl = imageStudio?.url || "";
   } catch (err) {
     console.error(`[Main] Image studio unavailable, auto-pricing will run without it: ${err?.message || err}`);
-    imageStudioUrl = workerAiImageServer || process.env.AI_IMAGE_SERVER || getImageStudioBaseUrl(imageStudioPort);
+    imageStudioUrl = getImageStudioFallbackUrl();
   }
   await ensureWorkerStarted({ aiImageServer: imageStudioUrl });
   const credentials = getActiveWorkerCredentials();

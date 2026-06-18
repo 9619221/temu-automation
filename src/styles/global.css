@@ -4335,6 +4335,18 @@ h6 {
   box-shadow: inset 3px 0 0 0 #1a73e8;
 }
 
+/* 选中行/选中悬浮行内 Tag 保持可见 */
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected .ant-tag-warning,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected:hover .ant-tag-warning {
+  background: rgba(251, 188, 4, 0.25) !important;
+  border-color: rgba(251, 188, 4, 0.5) !important;
+}
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected .ant-tag-processing,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected:hover .ant-tag-processing {
+  background: #d2e3fc !important;
+  border-color: #b4d1f7 !important;
+}
+
 .erp-compact-table .purchase-order-row--clickable > td {
   cursor: pointer;
 }
@@ -7211,7 +7223,9 @@ td.status-cell-colored {
   text-align: center;
   padding: 0 !important;
 }
-.erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > td.status-cell-colored {
+.erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > td.status-cell-colored,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > td.status-cell-colored,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected:hover > td.status-cell-colored {
   background: var(--status-bg, transparent) !important;
 }
 .status-cell-text {

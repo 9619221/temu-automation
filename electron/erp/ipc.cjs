@@ -32,6 +32,7 @@ const {
   getOfficialShipPreview,
   fetchStagingSkusDetailed,
   stagingAddOfficial,
+  lookupDeliveryOrderSn,
   createOfficialShipOrder,
   cancelOfficialShipOrder,
   getOfficialLogisticsCompanies,
@@ -22125,6 +22126,11 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
       return stagingAddOfficial({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
     }
+    case "consign_official_shiporder_lookup": {
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
+      return lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
+    }
     case "consign_official_ship_create": {
       // 创建官方发货单（生成 FH 单，可撤销、不真发货）。skuList=[{productSkuId,qty}]。
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
@@ -22140,7 +22146,8 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       // 撤销官方发货单（仅 FH 未物流下单可撤）。
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
       const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
-      return cancelOfficialShipOrder({ db, mallId, deliveryOrderSn }).then((r) => ({ action, ...r }));
+      const cancelSoId = optionalString(payload.soId || payload.so_id);
+      return cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchaseOrderSn: cancelSoId }).then((r) => ({ action, ...r }));
     }
     case "consign_official_logistics_companies": {
       // 快递公司字典（自寄兜底；全托管店多返回空，主路径用 logistics_match）。

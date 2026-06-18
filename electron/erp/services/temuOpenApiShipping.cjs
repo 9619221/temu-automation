@@ -75,6 +75,9 @@ async function getOfficialShipPreview({ db, mallId, subPurchaseOrderSn }) {
           cityName: a.cityName || null,
           districtName: a.districtName || null,
           detailAddress: a.detailAddress || null,
+          provinceCode: a.provinceCode != null ? a.provinceCode : null,
+          cityCode: a.cityCode != null ? a.cityCode : null,
+          districtCode: a.districtCode != null ? a.districtCode : null,
         };
       }
     } catch (e) {
@@ -180,6 +183,30 @@ async function stagingAddOfficial({ db, mallId, subPurchaseOrderSn, deliveryAddr
   return { subPurchaseOrderSn: wb, alreadyIn: errs.some((e) => e && Number(e.errorCode) === 60001) };
 }
 
+// 按备货单号查已有的发货单号（shiporderv2.get + subPurchaseOrderSn 单数参数，重试 3 次）。
+async function lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn }) {
+  const creds = getMallShipCreds(db, mallId);
+  const wb = String(subPurchaseOrderSn);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await callShipApi(creds, "bg.shiporderv2.get", { pageSize: 10, pageNo: 1, subPurchaseOrderSn: wb });
+      const hit = ((r && r.list) || []).find((it) => it && it.deliveryOrderSn);
+      if (hit) {
+        return {
+          deliveryOrderSn: String(hit.deliveryOrderSn),
+          deliveryAddressId: hit.deliveryAddressId ? String(hit.deliveryAddressId) : null,
+          subWarehouseId: hit.subWarehouseId ? String(hit.subWarehouseId) : null,
+        };
+      }
+      break;
+    } catch (e) {
+      console.log("[lookupDeliveryOrderSn] attempt", attempt + 1, "error:", e.errorCode, e.message);
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return { deliveryOrderSn: null };
+}
+
 // 创建发货单：staging.add（确保在发货台）→ receiveaddressv2（取收货地址+子仓）→
 // mall.address（取发货地址 ID）→ shiporderv3.create（按验证出的正确结构）。
 // 生成 FH 发货单，可撤销、不真发货。返回 { deliveryOrderSn, deliveryOrders, subWarehouseId, deliveryAddressId }。
@@ -223,20 +250,38 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
     daId = Number(def.id);
   }
 
-  // 4. 创建发货单。结构经真实验证：receiveAddressInfo 在 group 顶层，packageInfos 在 createInfos 层。
-  //    优先使用前端传入的结构化 packages，否则按 packageCount 自动均分。
+  // 4. 构建包裹。必须在 create 时就传对，创建后不可再改。
+  //    items 来自 staging API，有正确的 productSkuId；rawPackages 来自前端，skuId 可能不同，需映射。
   let packages;
-  if (Array.isArray(rawPackages) && rawPackages.length) {
+  if (Array.isArray(rawPackages) && rawPackages.length > 1) {
+    // 前端传了多包裹：按顺序映射 frontId → staging productSkuId
+    const frontIds = [...new Set(rawPackages.flat().map((s) => Number(s.productSkuId)))];
+    const stagingIds = items.map((it) => it.productSkuId);
+    const idMap = new Map();
+    frontIds.forEach((fid, i) => idMap.set(fid, stagingIds[i] != null ? stagingIds[i] : fid));
     packages = rawPackages.map((pkg) =>
-      pkg.map((s) => ({ productSkuId: Number(s.productSkuId), skuNum: Number(s.skuNum || s.qty) }))
-    );
+      pkg.map((s) => ({ productSkuId: idMap.get(Number(s.productSkuId)) || Number(s.productSkuId), skuNum: Number(s.skuNum || 0) }))
+        .filter((s) => s.skuNum > 0)
+    ).filter((pkg) => pkg.length > 0);
+    if (!packages.length) packages = [items.map((it) => ({ productSkuId: it.productSkuId, skuNum: it.qty }))];
   } else {
-    const pkgCount = Math.max(1, Math.min(Number(packageCount) || 1, items.length));
-    packages = Array.from({ length: pkgCount }, () => []);
-    for (let i = 0; i < items.length; i++) {
-      packages[i % pkgCount].push({ productSkuId: items[i].productSkuId, skuNum: items[i].qty });
+    const pkgCount = Math.max(1, Number(packageCount) || 1);
+    if (pkgCount <= 1) {
+      packages = [items.map((it) => ({ productSkuId: it.productSkuId, skuNum: it.qty }))];
+    } else {
+      packages = Array.from({ length: pkgCount }, () => []);
+      for (const it of items) {
+        const base = Math.floor(it.qty / pkgCount);
+        let rem = it.qty - base * pkgCount;
+        for (let p = 0; p < pkgCount; p++) {
+          const q = base + (rem > 0 ? 1 : 0);
+          if (rem > 0) rem--;
+          if (q > 0) packages[p].push({ productSkuId: it.productSkuId, skuNum: q });
+        }
+      }
     }
   }
+  console.log("[Ship] create packages:", JSON.stringify(packages));
   const groupList = [{
     subWarehouseId,
     receiveAddressInfo,
@@ -249,20 +294,50 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
   }];
   const res = await callShipApi(creds, "bg.shiporderv3.create", { deliveryOrderCreateGroupList: groupList });
   const deliveryOrders = (res && res.deliveryOrders) || [];
+  const deliveryOrderSn = deliveryOrders[0] || null;
+
+  // 创建成功后回写 DB + 物化快照，让刷新后也能识别"已创建发货单"状态、显示收货仓/地址。
+  if (deliveryOrderSn && db) {
+    try {
+      const addrJson = JSON.stringify(receiveAddressInfo);
+      const warehouseName = (receiveAddressInfo && receiveAddressInfo.receiverName) || null;
+      db.prepare(
+        `UPDATE erp_temu_openapi_consign SET
+          delivery_order_sn = COALESCE(NULLIF(delivery_order_sn,''), ?),
+          sub_warehouse_name = COALESCE(NULLIF(sub_warehouse_name,''), ?),
+          receive_warehouse_name = COALESCE(NULLIF(receive_warehouse_name,''), ?),
+          receive_address_json = COALESCE(receive_address_json, ?)
+        WHERE so_id = ?`
+      ).run(deliveryOrderSn, String(subWarehouseId), warehouseName, addrJson, wb);
+      // 同步更新物化快照
+      try {
+        db.prepare(
+          `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json,
+            '$.rawCloud.delivery_order_sn', ?,
+            '$.rawCloud.receive_warehouse_name', ?,
+            '$.rawCloud.receive_address_json', ?)
+          WHERE json_extract(payload_json, '$.soId') = ?`
+        ).run(deliveryOrderSn, warehouseName, addrJson, wb);
+      } catch (e2) { console.warn("[Ship] snapshot update failed (non-fatal):", e2.message); }
+    } catch (e) {
+      console.warn("[Ship] post-create DB update failed (non-fatal):", e.message);
+    }
+  }
+
   return {
     subPurchaseOrderSn: wb,
     subWarehouseId: String(subWarehouseId),
     deliveryAddressId: String(daId),
-    receiveAddressInfo, // 供后续 logisticsmatch.get 复用（同一收货地址对象）
+    receiveAddressInfo,
     deliveryOrders,
-    deliveryOrderSn: deliveryOrders[0] || null,
+    deliveryOrderSn,
   };
 }
 
 // 撤销发货单（仅 FH「已创建未物流下单」可撤；已 packing.send 生成 EB 的不可撤）。
 // 注意：FH 刚创建瞬间状态未就绪，立即撤销会报「当前店铺无法对该发货单进行操作」，
 // 故对该错误轻量重试（最多 3 次、间隔 2s）。
-async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn }) {
+async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchaseOrderSn }) {
   const creds = getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
@@ -270,6 +345,17 @@ async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn }) {
   for (let i = 0; i < 3; i++) {
     try {
       const res = await callShipApi(creds, "bg.shiporder.cancel", { deliveryOrderSn: sn });
+      // 撤销成功后清 DB + 快照中的发货单号，让刷新后状态回到"待发货"。
+      if (db && subPurchaseOrderSn) {
+        const soId = String(subPurchaseOrderSn);
+        try {
+          db.prepare("UPDATE erp_temu_openapi_consign SET delivery_order_sn = NULL WHERE so_id = ? AND delivery_order_sn = ?").run(soId, sn);
+          db.prepare(
+            `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json, '$.rawCloud.delivery_order_sn', NULL)
+            WHERE json_extract(payload_json, '$.soId') = ?`
+          ).run(soId);
+        } catch (e) { console.warn("[Ship] post-cancel DB clear failed (non-fatal):", e.message); }
+      }
       return { deliveryOrderSn: sn, result: res };
     } catch (e) {
       lastErr = e;
@@ -565,6 +651,7 @@ module.exports = {
   getOfficialShipPreview,
   fetchStagingSkusDetailed,
   stagingAddOfficial,
+  lookupDeliveryOrderSn,
   createOfficialShipOrder,
   cancelOfficialShipOrder,
   getOfficialLogisticsCompanies,
