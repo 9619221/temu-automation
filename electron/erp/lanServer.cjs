@@ -500,7 +500,6 @@ cloud_agg AS (
          ELSE NULL END AS cloud_logistics_info,
     sku_count AS cloud_item_count,
     receive_address_json AS cloud_receive_address_json,
-    m.send_address_json AS cloud_send_address_json,
     COALESCE(m.store_code, m.mall_name) AS cloud_shop_name,
     json_extract(items_json, '$[0].picUrl') AS cloud_thumb_url
   FROM erp_temu_openapi_consign c
@@ -560,7 +559,8 @@ jst_left AS (
     c.cloud_logistics_info,
     c.cloud_item_count,
     c.cloud_shop_name,
-    c.cloud_thumb_url
+    c.cloud_thumb_url,
+    c.cloud_receive_address_json
   FROM jst_base j
   LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
   LEFT JOIN jst_ship_agg sa ON sa.o_id = j.o_id
@@ -619,7 +619,8 @@ cloud_only AS (
     c.cloud_logistics_info,
     c.cloud_item_count,
     c.cloud_shop_name,
-    c.cloud_thumb_url
+    c.cloud_thumb_url,
+    c.cloud_receive_address_json
   FROM cloud_agg c
   LEFT JOIN erp_consign_local_state ls
     ON ls.mall_id = c.cloud_mall_id AND ls.so_id = c.cloud_so
@@ -700,7 +701,7 @@ function unifiedRowToPayload(row) {
     logistics_info: row.cloud_logistics_info,
     item_count: row.cloud_item_count,
     receive_address_json: row.cloud_receive_address_json,
-    send_address_json: row.cloud_send_address_json,
+    send_address_json: null,
     thumb_url: row.cloud_thumb_url || null,
   } : null;
   const rawJst = (source === "jst" || source === "both") ? {
@@ -743,6 +744,26 @@ function unifiedRowToPayload(row) {
     rawCloud,
     rawJst,
   };
+}
+
+function enrichSendAddresses(db, payloadRows) {
+  const mallIds = new Set();
+  for (const r of payloadRows) {
+    if (r.rawCloud?.mall_id) mallIds.add(String(r.rawCloud.mall_id));
+  }
+  if (!mallIds.size) return;
+  const addrMap = new Map();
+  try {
+    const stmt = db.prepare("SELECT mall_id, send_address_json FROM erp_temu_malls WHERE mall_id IN (" + [...mallIds].map(() => "?").join(",") + ") AND send_address_json IS NOT NULL");
+    for (const row of stmt.all([...mallIds])) {
+      addrMap.set(String(row.mall_id), row.send_address_json);
+    }
+  } catch { return; }
+  for (const r of payloadRows) {
+    if (r.rawCloud?.mall_id && addrMap.has(String(r.rawCloud.mall_id))) {
+      r.rawCloud.send_address_json = addrMap.get(String(r.rawCloud.mall_id));
+    }
+  }
 }
 
 // 物化快照读取：runConsignDeliveriesUnified 优先走这条（毫秒级），由
@@ -845,9 +866,12 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     }
   }
 
+  const payloadRows = rows.map((r) => JSON.parse(r.payload_json));
+  enrichSendAddresses(db, payloadRows);
+
   return {
     ok: true,
-    rows: rows.map((r) => JSON.parse(r.payload_json)),
+    rows: payloadRows,
     total: Number(totalRow?.n || 0),
     page,
     pageSize,
@@ -986,9 +1010,12 @@ function runConsignDeliveriesUnified(db, params = {}) {
     }
   } catch { /* 旧 CTE 无 cloud_temu_status 时静默降级 */ }
 
+  const payloadRows = rows.map(unifiedRowToPayload);
+  enrichSendAddresses(db, payloadRows);
+
   return {
     ok: true,
-    rows: rows.map(unifiedRowToPayload),
+    rows: payloadRows,
     total,
     page,
     pageSize,
@@ -6242,7 +6269,7 @@ async function handleRequest({
         const p = await readOptionalPayload(req);
         let data;
         try {
-          const raceTimer = new Promise((_, rej) => setTimeout(() => rej(new Error("_live_timeout")), 8000));
+          const raceTimer = new Promise((_, rej) => setTimeout(() => rej(new Error("_live_timeout")), 30000));
           data = await Promise.race([require("./services/yunqiLiveProxy.cjs").liveSearch(p || {}), raceTimer]);
         } catch {
           data = require("./services/yunqiCloud.cjs").searchProducts(p || {});
