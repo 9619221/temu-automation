@@ -127,7 +127,7 @@ async function doSearchOnce(page, params) {
       regions: [], region: 0, ids: [], mall_ids: [], opt_ids: p.opt_ids || [], tags: [], brands: [],
       with_mall: true, sold_out: null,
     };
-    if (p.keyword) body.keyword = p.keyword;
+    if (p.keyword) body.title = p.keyword;
     const res = await fetch("/api/proxytemu/good/search", {
       method: "POST",
       headers: { "Content-Type": "application/json;charset=UTF-8", "Authorization": "Bearer " + token },

@@ -15467,7 +15467,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
       fields: { productMode },
       extraHeaders: AI_AUTH_HEADERS,
     }),
-    maxRetries: 2,
+    maxRetries: 3,
   });
 
   let analysis = null;

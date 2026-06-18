@@ -38,7 +38,6 @@ let UNIFIED_CONSIGN_CTE;
 let unifiedRowToPayload;
 try {
   const lan = require(path.join(__dirname, "..", "electron", "erp", "lanServer.cjs"));
-  // 按开关选 CTE:OPENAPI_CONSIGN=1 用官方物化表(erp_temu_openapi_consign),否则抓包。兼容老版 lanServer(无该函数则退回抓包 const)。
   UNIFIED_CONSIGN_CTE = typeof lan.buildUnifiedConsignCte === "function" ? lan.buildUnifiedConsignCte() : lan.UNIFIED_CONSIGN_CTE;
   unifiedRowToPayload = lan.unifiedRowToPayload;
 } catch (e) {

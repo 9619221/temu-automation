@@ -81,6 +81,7 @@ interface ConsignDeliverUnifiedRawCloud {
   item_count?: number | null;
   receive_address_json?: string | null;
   send_address_json?: string | null;
+  thumb_url?: string | null;
 }
 interface ConsignDeliverUnifiedRawJst {
   o_id?: number | null;
@@ -218,8 +219,9 @@ const TEMU_ONLINE_STATUS_OPTIONS = ["已付款待审核", "待发货", "已发�
 
 // v3：新增「送货数」「入库数」独立列。升版本让旧客户端的列配置重置为含新列的全可见默认，
 // 否则旧 localStorage 的 visible 不含新 key，新列默认隐藏、用户仍看不到。
-const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v4";
+const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v5";
 const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
+  "thumb",
   "onlineStatus",
   "erpStatus",
   "order",
@@ -239,6 +241,7 @@ const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
 ];
 const UNIFIED_CONFIGURABLE_COLUMN_KEY_SET = new Set(UNIFIED_CONFIGURABLE_COLUMN_KEYS);
 const UNIFIED_COLUMN_LABELS: Record<string, string> = {
+  thumb: "商品图片",
   onlineStatus: "线上状态",
   erpStatus: "erp状态",
   order: "备货单",
@@ -1175,7 +1178,7 @@ export default function QcOutboundCenter() {
     if (st?.stage) return st.stage;
     if (row.rawCloud?.delivery_batch_sn) return "shipped";
     const ts = row.rawCloud?.temu_status || "";
-    if (ts.includes("已发货") || ts.includes("已收货") || ts.includes("已入库")) return "shipped";
+    if (ts.includes("已发货") || ts.includes("已收货")) return "shipped";
     if (row.rawCloud?.delivery_order_sn) return "created";
     return "none";
   }, [officialShipState]);
@@ -1551,13 +1554,55 @@ export default function QcOutboundCenter() {
   const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
     const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
     {
+      title: "商品图片",
+      key: "thumb",
+      width: 60,
+      render: (_value, row) => {
+        const url = row.rawCloud?.thumb_url;
+        if (!url) return null;
+        return <img src={url} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4 }} />;
+      },
+    },
+    {
       title: "线上状态",
       key: "onlineStatus",
-      width: 110,
+      width: 120,
       render: (_value, row) => {
-        const s = row.rawCloud?.temu_status;
-        if (!s) return <Text type="secondary">-</Text>;
-        return <Text>{s}</Text>;
+        const isCloud = Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
+        if (!isCloud) {
+          const j = row.rawJst;
+          if (!j) return <Text type="secondary">-</Text>;
+          const addr = [j.receiver_state, j.receiver_city, j.receiver_district].filter(Boolean).join("·");
+          if (!j.logistics_company && !j.outer_deliver_no && !addr) return <Text type="secondary">-</Text>;
+          return (
+            <Space direction="vertical" size={2} style={{ width: "100%" }}>
+              {j.logistics_company ? <Text style={{ fontSize: 12 }}>{j.logistics_company}</Text> : null}
+              {j.outer_deliver_no ? <Text type="secondary" style={{ fontSize: 12 }}>单号：{j.outer_deliver_no}</Text> : null}
+              {addr ? <Text type="secondary" style={{ fontSize: 12 }}>收货：{addr}</Text> : null}
+            </Space>
+          );
+        }
+        const stage = getShipStage(row);
+        const temuStatus = row.rawCloud?.temu_status || "";
+        let tagLabel: string;
+        let tagColor: string | undefined;
+        if (stage === "staged") {
+          tagLabel = "已加发货台"; tagColor = "warning";
+        } else if (stage === "created") {
+          tagLabel = "已创建发货单"; tagColor = "processing";
+        } else if (temuStatus) {
+          tagLabel = temuStatus;
+          tagColor = temuStatus.includes("已收货") ? "cyan"
+            : temuStatus.includes("已发货") ? "blue"
+            : temuStatus.includes("取消") ? "error"
+            : temuStatus.includes("异常") ? "error"
+            : undefined;
+        } else if (stage === "shipped") {
+          tagLabel = "已发货"; tagColor = "blue";
+        } else {
+          tagLabel = "待发货"; tagColor = undefined;
+        }
+        return <Tag color={tagColor}>{tagLabel}</Tag>;
       },
     },
     {
@@ -1606,8 +1651,8 @@ export default function QcOutboundCenter() {
       width: 300,
       render: (_value, row) => (
         <Space direction="vertical" size={3}>
-          <Text>{row.rawCloud?.product_name || row.rawJst?.sku_info || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.rawJst?.skus || "-"}</Text>
+          <Paragraph ellipsis={{ rows: 2, tooltip: true }} style={{ maxWidth: 280, marginBottom: 0 }}>{row.rawCloud?.product_name || row.rawJst?.sku_info || ""}</Paragraph>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.rawJst?.skus || ""}</Text>
         </Space>
       ),
     },
@@ -1736,43 +1781,6 @@ export default function QcOutboundCenter() {
           const line = [def.provinceName, def.cityName, def.districtName].filter(Boolean).join("");
           return <Text type="secondary" style={{ fontSize: 12 }}>{line}{def.addressDetail || def.detailAddress || ""}</Text>;
         } catch { return <Text type="secondary">-</Text>; }
-      },
-    },
-    {
-      title: "发货信息",
-      key: "shipInfo",
-      width: 180,
-      render: (_value, row) => {
-        const isCloud = Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
-        if (isCloud) {
-          const stage = getShipStage(row);
-          const st = row.soId ? officialShipState[row.soId] : null;
-          const fh = st?.deliveryOrderSn || row.rawCloud?.delivery_order_sn;
-          const eb = st?.expressBatchSn || row.rawCloud?.delivery_batch_sn;
-          const stageTag = stage === "shipped" ? <Tag color="success">已发货</Tag>
-            : stage === "created" ? <Tag color="processing">已创建发货单</Tag>
-            : stage === "staged" ? <Tag color="warning">已加发货台</Tag>
-            : <Tag>待发货</Tag>;
-          return (
-            <Space direction="vertical" size={2} style={{ width: "100%" }}>
-              {stageTag}
-              {row.rawCloud?.receive_warehouse_name ? <Text type="secondary" style={{ fontSize: 12 }}>仓：{row.rawCloud.receive_warehouse_name}</Text> : null}
-              {fh ? <Text type="secondary" style={{ fontSize: 12 }}>FH：{fh}</Text> : null}
-              {eb ? <Text type="secondary" style={{ fontSize: 12 }}>运单：{eb}</Text> : null}
-            </Space>
-          );
-        }
-        const j = row.rawJst;
-        if (!j) return <Text type="secondary">-</Text>;
-        const addr = [j.receiver_state, j.receiver_city, j.receiver_district].filter(Boolean).join("·");
-        if (!j.logistics_company && !j.outer_deliver_no && !addr) return <Text type="secondary">-</Text>;
-        return (
-          <Space direction="vertical" size={2} style={{ width: "100%" }}>
-            {j.logistics_company ? <Text style={{ fontSize: 12 }}>{j.logistics_company}</Text> : null}
-            {j.outer_deliver_no ? <Text type="secondary" style={{ fontSize: 12 }}>单号：{j.outer_deliver_no}</Text> : null}
-            {addr ? <Text type="secondary" style={{ fontSize: 12 }}>收货：{addr}</Text> : null}
-          </Space>
-        );
       },
     },
     {

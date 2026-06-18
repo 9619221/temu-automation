@@ -470,59 +470,41 @@ jst_ship_agg AS (
 ),
 cloud_agg AS (
   SELECT
-    stock_order_no AS cloud_so,
-    MIN(row_key) AS cloud_row_key,
-    MIN(mall_id) AS cloud_mall_id,
-    MIN(site) AS cloud_site,
-    MIN(parent_order_no) AS cloud_parent_order_no,
-    MIN(delivery_batch_sn) AS cloud_delivery_batch_sn,
-    MIN(product_id) AS cloud_product_id,
-    MIN(skc_id) AS cloud_skc_id,
-    MIN(sku_id) AS cloud_sku_id,
-    MIN(sku_ext_code) AS cloud_sku_ext_code,
-    -- temu_status 是 Temu 数字状态码，且按 source_type 混了三套枚举（备货单/发货单/发货台），
-    -- 同一数字含义不同。这里按「来源+码」映射成中文（口径=聚水潭同款词），并用 2 位生命周期
-    -- rank 前缀让 MAX 选出最新状态，再 SUBSTR 去掉前缀。读取期归一，历史数据零回填。
-    -- 映射依据：云端数字 ↔ 聚水潭中文 3.3 万条交叉统计 + raw_json 字段（isCanJoinDeliverPlatform /
-    -- applyDeleteStatus / deliverTime+receiveTime）佐证。未知码兜底为「其他」。
-    TRIM(SUBSTR(MAX(
-      CASE
-        WHEN temu_status IS NULL OR temu_status = '' THEN '00'
-        WHEN temu_status NOT GLOB '[0-9]*' THEN '06' || temu_status
-        WHEN source_type = 'stock_order'  AND temu_status = '8'        THEN '07取消'
-        WHEN source_type = 'stock_order'  AND temu_status = '7'        THEN '06已收货'
-        WHEN source_type = 'stock_order'  AND temu_status IN ('2','3') THEN '05已发货'
-        WHEN source_type = 'stock_order'  AND temu_status = '1'        THEN '03待发货'
-        WHEN source_type = 'stock_order'  AND temu_status = '0'        THEN '02已付款待审核'
-        WHEN source_type = 'shipping_list' AND temu_status = '6'       THEN '08异常'
-        WHEN source_type = 'shipping_list' AND temu_status = '5'       THEN '07取消'
-        WHEN source_type = 'shipping_list' AND temu_status = '2'       THEN '06已收货'
-        WHEN source_type = 'shipping_list' AND temu_status = '1'       THEN '05已发货'
-        WHEN source_type = 'shipping_list' AND temu_status = '0'       THEN '03待发货'
-        WHEN source_type = 'shipping_desk' AND temu_status IN ('0','1') THEN '03待发货'
-        ELSE '01其他'
-      END
-    ), 3)) AS cloud_temu_status,
-    SUM(COALESCE(demand_qty, 0)) AS cloud_demand_qty,
-    SUM(COALESCE(delivered_qty, 0)) AS cloud_delivered_qty,
-    SUM(COALESCE(inbound_qty, 0)) AS cloud_inbound_qty,
-    SUM(COALESCE(order_amount_cents, 0)) AS cloud_order_amount_cents,
-    MIN(currency) AS cloud_currency,
-    MIN(product_name) AS cloud_product_name,
-    MIN(spec_name) AS cloud_spec_name,
-    MIN(delivery_order_sn) AS cloud_delivery_order_sn,
-    MIN(receive_warehouse_id) AS cloud_receive_warehouse_id,
-    MIN(receive_warehouse_name) AS cloud_receive_warehouse_name,
-    MIN(warehouse_group) AS cloud_warehouse_group,
-    MIN(urgency_info) AS cloud_urgency_info,
-    MIN(order_time) AS cloud_order_time,
-    MIN(latest_ship_at) AS cloud_latest_ship_at,
-    MIN(logistics_info) AS cloud_logistics_info,
-    COUNT(*) AS cloud_item_count,
-    NULL AS cloud_shop_name
-  FROM cloud.temu_stock_order_snapshot
-  WHERE stock_order_no IS NOT NULL AND stock_order_no != ''
-  GROUP BY stock_order_no
+    so_id AS cloud_so,
+    so_id AS cloud_row_key,
+    c.mall_id AS cloud_mall_id,
+    NULL AS cloud_site,
+    original_po_sn AS cloud_parent_order_no,
+    NULL AS cloud_delivery_batch_sn,
+    product_id AS cloud_product_id,
+    product_skc_id AS cloud_skc_id,
+    NULL AS cloud_sku_id,
+    sku_ext_codes AS cloud_sku_ext_code,
+    temu_status AS cloud_temu_status,
+    demand_qty AS cloud_demand_qty,
+    delivered_qty AS cloud_delivered_qty,
+    received_qty AS cloud_inbound_qty,
+    amount_cents AS cloud_order_amount_cents,
+    'CNY' AS cloud_currency,
+    product_name AS cloud_product_name,
+    spec_names AS cloud_spec_name,
+    delivery_order_sn AS cloud_delivery_order_sn,
+    NULL AS cloud_receive_warehouse_id,
+    receive_warehouse_name AS cloud_receive_warehouse_name,
+    NULL AS cloud_warehouse_group,
+    NULL AS cloud_urgency_info,
+    order_time AS cloud_order_time,
+    latest_ship_at AS cloud_latest_ship_at,
+    CASE WHEN COALESCE(express_company,'')<>'' OR COALESCE(express_delivery_sn,'')<>''
+         THEN TRIM(COALESCE(express_company,'') || ' ' || COALESCE(express_delivery_sn,''))
+         ELSE NULL END AS cloud_logistics_info,
+    sku_count AS cloud_item_count,
+    receive_address_json AS cloud_receive_address_json,
+    m.send_address_json AS cloud_send_address_json,
+    COALESCE(m.store_code, m.mall_name) AS cloud_shop_name,
+    json_extract(items_json, '$[0].picUrl') AS cloud_thumb_url
+  FROM erp_temu_openapi_consign c
+  LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
 ),
 jst_left AS (
   SELECT
@@ -577,7 +559,8 @@ jst_left AS (
     c.cloud_latest_ship_at,
     c.cloud_logistics_info,
     c.cloud_item_count,
-    c.cloud_shop_name
+    c.cloud_shop_name,
+    c.cloud_thumb_url
   FROM jst_base j
   LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
   LEFT JOIN jst_ship_agg sa ON sa.o_id = j.o_id
@@ -635,7 +618,8 @@ cloud_only AS (
     c.cloud_latest_ship_at,
     c.cloud_logistics_info,
     c.cloud_item_count,
-    c.cloud_shop_name
+    c.cloud_shop_name,
+    c.cloud_thumb_url
   FROM cloud_agg c
   LEFT JOIN erp_consign_local_state ls
     ON ls.mall_id = c.cloud_mall_id AND ls.so_id = c.cloud_so
@@ -648,52 +632,8 @@ unified AS (
 )
 `;
 
-// ===== 出库中心「官方 API 化」开关 =====
-// OPENAPI_CONSIGN=1 时,把上面 UNIFIED_CONSIGN_CTE 里的 cloud_agg 段(抓包 temu_stock_order_snapshot)
-// 用正则整段替换成读官方物化表 erp_temu_openapi_consign(temuOpenApiConsign.cjs 解析,WB级)。
-// 其余段(jst_base/jst_ship_agg/jst_left/cloud_only/unified)完全复用,杜绝 SQL 漂移;匹配不到则安全退回抓包。
-// 官方 cloud_agg 已是 WB 级(物化时聚合),不用 GROUP BY;temu_status 已映射中文;order_time 已是日期串(修排序乱)。
-const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
-    SELECT
-      so_id AS cloud_so,
-      so_id AS cloud_row_key,
-      c.mall_id AS cloud_mall_id,
-      NULL AS cloud_site,
-      original_po_sn AS cloud_parent_order_no,
-      NULL AS cloud_delivery_batch_sn,
-      product_id AS cloud_product_id,
-      product_skc_id AS cloud_skc_id,
-      NULL AS cloud_sku_id,
-      sku_ext_codes AS cloud_sku_ext_code,
-      temu_status AS cloud_temu_status,
-      demand_qty AS cloud_demand_qty,
-      delivered_qty AS cloud_delivered_qty,
-      received_qty AS cloud_inbound_qty,
-      amount_cents AS cloud_order_amount_cents,
-      'CNY' AS cloud_currency,
-      product_name AS cloud_product_name,
-      spec_names AS cloud_spec_name,
-      delivery_order_sn AS cloud_delivery_order_sn,
-      NULL AS cloud_receive_warehouse_id,
-      receive_warehouse_name AS cloud_receive_warehouse_name,
-      NULL AS cloud_warehouse_group,
-      NULL AS cloud_urgency_info,
-      order_time AS cloud_order_time,
-      latest_ship_at AS cloud_latest_ship_at,
-      CASE WHEN COALESCE(express_company,'')<>'' OR COALESCE(express_delivery_sn,'')<>''
-           THEN TRIM(COALESCE(express_company,'') || ' ' || COALESCE(express_delivery_sn,''))
-           ELSE NULL END AS cloud_logistics_info,
-      sku_count AS cloud_item_count,
-      receive_address_json AS cloud_receive_address_json,
-      m.send_address_json AS cloud_send_address_json,
-      COALESCE(m.store_code, m.mall_name) AS cloud_shop_name
-    FROM erp_temu_openapi_consign c
-    LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
-  ),`;
-const _CLOUD_AGG_SCRAPE_RE = /cloud_agg AS \([\s\S]*?GROUP BY stock_order_no\s*\n\),/;
 function buildUnifiedConsignCte() {
-  if (!_CLOUD_AGG_SCRAPE_RE.test(UNIFIED_CONSIGN_CTE)) return UNIFIED_CONSIGN_CTE;
-  return UNIFIED_CONSIGN_CTE.replace(_CLOUD_AGG_SCRAPE_RE, _CLOUD_AGG_OFFICIAL);
+  return UNIFIED_CONSIGN_CTE;
 }
 
 function buildUnifiedSearchClause(values, search) {
@@ -761,6 +701,7 @@ function unifiedRowToPayload(row) {
     item_count: row.cloud_item_count,
     receive_address_json: row.cloud_receive_address_json,
     send_address_json: row.cloud_send_address_json,
+    thumb_url: row.cloud_thumb_url || null,
   } : null;
   const rawJst = (source === "jst" || source === "both") ? {
     o_id: row.jst_o_id,

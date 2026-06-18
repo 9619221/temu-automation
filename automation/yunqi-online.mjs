@@ -1440,22 +1440,7 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
     const kw = body.q || body.keyword || "";
     const requestedSize = Math.min(Math.max(Number(body.size) || 50, 1), 100);
 
-    // 有关键词就优先走 CDP（searchViaCdpScrape 内部会自动启动 Chrome + 登录，
-    // 所以这里**不要再用 isCdpAlive 门禁**——之前的门禁会导致 CDP 没开时直接跳到无关键词的 API，
-    // 结果返回的是日销量倒序的通用 feed，跟搜索词毫无关系）
-    if (kw) {
-      try {
-        return await searchViaCdpScrape(kw, requestedSize);
-      } catch (err) {
-        console.error(`[yunqi-search] CDP 抓取失败: ${String(err?.message || err).slice(0, 200)}`);
-        if (String(err?.message || "").includes(YUNQI_AUTH_INVALID_CODE)) throw err;
-        // 有关键词但 CDP 挂了——宁可报错也不要悄悄返回错的数据
-        throw new Error(`关键词搜索失败（CDP）：${String(err?.message || err).slice(0, 200)}`);
-      }
-    }
-
-    // 没关键词才用 API（例如 competitorTrack 只按 goodsId 查单品），
-    // 这类请求 yunqi API 本身就不需要关键词
+    // 优先走 API（keyword 直接传给 API body）
     try {
       const apiBody = {
         from: body.from || 0,
@@ -1472,11 +1457,23 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
         with_mall: body.with_mall ?? true,
         sold_out: body.sold_out ?? null,
       };
+      if (kw) apiBody.title = kw;
       const result = await requestYunqiApi("/api/proxytemu/good/search", { method: "POST", body: apiBody });
       if (result && result.code === 0) return result;
     } catch (err) {
       if (String(err?.message || "").includes(YUNQI_AUTH_INVALID_CODE)) throw err;
-      console.error("[yunqi-search] API fallback 失败:", String(err?.message || err).slice(0, 200));
+      console.error("[yunqi-search] API 搜索失败:", String(err?.message || err).slice(0, 200));
+    }
+
+    // API 失败时回退到 CDP 抓取
+    if (kw) {
+      try {
+        return await searchViaCdpScrape(kw, requestedSize);
+      } catch (err) {
+        console.error(`[yunqi-search] CDP 抓取也失败: ${String(err?.message || err).slice(0, 200)}`);
+        if (String(err?.message || "").includes(YUNQI_AUTH_INVALID_CODE)) throw err;
+        throw new Error(`关键词搜索失败：${String(err?.message || err).slice(0, 200)}`);
+      }
     }
 
     throw new Error("竞品搜索暂时不可用");
@@ -2007,7 +2004,91 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
       const fileName = path.basename(filePath);
       return importFromRows(rows, fileName);
     },
-    yunqiDbSearch: async (params = {}) => searchProducts(params),
+    yunqiDbSearch: async (params = {}) => {
+      const keyword = String(params.keyword || "").trim();
+      if (!keyword) return searchProducts(params);
+
+      const page = Math.max(Number(params.page) || 1, 1);
+      const pageSize = Math.min(Math.max(Number(params.pageSize) || 50, 1), 100);
+      const { sortBy, sortOrder } = params;
+
+      const sortFieldMap = {
+        daily_sales: "daily_sales", weekly_sales: "weekly_sales",
+        monthly_sales: "monthly_sales", total_sales: "total_sales",
+        usd_price: "price", score: "score", total_comments: "comment_num_tips",
+      };
+      const apiSortField = sortFieldMap[sortBy] || "daily_sales";
+      const apiSortOrder = String(sortOrder || "DESC").toLowerCase();
+
+      const body = buildYunqiSearchBody({
+        keyword,
+        from: (page - 1) * pageSize,
+        maxResults: pageSize,
+        sortField: apiSortField,
+        sortOrder: apiSortOrder,
+        optIds: params.optId ? [params.optId] : [],
+        wareHouseType: params.wareHouseType,
+      });
+      const payload = await requestYunqiSearch(body);
+      const rawItems = extractYunqiItems(payload);
+      const total = extractYunqiTotal(payload, rawItems.length);
+
+      try { importFromApiItems(rawItems, keyword); } catch {}
+
+      const str = (v) => String(v || "").trim();
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+      const firstStr = (...vals) => { for (const v of vals) { const s = str(v); if (s) return s; } return ""; };
+      const firstNum = (...vals) => { for (const v of vals) { const n = Number(v); if (Number.isFinite(n)) return n; } return 0; };
+
+      const items = rawItems.map((row) => {
+        if (!row) return null;
+        const mall = row.mall || {};
+        const imageUrls = Array.isArray(row.image_urls) ? row.image_urls : Array.isArray(row.imageUrls) ? row.imageUrls : [];
+        const commentStats = collectYunqiCommentStats(row.comment || row.comments || {});
+        return {
+          goods_id: firstStr(row.goods_id, row.goodsId, row.id),
+          sku_id: firstStr(row.sku_id, row.skuId),
+          title_zh: firstStr(row.title_zh, row.titleZh, row.title, row.productName),
+          title_en: firstStr(row.title_en, row.titleEn),
+          main_image: firstStr(row.thumb_url, row.thumbUrl, row.image, row.main_image, imageUrls[0]),
+          image_urls: imageUrls.filter(Boolean),
+          video_url: firstStr(row.video_url, row.videoUrl),
+          product_url: firstStr(row.product_url, row.productUrl) || (row.goods_id || row.goodsId ? `https://www.temu.com/goods.html?goods_id=${firstStr(row.goods_id, row.goodsId, row.id)}` : ""),
+          usd_price: firstNum(row.usd_price, row.usdPrice, row.price),
+          eur_price: firstNum(row.eur_price, row.eurPrice),
+          daily_sales: firstNum(row.daily_sales, row.dailySales),
+          weekly_sales: firstNum(row.weekly_sales, row.weeklySales),
+          monthly_sales: firstNum(row.monthly_sales, row.monthlySales),
+          total_sales: firstNum(row.sales, row.total_sales, row.totalSales),
+          usd_gmv: firstNum(row.usd_gmv, row.usdGmv),
+          score: firstNum(row.score, row.rating, commentStats.score),
+          total_comments: firstNum(row.total_comment_num_tips, row.comment_num_tips, row.reviewCount, commentStats.reviewCount),
+          category_zh: firstStr(row.category_zh, row.categoryName, row.category),
+          mall_name: firstStr(row.mall_name, row.mallName, mall.name),
+          mall_logo: firstStr(mall.logo, row.mall_logo),
+          mall_mode: firstStr(row.mall_mode, row.ware_house_type != null ? String(row.ware_house_type) : ""),
+          brand: firstStr(row.brand),
+          same_num: firstNum(row.same_num, row.sameNum),
+          listed_at: firstStr(row.created_at, row.createdAt, row.listed_at, row.issued_date),
+          sold_out: Boolean(row.sold_out ?? row.soldOut),
+          opt_ids: Array.isArray(row.opt_ids) ? row.opt_ids : (row.opt_id != null ? [row.opt_id] : []),
+          daily_sales_list: Array.isArray(row.daily_sales_list) ? row.daily_sales_list.map((e) => {
+            const date = firstStr(e?.date, e?.day);
+            const sales = firstNum(e?.sales);
+            return date ? { date, sales } : null;
+          }).filter(Boolean) : [],
+          prices: Array.isArray(row.prices) ? row.prices : [],
+          region_comments: Array.isArray(row.region_comments) ? row.region_comments : [],
+        };
+      }).filter(Boolean).filter((item) => {
+        if (params.minPrice != null && item.usd_price < Number(params.minPrice)) return false;
+        if (params.maxPrice != null && item.usd_price > Number(params.maxPrice)) return false;
+        if (params.minDailySales != null && item.daily_sales < Number(params.minDailySales)) return false;
+        return true;
+      });
+
+      return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    },
     yunqiDbStats: async () => getStats(),
     yunqiDbTop: async (params = {}) => getTopProducts(params.field, params.limit),
     yunqiDbInfo: async () => ({ dbPath: getDbPath(), rowCount: getRowCount() }),

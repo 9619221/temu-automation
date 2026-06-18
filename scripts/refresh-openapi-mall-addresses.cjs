@@ -10,14 +10,14 @@
  * 发货地址极少变，每天 cron 跑一次即可；运营在后台改了发货地址，手动跑本脚本可立即刷新。
  *
  * 用法：node scripts/refresh-openapi-mall-addresses.cjs
- *   ERP_DB_PATH 可覆盖库路径（默认服务器 /opt/temu-erp-data/erp.sqlite）。
+ *   ERP_DB 可覆盖库路径（默认服务器 /opt/temu-erp-data/erp.sqlite）。
  */
 
 const Database = require("better-sqlite3");
 const { getMallShipCreds } = require("../electron/erp/services/temuOpenApiShipping.cjs");
 const { callOpenApi } = require("../electron/erp/temuOpenApiClient.cjs");
 
-const DB_PATH = process.env.ERP_DB_PATH || "/opt/temu-erp-data/erp.sqlite";
+const DB_PATH = process.env.ERP_DB || "/opt/temu-erp-data/erp.sqlite";
 
 async function main() {
   const db = new Database(DB_PATH);

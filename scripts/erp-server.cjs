@@ -113,7 +113,7 @@ function setupCronScheduler(erpDbPath) {
     path.join(scriptsDir, "refresh-openapi-consign.cjs"), envBase);
 
   scheduler.register("consign-snapshot", 6 * 60 * 60 * 1000,
-    path.join(scriptsDir, "rebuild-consign-snapshot.cjs"), { ...envBase, OPENAPI_CONSIGN: "1" });
+    path.join(scriptsDir, "rebuild-consign-snapshot.cjs"), envBase);
 
   scheduler.register("firstship", 30 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-firstship.cjs"), envBase);
@@ -123,6 +123,9 @@ function setupCronScheduler(erpDbPath) {
 
   scheduler.register("qc", 3 * 60 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-qc.cjs"), { ...envBase, QC_SINCE_DAYS: "7" });
+
+  scheduler.register("mall-addresses", 24 * 60 * 60 * 1000,
+    path.join(scriptsDir, "refresh-openapi-mall-addresses.cjs"), envBase);
 
   if (envFlag("ERP_SETTLEMENT_INCOME_AUTO_SYNC", true)) {
     const settlementIntervalMin = Math.max(1, envNumber("ERP_SETTLEMENT_INCOME_SYNC_INTERVAL_MIN", 30));
