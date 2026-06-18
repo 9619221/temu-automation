@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent, MouseEvent } from "react";
+import type { MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPortal } from "react-dom";
 import { Alert, Button, Checkbox, Col, DatePicker, Drawer, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
@@ -13,6 +13,21 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import dayjs from "dayjs";
 import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
@@ -613,6 +628,26 @@ function getBulkInboundBlockReason(row: InboundReceiptRow, role: string): string
   return `${INBOUND_STATUS_LABELS[row.status] || row.status || "当前状态"}不可批量处理`;
 }
 
+function SortableColumnMenuItem({ field, label, checked, lockLast, onToggle }: {
+  field: string; label: string; checked: boolean; lockLast: boolean;
+  onToggle: (field: string, checked: boolean) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform), transition,
+    opacity: isDragging ? 0.45 : 1, zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className="purchase-order-column-menu__item">
+      <span className="purchase-order-column-menu__drag" aria-hidden="true" {...attributes} {...listeners}>
+        <HolderOutlined />
+      </span>
+      <span>{label}</span>
+      <Checkbox checked={checked} disabled={lockLast} onChange={(e) => onToggle(field, e.target.checked)} />
+    </div>
+  );
+}
+
 export default function WarehouseCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -687,7 +722,6 @@ export default function WarehouseCenter() {
     y: 0,
     bodyMaxHeight: WAREHOUSE_RECEIPT_COLUMN_MENU_MAX_BODY_HEIGHT,
   });
-  const [receiptDraggedColumn, setReceiptDraggedColumn] = useState<string | null>(null);
   const receiptLinesByIdRef = useRef(receiptLinesById);
   const receiptLineLoadingIdsRef = useRef(new Set<string>());
   const [partialReceiveModal, setPartialReceiveModal] = useState<{
@@ -1315,45 +1349,20 @@ export default function WarehouseCenter() {
     });
   }, [receiptColumnConfig]);
 
-  const reorderReceiptDraftColumn = useCallback((sourceField: string, targetField: string) => {
-    if (!sourceField || !targetField || sourceField === targetField) return;
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  const handleReceiptColumnDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setReceiptColumnDraft((prev) => {
       const current = normalizeWarehouseReceiptColumnConfig(prev || receiptColumnConfig);
-      const sourceIndex = current.order.indexOf(sourceField);
-      const targetIndex = current.order.indexOf(targetField);
-      if (sourceIndex === -1 || targetIndex === -1) return current;
-      const nextOrder = current.order.slice();
-      const [movedField] = nextOrder.splice(sourceIndex, 1);
-      nextOrder.splice(targetIndex, 0, movedField);
-      return {
-        ...current,
-        order: nextOrder,
-        visible: nextOrder.filter((key) => current.visible.includes(key)),
-      };
+      const oldIndex = current.order.indexOf(active.id as string);
+      const newIndex = current.order.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1) return current;
+      const nextOrder = arrayMove(current.order, oldIndex, newIndex);
+      return { ...current, order: nextOrder, visible: nextOrder.filter((key) => current.visible.includes(key)) };
     });
   }, [receiptColumnConfig]);
-
-  const handleReceiptColumnDragStart = useCallback((event: DragEvent<HTMLDivElement>, field: string) => {
-    setReceiptDraggedColumn(field);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }, []);
-
-  const handleReceiptColumnDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
-
-  const handleReceiptColumnDrop = useCallback((event: DragEvent<HTMLDivElement>, targetField: string) => {
-    event.preventDefault();
-    const sourceField = receiptDraggedColumn || event.dataTransfer.getData("text/plain");
-    reorderReceiptDraftColumn(sourceField, targetField);
-    setReceiptDraggedColumn(null);
-  }, [receiptDraggedColumn, reorderReceiptDraftColumn]);
-
-  const handleReceiptColumnDragEnd = useCallback(() => {
-    setReceiptDraggedColumn(null);
-  }, []);
 
   const toggleReceiptDraftColumn = useCallback((field: string, checked: boolean) => {
     setReceiptColumnDraft((prev) => {
@@ -2385,30 +2394,23 @@ export default function WarehouseCenter() {
           >
             <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
             <div className="purchase-order-column-menu__body" style={{ maxHeight: receiptColumnMenu.bodyMaxHeight }}>
-              {activeReceiptColumnConfig.order.map((field) => {
-                const checked = activeReceiptColumnConfig.visible.includes(field);
-                return (
-                  <div
-                    key={field}
-                    className={receiptDraggedColumn === field ? "purchase-order-column-menu__item is-dragging" : "purchase-order-column-menu__item"}
-                    draggable
-                    onDragStart={(event) => handleReceiptColumnDragStart(event, field)}
-                    onDragOver={handleReceiptColumnDragOver}
-                    onDrop={(event) => handleReceiptColumnDrop(event, field)}
-                    onDragEnd={handleReceiptColumnDragEnd}
-                  >
-                    <span className="purchase-order-column-menu__drag" aria-hidden="true">
-                      <HolderOutlined />
-                    </span>
-                    <span>{WAREHOUSE_RECEIPT_COLUMN_LABELS[field] || field}</span>
-                    <Checkbox
-                      checked={checked}
-                      disabled={checked && activeReceiptColumnConfig.visible.length <= 1}
-                      onChange={(event) => toggleReceiptDraftColumn(field, event.target.checked)}
-                    />
-                  </div>
-                );
-              })}
+              <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleReceiptColumnDragEnd}>
+                <SortableContext items={activeReceiptColumnConfig.order} strategy={verticalListSortingStrategy}>
+                  {activeReceiptColumnConfig.order.map((field) => {
+                    const checked = activeReceiptColumnConfig.visible.includes(field);
+                    return (
+                      <SortableColumnMenuItem
+                        key={field}
+                        field={field}
+                        label={WAREHOUSE_RECEIPT_COLUMN_LABELS[field] || field}
+                        checked={checked}
+                        lockLast={checked && activeReceiptColumnConfig.visible.length <= 1}
+                        onToggle={toggleReceiptDraftColumn}
+                      />
+                    );
+                  })}
+                </SortableContext>
+              </DndContext>
             </div>
             <div className="purchase-order-column-menu__foot">
               <Button size="small" type="primary" onClick={saveReceiptColumnConfig}>保存</Button>

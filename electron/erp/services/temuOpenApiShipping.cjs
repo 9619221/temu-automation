@@ -117,6 +117,35 @@ function normalizeShipSkus(skuList) {
   });
 }
 
+// 从发货台取 SKU 明细（含展示信息），供前端包裹编辑器使用。先 staging.add（幂等）再 staging.get。
+async function fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn }) {
+  const creds = getMallShipCreds(db, mallId);
+  const wb = String(subPurchaseOrderSn);
+  await callShipApi(creds, "bg.shiporder.staging.add", {
+    joinInfoList: [{ deliveryAddressType: 4, subPurchaseOrderSn: wb }],
+  }).catch(() => {});
+  for (let pageNo = 1; pageNo <= 20; pageNo++) {
+    const res = await callShipApi(creds, "bg.shiporder.staging.get", { pageSize: 50, pageNo });
+    const list = (res && res.list) || [];
+    const hit = list.find(
+      (it) => it && it.subPurchaseOrderBasicVO && String(it.subPurchaseOrderBasicVO.subPurchaseOrderSn) === wb,
+    );
+    if (hit) {
+      return ((hit.orderDetailVOList) || [])
+        .map((d) => ({
+          productSkuId: Number(d.productSkuId),
+          qty: Number(d.productSkuPurchaseQuantity),
+          skuName: d.productName || d.skuName || "",
+          spec: d.productSkuSpec || d.spec || "",
+          thumbUrl: d.thumbUrl || d.skuImgUrl || "",
+        }))
+        .filter((it) => it.productSkuId && it.qty > 0);
+    }
+    if (list.length < 50) break;
+  }
+  return [];
+}
+
 // 从发货台(staging.get)自动取某备货单的 SKU + 待发数量（前端未显式指定 SKU 时用）。
 // 遍历分页找到目标 WB 的 orderDetailVOList，qty 取 productSkuPurchaseQuantity（采购数量=待发量）。
 async function fetchStagingSkus(creds, wb) {
@@ -154,7 +183,7 @@ async function stagingAddOfficial({ db, mallId, subPurchaseOrderSn, deliveryAddr
 // 创建发货单：staging.add（确保在发货台）→ receiveaddressv2（取收货地址+子仓）→
 // mall.address（取发货地址 ID）→ shiporderv3.create（按验证出的正确结构）。
 // 生成 FH 发货单，可撤销、不真发货。返回 { deliveryOrderSn, deliveryOrders, subWarehouseId, deliveryAddressId }。
-async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList, deliveryAddressType = 4, deliveryAddressId = null }) {
+async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList, deliveryAddressType = 4, deliveryAddressId = null, packageCount = 1, packages: rawPackages = null }) {
   const creds = getMallShipCreds(db, mallId);
   const wb = subPurchaseOrderSn ? String(subPurchaseOrderSn) : "";
   if (!wb) throw new Error("缺少备货单号 subPurchaseOrderSn");
@@ -195,14 +224,26 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
   }
 
   // 4. 创建发货单。结构经真实验证：receiveAddressInfo 在 group 顶层，packageInfos 在 createInfos 层。
-  //    默认整单装一个包裹（packageDetailSaveInfos 含全部 SKU）。
+  //    优先使用前端传入的结构化 packages，否则按 packageCount 自动均分。
+  let packages;
+  if (Array.isArray(rawPackages) && rawPackages.length) {
+    packages = rawPackages.map((pkg) =>
+      pkg.map((s) => ({ productSkuId: Number(s.productSkuId), skuNum: Number(s.skuNum || s.qty) }))
+    );
+  } else {
+    const pkgCount = Math.max(1, Math.min(Number(packageCount) || 1, items.length));
+    packages = Array.from({ length: pkgCount }, () => []);
+    for (let i = 0; i < items.length; i++) {
+      packages[i % pkgCount].push({ productSkuId: items[i].productSkuId, skuNum: items[i].qty });
+    }
+  }
   const groupList = [{
     subWarehouseId,
     receiveAddressInfo,
     deliveryOrderCreateInfos: [{
       deliveryAddressId: daId,
       subPurchaseOrderSn: wb,
-      packageInfos: [{ packageDetailSaveInfos: items.map((it) => ({ productSkuId: it.productSkuId, skuNum: it.qty })) }],
+      packageInfos: packages.map((pkgItems) => ({ packageDetailSaveInfos: pkgItems })),
       deliverOrderDetailInfos: items.map((it) => ({ productSkuId: it.productSkuId, deliverSkuNum: it.qty })),
     }],
   }];
@@ -522,6 +563,7 @@ async function cancelOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSnList 
 module.exports = {
   getMallShipCreds,
   getOfficialShipPreview,
+  fetchStagingSkusDetailed,
   stagingAddOfficial,
   createOfficialShipOrder,
   cancelOfficialShipOrder,

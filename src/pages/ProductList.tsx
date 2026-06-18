@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
@@ -12,6 +12,21 @@ import {
   SettingOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   Area,
   AreaChart,
@@ -3286,6 +3301,28 @@ function mergeFluxSiteData(primary: ProductFluxSiteData | null, fallback: Produc
   };
 }
 
+function SortableProductColumnItem({ id, label, isHidden, onToggle }: {
+  id: string; label: string; isHidden: boolean;
+  onToggle: (key: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style: React.CSSProperties = {
+    padding: "8px 20px 8px 44px",
+    display: "flex", alignItems: "center", gap: 8,
+    cursor: "grab", userSelect: "none",
+    transform: CSS.Transform.toString(transform), transition,
+    opacity: isDragging ? 0.45 : 1, zIndex: isDragging ? 10 : undefined,
+    background: isDragging ? "#e6f4ff" : "transparent",
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      <Checkbox checked={!isHidden} onChange={() => onToggle(id)} onClick={(e) => e.stopPropagation()} />
+      <span style={{ flex: 1, fontSize: 14, color: isHidden ? "#999" : "#333", userSelect: "none" }}>{label}</span>
+      <span style={{ color: "#bbb", fontSize: 16, cursor: "grab", userSelect: "none" }} {...attributes} {...listeners}>☰</span>
+    </div>
+  );
+}
+
 export default function ProductList() {
   const [products, setProducts] = useState<ProductItem[]>([]);
   // 官方生命周期/选品状态(product_lifecycle)：skc_id -> selectStatus 码
@@ -5417,41 +5454,18 @@ export default function ProductList() {
     },
   ], []);
 
-  // 拖拽排序
-  const dragRef = useRef<{ key: string; groupLabel: string } | null>(null);
-  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
-  const handleDragStart = (key: string, groupLabel: string) => {
-    dragRef.current = { key, groupLabel };
-  };
-
-  const handleDragOver = (e: React.DragEvent, key: string) => {
-    e.preventDefault();
-    setDragOverKey(key);
-  };
-
-  const handleDrop = (e: React.DragEvent, targetKey: string, targetGroupLabel: string) => {
-    e.preventDefault();
-    setDragOverKey(null);
-    const src = dragRef.current;
-    if (!src || src.key === targetKey || src.groupLabel !== targetGroupLabel) return;
+  const handleColumnDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setTempOrder((prev) => {
-      const arr = [...prev];
-      const srcIdx = arr.indexOf(src.key);
-      const tgtIdx = arr.indexOf(targetKey);
-      if (srcIdx < 0 || tgtIdx < 0) return prev;
-      // 移除源，插入到目标位置
-      arr.splice(srcIdx, 1);
-      const insertIdx = arr.indexOf(targetKey);
-      arr.splice(insertIdx, 0, src.key);
-      return arr;
+      const oldIndex = prev.indexOf(active.id as string);
+      const newIndex = prev.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1) return prev;
+      return arrayMove(prev, oldIndex, newIndex);
     });
-  };
-
-  const handleDragEnd = () => {
-    dragRef.current = null;
-    setDragOverKey(null);
-  };
+  }, []);
 
   // ============ Drawer 渲染 ============
   const renderDrawer = () => {
@@ -6871,58 +6885,43 @@ export default function ProductList() {
               <span style={{ color: "var(--color-text-muted)", marginLeft: "auto", fontSize: 13 }}>{visibleCount}/{allColumnKeys.length}</span>
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "0 0 80px 0" }}>
-              {columnGroups.map((group) => {
-                const groupKeySet = new Set(group.keys.filter((k) => colMap.has(k)));
-                if (groupKeySet.size === 0) return null;
-                // 按 tempOrder 排列组内项目
-                const validKeys = tempOrder.filter((k) => groupKeySet.has(k));
-                // 补充 tempOrder 里没有的
-                for (const k of groupKeySet) { if (!validKeys.includes(k)) validKeys.push(k); }
-                const groupAllVisible = validKeys.every((k) => !tempHidden.includes(k));
-                const groupSomeVisible = validKeys.some((k) => !tempHidden.includes(k));
-                return (
-                  <div key={group.label} style={{ borderBottom: "1px solid #f8fbff" }}>
-                    <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", gap: 8, background: "#f8fbff" }}>
-                      <Checkbox
-                        checked={groupAllVisible}
-                        indeterminate={!groupAllVisible && groupSomeVisible}
-                        onChange={() => tempToggleGroup(validKeys)}
-                      />
-                      <span style={{ fontWeight: 600, fontSize: 14, color: "#1a73e8" }}>{group.label}</span>
+              <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleColumnDragEnd}>
+                {columnGroups.map((group) => {
+                  const groupKeySet = new Set(group.keys.filter((k) => colMap.has(k)));
+                  if (groupKeySet.size === 0) return null;
+                  const validKeys = tempOrder.filter((k) => groupKeySet.has(k));
+                  for (const k of groupKeySet) { if (!validKeys.includes(k)) validKeys.push(k); }
+                  const groupAllVisible = validKeys.every((k) => !tempHidden.includes(k));
+                  const groupSomeVisible = validKeys.some((k) => !tempHidden.includes(k));
+                  return (
+                    <div key={group.label} style={{ borderBottom: "1px solid #f8fbff" }}>
+                      <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", gap: 8, background: "#f8fbff" }}>
+                        <Checkbox
+                          checked={groupAllVisible}
+                          indeterminate={!groupAllVisible && groupSomeVisible}
+                          onChange={() => tempToggleGroup(validKeys)}
+                        />
+                        <span style={{ fontWeight: 600, fontSize: 14, color: "#1a73e8" }}>{group.label}</span>
+                      </div>
+                      <SortableContext items={validKeys} strategy={verticalListSortingStrategy}>
+                        {validKeys.map((key) => {
+                          const col = colMap.get(key)!;
+                          const label = typeof col.title === "string" ? col.title : key;
+                          return (
+                            <SortableProductColumnItem
+                              key={key}
+                              id={key}
+                              label={label}
+                              isHidden={tempHidden.includes(key)}
+                              onToggle={tempToggle}
+                            />
+                          );
+                        })}
+                      </SortableContext>
                     </div>
-                    {validKeys.map((key) => {
-                      const col = colMap.get(key)!;
-                      const label = typeof col.title === "string" ? col.title : key;
-                      const isHidden = tempHidden.includes(key);
-                      const isDragOver = dragOverKey === key;
-                      return (
-                        <div
-                          key={key}
-                          draggable
-                          onDragStart={() => handleDragStart(key, group.label)}
-                          onDragOver={(e) => handleDragOver(e, key)}
-                          onDrop={(e) => handleDrop(e, key, group.label)}
-                          onDragEnd={handleDragEnd}
-                          style={{
-                            padding: "8px 20px 8px 44px",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            borderTop: isDragOver ? "2px solid #1a73e8" : "2px solid transparent",
-                            background: isDragOver ? "#e6f4ff" : "transparent",
-                            transition: "background 0.15s",
-                            cursor: "grab",
-                          }}
-                        >
-                          <Checkbox checked={!isHidden} onChange={() => tempToggle(key)} onClick={(e) => e.stopPropagation()} />
-                          <span style={{ flex: 1, fontSize: 14, color: isHidden ? "#999" : "#333", userSelect: "none" }}>{label}</span>
-                          <span style={{ color: "#bbb", fontSize: 16, cursor: "grab", userSelect: "none" }}>☰</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </DndContext>
             </div>
             <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "12px 20px", borderTop: "1px solid var(--color-border)", background: "#fff", display: "flex", gap: 12, justifyContent: "center" }}>
               <Button type="primary" onClick={confirmColSettings} style={{ minWidth: 80 }}>确认</Button>

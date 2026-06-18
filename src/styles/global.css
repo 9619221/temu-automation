@@ -4104,10 +4104,6 @@ h6 {
   cursor: grabbing;
 }
 
-.purchase-order-column-menu__item.is-dragging {
-  background: #eef5ff;
-  opacity: 0.58;
-}
 
 .purchase-order-column-menu__drag {
   display: inline-flex;
@@ -4170,15 +4166,6 @@ h6 {
 }
 .consign-col-cfg__item:active {
   cursor: grabbing;
-}
-.consign-col-cfg__item.is-dragging {
-  opacity: 0.4;
-}
-.consign-col-cfg__item.is-over-before {
-  box-shadow: inset 0 2px 0 0 #1677ff;
-}
-.consign-col-cfg__item.is-over-after {
-  box-shadow: inset 0 -2px 0 0 #1677ff;
 }
 .consign-col-cfg__handle {
   flex-shrink: 0;

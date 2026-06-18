@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ClipboardEvent, DragEvent, Key, MouseEvent, PointerEvent, UIEvent } from "react";
+import type { ClipboardEvent, Key, MouseEvent, PointerEvent, UIEvent } from "react";
 import {
   Alert,
   Badge,
@@ -57,6 +57,21 @@ import {
   SyncOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import dayjs from "dayjs";
 import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
@@ -2435,6 +2450,26 @@ async function prepareUploadImage(file: File) {
   return lastDataUrl;
 }
 
+function SortableColumnMenuItem({ field, label, checked, lockLast, onToggle }: {
+  field: string; label: string; checked: boolean; lockLast: boolean;
+  onToggle: (field: string, checked: boolean) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform), transition,
+    opacity: isDragging ? 0.45 : 1, zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className="purchase-order-column-menu__item">
+      <span className="purchase-order-column-menu__drag" aria-hidden="true" {...attributes} {...listeners}>
+        <HolderOutlined />
+      </span>
+      <span>{label}</span>
+      <Checkbox checked={checked} disabled={lockLast} onChange={(e) => onToggle(field, e.target.checked)} />
+    </div>
+  );
+}
+
 export default function PurchaseCenter({ initialStoreManagerOpen = false, workArea }: PurchaseCenterProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -2582,7 +2617,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [purchaseOrderColumnConfig, setPurchaseOrderColumnConfig] = useState<PurchaseOrderColumnConfig>(readPurchaseOrderColumnConfig);
   const [purchaseOrderColumnDraft, setPurchaseOrderColumnDraft] = useState<PurchaseOrderColumnConfig | null>(null);
   const [purchaseOrderColumnMenu, setPurchaseOrderColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: PURCHASE_ORDER_COLUMN_MENU_MAX_BODY_HEIGHT });
-  const [purchaseOrderDraggedColumn, setPurchaseOrderDraggedColumn] = useState<string | null>(null);
   // 推 1688 单时让用户先确认 / 切换收货地址，避免默认地址跑错
   const [pushAddressPicker, setPushAddressPicker] = useState<{ po: PurchaseOrderRow; addressId: string; purchase1688AccountId?: string } | null>(null);
   const [pushAccountPicker, setPushAccountPicker] = useState<{
@@ -3256,45 +3290,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     });
   }, [purchaseOrderColumnConfig]);
 
-  const reorderPurchaseOrderDraftColumn = useCallback((sourceField: string, targetField: string) => {
-    if (!sourceField || !targetField || sourceField === targetField) return;
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  const handlePurchaseOrderColumnDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setPurchaseOrderColumnDraft((prev) => {
       const current = normalizePurchaseOrderColumnConfig(prev || purchaseOrderColumnConfig);
-      const sourceIndex = current.order.indexOf(sourceField);
-      const targetIndex = current.order.indexOf(targetField);
-      if (sourceIndex === -1 || targetIndex === -1) return current;
-      const nextOrder = current.order.slice();
-      const [movedField] = nextOrder.splice(sourceIndex, 1);
-      nextOrder.splice(targetIndex, 0, movedField);
-      return {
-        ...current,
-        order: nextOrder,
-        visible: nextOrder.filter((key) => current.visible.includes(key)),
-      };
+      const oldIndex = current.order.indexOf(active.id as string);
+      const newIndex = current.order.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1) return current;
+      const nextOrder = arrayMove(current.order, oldIndex, newIndex);
+      return { ...current, order: nextOrder, visible: nextOrder.filter((key) => current.visible.includes(key)) };
     });
   }, [purchaseOrderColumnConfig]);
-
-  const handlePurchaseOrderColumnDragStart = useCallback((event: DragEvent<HTMLDivElement>, field: string) => {
-    setPurchaseOrderDraggedColumn(field);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }, []);
-
-  const handlePurchaseOrderColumnDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
-
-  const handlePurchaseOrderColumnDrop = useCallback((event: DragEvent<HTMLDivElement>, targetField: string) => {
-    event.preventDefault();
-    const sourceField = purchaseOrderDraggedColumn || event.dataTransfer.getData("text/plain");
-    reorderPurchaseOrderDraftColumn(sourceField, targetField);
-    setPurchaseOrderDraggedColumn(null);
-  }, [purchaseOrderDraggedColumn, reorderPurchaseOrderDraftColumn]);
-
-  const handlePurchaseOrderColumnDragEnd = useCallback(() => {
-    setPurchaseOrderDraggedColumn(null);
-  }, []);
 
   const togglePurchaseOrderDraftColumn = useCallback((field: string, checked: boolean) => {
     setPurchaseOrderColumnDraft((prev) => {
@@ -7658,30 +7667,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           >
             <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
             <div className="purchase-order-column-menu__body" style={{ maxHeight: purchaseOrderColumnMenu.bodyMaxHeight }}>
-              {activePurchaseOrderColumnConfig.order.map((field) => {
-                const checked = activePurchaseOrderColumnConfig.visible.includes(field);
-                return (
-                  <div
-                    key={field}
-                    className={purchaseOrderDraggedColumn === field ? "purchase-order-column-menu__item is-dragging" : "purchase-order-column-menu__item"}
-                    draggable
-                    onDragStart={(event) => handlePurchaseOrderColumnDragStart(event, field)}
-                    onDragOver={handlePurchaseOrderColumnDragOver}
-                    onDrop={(event) => handlePurchaseOrderColumnDrop(event, field)}
-                    onDragEnd={handlePurchaseOrderColumnDragEnd}
-                  >
-                    <span className="purchase-order-column-menu__drag" aria-hidden="true">
-                      <HolderOutlined />
-                    </span>
-                    <span>{PURCHASE_ORDER_COLUMN_LABELS[field] || field}</span>
-                    <Checkbox
-                      checked={checked}
-                      disabled={checked && activePurchaseOrderColumnConfig.visible.length <= 1}
-                      onChange={(event) => togglePurchaseOrderDraftColumn(field, event.target.checked)}
-                    />
-                  </div>
-                );
-              })}
+              <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handlePurchaseOrderColumnDragEnd}>
+                <SortableContext items={activePurchaseOrderColumnConfig.order} strategy={verticalListSortingStrategy}>
+                  {activePurchaseOrderColumnConfig.order.map((field) => {
+                    const checked = activePurchaseOrderColumnConfig.visible.includes(field);
+                    return (
+                      <SortableColumnMenuItem
+                        key={field}
+                        field={field}
+                        label={PURCHASE_ORDER_COLUMN_LABELS[field] || field}
+                        checked={checked}
+                        lockLast={checked && activePurchaseOrderColumnConfig.visible.length <= 1}
+                        onToggle={togglePurchaseOrderDraftColumn}
+                      />
+                    );
+                  })}
+                </SortableContext>
+              </DndContext>
             </div>
             <div className="purchase-order-column-menu__foot">
               <Button size="small" type="primary" onClick={savePurchaseOrderColumnConfig}>保存</Button>

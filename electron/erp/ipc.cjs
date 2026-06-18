@@ -30,6 +30,7 @@ const {
 } = require("./services/consignDeliverShip.cjs");
 const {
   getOfficialShipPreview,
+  fetchStagingSkusDetailed,
   stagingAddOfficial,
   createOfficialShipOrder,
   cancelOfficialShipOrder,
@@ -22111,6 +22112,13 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const soId = optionalString(payload.soId || payload.so_id);
       return getOfficialShipPreview({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
     }
+    case "consign_official_staging_detail": {
+      // 加入发货台 + 返回 SKU 明细（供前端包裹编辑器使用）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id, "subPurchaseOrderSn");
+      return fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn: soId })
+        .then((skus) => ({ action, skus }));
+    }
     case "consign_official_staging_add": {
       // 加入发货台（单个备货单，独立按钮用）。
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
@@ -22123,7 +22131,9 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
       const skuList = Array.isArray(payload.skuList) ? payload.skuList : [];
       const deliveryAddressId = optionalString(payload.deliveryAddressId);
-      return createOfficialShipOrder({ db, mallId, subPurchaseOrderSn: soId, skuList, deliveryAddressId })
+      const packageCount = Number(payload.packageCount) || 1;
+      const rawPackages = Array.isArray(payload.packages) ? payload.packages : null;
+      return createOfficialShipOrder({ db, mallId, subPurchaseOrderSn: soId, skuList, deliveryAddressId, packageCount, packages: rawPackages })
         .then((r) => ({ action, ...r }));
     }
     case "consign_official_ship_cancel": {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionState, readSessionState } from "../hooks/useSessionState";
-import type { DragEvent, MouseEvent } from "react";
+import type { MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   Alert, Button, Checkbox, Col, Form, Image, Input, InputNumber, Modal, Popconfirm,
@@ -11,6 +11,21 @@ import {
   CloudSyncOutlined, DeleteOutlined, EditOutlined, EyeOutlined, HolderOutlined, PlusOutlined,
   ReloadOutlined, SearchOutlined, StopOutlined,
 } from "@ant-design/icons";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import EmptyGuide from "./EmptyGuide";
 import StatCard from "./StatCard";
 import { renderSkuSelectOption } from "../utils/erpUi";
@@ -251,6 +266,26 @@ function makeKey() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function SortableColumnMenuItem({ field, label, checked, lockLast, onToggle }: {
+  field: string; label: string; checked: boolean; lockLast: boolean;
+  onToggle: (field: string, checked: boolean) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform), transition,
+    opacity: isDragging ? 0.45 : 1, zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className="purchase-order-column-menu__item">
+      <span className="purchase-order-column-menu__drag" aria-hidden="true" {...attributes} {...listeners}>
+        <HolderOutlined />
+      </span>
+      <span>{label}</span>
+      <Checkbox checked={checked} disabled={lockLast} onChange={(e) => onToggle(field, e.target.checked)} />
+    </div>
+  );
+}
+
 export default function PurchaseReturnsSection() {
   const [rows, setRows] = useState<PurchaseReturnRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -288,7 +323,8 @@ export default function PurchaseReturnsSection() {
   const [columnConfig, setColumnConfig] = useState<ColumnConfig>(readConfig);
   const [columnDraft, setColumnDraft] = useState<ColumnConfig | null>(null);
   const [columnMenu, setColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: MENU_MAX_BODY_HEIGHT });
-  const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
+
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const openColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
@@ -298,36 +334,18 @@ export default function PurchaseReturnsSection() {
     setColumnMenu({ open: true, ...pos });
   }, [columnConfig]);
 
-  const reorderDraft = useCallback((src: string, tgt: string) => {
-    if (!src || !tgt || src === tgt) return;
+  const handleColumnDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setColumnDraft((prev) => {
       const current = normalizeConfig(prev || columnConfig);
-      const si = current.order.indexOf(src);
-      const ti = current.order.indexOf(tgt);
-      if (si === -1 || ti === -1) return current;
-      const next = current.order.slice();
-      const [moved] = next.splice(si, 1);
-      next.splice(ti, 0, moved);
-      return { ...current, order: next, visible: next.filter((k) => current.visible.includes(k)) };
+      const oldIndex = current.order.indexOf(active.id as string);
+      const newIndex = current.order.indexOf(over.id as string);
+      if (oldIndex === -1 || newIndex === -1) return current;
+      const nextOrder = arrayMove(current.order, oldIndex, newIndex);
+      return { ...current, order: nextOrder, visible: nextOrder.filter((k) => current.visible.includes(k)) };
     });
   }, [columnConfig]);
-
-  const onDragStart = useCallback((event: DragEvent<HTMLDivElement>, field: string) => {
-    setDraggedColumn(field);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }, []);
-  const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
-  const onDrop = useCallback((event: DragEvent<HTMLDivElement>, tgt: string) => {
-    event.preventDefault();
-    const src = draggedColumn || event.dataTransfer.getData("text/plain");
-    reorderDraft(src, tgt);
-    setDraggedColumn(null);
-  }, [draggedColumn, reorderDraft]);
-  const onDragEnd = useCallback(() => setDraggedColumn(null), []);
 
   const toggleDraftColumn = useCallback((field: string, checked: boolean) => {
     setColumnDraft((prev) => {
@@ -1120,31 +1138,24 @@ export default function PurchaseReturnsSection() {
         >
           <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
           <div className="purchase-order-column-menu__body" style={{ maxHeight: columnMenu.bodyMaxHeight }}>
-            {(columnDraft || columnConfig).order.map((field) => {
-              const draft = columnDraft || columnConfig;
-              const checked = draft.visible.includes(field);
-              return (
-                <div
-                  key={field}
-                  className={draggedColumn === field ? "purchase-order-column-menu__item is-dragging" : "purchase-order-column-menu__item"}
-                  draggable
-                  onDragStart={(event) => onDragStart(event, field)}
-                  onDragOver={onDragOver}
-                  onDrop={(event) => onDrop(event, field)}
-                  onDragEnd={onDragEnd}
-                >
-                  <span className="purchase-order-column-menu__drag" aria-hidden="true">
-                    <HolderOutlined />
-                  </span>
-                  <span>{COLUMN_LABELS[field] || field}</span>
-                  <Checkbox
-                    checked={checked}
-                    disabled={checked && draft.visible.length <= 1}
-                    onChange={(event) => toggleDraftColumn(field, event.target.checked)}
-                  />
-                </div>
-              );
-            })}
+            <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleColumnDragEnd}>
+              <SortableContext items={(columnDraft || columnConfig).order} strategy={verticalListSortingStrategy}>
+                {(columnDraft || columnConfig).order.map((field) => {
+                  const draft = columnDraft || columnConfig;
+                  const checked = draft.visible.includes(field);
+                  return (
+                    <SortableColumnMenuItem
+                      key={field}
+                      field={field}
+                      label={COLUMN_LABELS[field] || field}
+                      checked={checked}
+                      lockLast={checked && draft.visible.length <= 1}
+                      onToggle={toggleDraftColumn}
+                    />
+                  );
+                })}
+              </SortableContext>
+            </DndContext>
           </div>
           <div className="purchase-order-column-menu__foot">
             <Button size="small" type="primary" onClick={saveColumnConfig}>保存</Button>

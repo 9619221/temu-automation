@@ -29,6 +29,21 @@ import {
   SearchOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import dayjs from "dayjs";
 import { useSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
@@ -41,7 +56,10 @@ const { Text, Paragraph } = Typography;
 const { RangePicker } = DatePicker;
 const erp = window.electronAPI?.erp;
 
-// 下单时间区间边界 → 聚水潭文本格式「YYYY-MM-DD HH:mm:ss」，与 order_date 存储格式一致以便字符串比较。
+function cleanIpcError(e: any): string {
+  return String(e?.message || e || "未知错误").replace(/^Error invoking remote method '[^']+':\s*/i, "").replace(/^Error:\s*/i, "").trim() || "未知错误";
+}
+
 function consignDateBound(value: any, end: boolean): string {
   if (!value?.format) return "";
   return `${value.format("YYYY-MM-DD")} ${end ? "23:59:59" : "00:00:00"}`;
@@ -383,15 +401,48 @@ function stockStatusCellStyle(status?: string | null): { bg: string; color: stri
   return { bg: "#597ef7", color: "#fff" };
 }
 
-// 鼠标落在目标行的上半 → 插到它前面；下半 → 插到它后面（拖到最后一行的下半即落到末尾）。
-function insertPosByY(clientY: number, rect: DOMRect): "before" | "after" {
-  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+function SortableColumnItem({
+  field,
+  checked,
+  lockLast,
+  onToggle,
+}: {
+  field: string;
+  checked: boolean;
+  lockLast: boolean;
+  onToggle: (field: string, checked: boolean) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: field });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.45 : 1,
+    zIndex: isDragging ? 10 : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="consign-col-cfg__item">
+      <HolderOutlined className="consign-col-cfg__handle" {...attributes} {...listeners} />
+      <Checkbox
+        className="consign-col-cfg__check"
+        checked={checked}
+        disabled={lockLast}
+        onChange={(event) => onToggle(field, event.target.checked)}
+      >
+        {UNIFIED_COLUMN_LABELS[field] || field}
+      </Checkbox>
+    </div>
+  );
 }
 
-// 列设置弹层内容：可拖拽调列序 + 勾选显隐。
-// 关键：拖动途中的高频状态(谁在拖 / 悬停在谁身上 / 插哪一侧)全封装在本组件内部，
-// 拖动时只重渲染这十几个小项，绝不触达父组件那张大表——这是「拖动流畅」的前提。
-// 拖动途中也不改父组件的列顺序，只画一条插入指示线；松手(onDrop)才回调 onReorder 落子一次。
 function UnifiedColumnSettings({
   order,
   visible,
@@ -402,86 +453,45 @@ function UnifiedColumnSettings({
   order: string[];
   visible: string[];
   onToggle: (field: string, checked: boolean) => void;
-  onReorder: (fromField: string, overField: string, pos: "before" | "after") => void;
+  onReorder: (newOrder: string[]) => void;
   onRestore: () => void;
 }) {
-  const [dragField, setDragField] = useState<string | null>(null);
-  const [overField, setOverField] = useState<string | null>(null);
-  const [overPos, setOverPos] = useState<"before" | "after" | null>(null);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+  );
 
-  const clearDrag = () => {
-    setDragField(null);
-    setOverField(null);
-    setOverPos(null);
-  };
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      const oldIndex = order.indexOf(active.id as string);
+      const newIndex = order.indexOf(over.id as string);
+      if (oldIndex !== -1 && newIndex !== -1) {
+        onReorder(arrayMove(order, oldIndex, newIndex));
+      }
+    }
+  }, [order, onReorder]);
 
   return (
     <div className="consign-col-cfg">
-      <div className="consign-col-cfg__list">
-        {order.map((field) => {
-          const checked = visible.includes(field);
-          const lockLast = checked && visible.length <= 1;
-          const cls = [
-            "consign-col-cfg__item",
-            dragField === field ? "is-dragging" : "",
-            overField === field && overPos === "before" ? "is-over-before" : "",
-            overField === field && overPos === "after" ? "is-over-after" : "",
-          ]
-            .filter(Boolean)
-            .join(" ");
-          return (
-            <div
-              key={field}
-              className={cls}
-              draggable
-              onDragStart={(event) => {
-                setDragField(field);
-                event.dataTransfer.effectAllowed = "move";
-                try {
-                  event.dataTransfer.setData("text/plain", field);
-                } catch {
-                  /* 个别环境禁写 dataTransfer，忽略即可 */
-                }
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                if (!dragField || dragField === field) {
-                  if (overField !== null) {
-                    setOverField(null);
-                    setOverPos(null);
-                  }
-                  return;
-                }
-                const pos = insertPosByY(event.clientY, event.currentTarget.getBoundingClientRect());
-                // 仅当落点真的变化时才 setState，避免 dragover 每一帧都触发重渲染。
-                if (overField !== field || overPos !== pos) {
-                  setOverField(field);
-                  setOverPos(pos);
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (dragField && dragField !== field) {
-                  onReorder(dragField, field, insertPosByY(event.clientY, event.currentTarget.getBoundingClientRect()));
-                }
-                clearDrag();
-              }}
-              onDragEnd={clearDrag}
-            >
-              <HolderOutlined className="consign-col-cfg__handle" />
-              <Checkbox
-                className="consign-col-cfg__check"
-                checked={checked}
-                disabled={lockLast}
-                onChange={(event) => onToggle(field, event.target.checked)}
-              >
-                {UNIFIED_COLUMN_LABELS[field] || field}
-              </Checkbox>
-            </div>
-          );
-        })}
-      </div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={order} strategy={verticalListSortingStrategy}>
+          <div className="consign-col-cfg__list">
+            {order.map((field) => {
+              const checked = visible.includes(field);
+              const lockLast = checked && visible.length <= 1;
+              return (
+                <SortableColumnItem
+                  key={field}
+                  field={field}
+                  checked={checked}
+                  lockLast={lockLast}
+                  onToggle={onToggle}
+                />
+              );
+            })}
+          </div>
+        </SortableContext>
+      </DndContext>
       <div className="consign-col-cfg__foot">
         <span className="consign-col-cfg__hint">拖动调整顺序</span>
         <Button type="link" size="small" onClick={onRestore}>
@@ -811,22 +821,10 @@ export default function QcOutboundCenter() {
     });
   }, [persistUnifiedColumnConfig]);
 
-  // 拖拽排序「落子」：松手时一次性把 fromField 列移动到 overField 的前/后，并落盘。
-  // 拖动途中的高频状态(谁在拖 / 悬停在谁身上 / 插哪一侧)全封装在 UnifiedColumnSettings 子组件里，
-  // 不进父组件 state——否则每动一下都会带着下面那张大表一起重渲染，正是之前「拖动不流畅」的根因。
-  const commitUnifiedColumnDrag = useCallback((fromField: string, overField: string, pos: "before" | "after") => {
-    if (fromField === overField) return;
+  const commitUnifiedColumnDrag = useCallback((newOrder: string[]) => {
     setUnifiedColumnConfig((prev) => {
       const current = normalizeUnifiedColumnConfig(prev);
-      const order = current.order.slice();
-      const from = order.indexOf(fromField);
-      if (from === -1) return current;
-      const [moved] = order.splice(from, 1);
-      let to = order.indexOf(overField);
-      if (to === -1) return current;
-      if (pos === "after") to += 1;
-      order.splice(to, 0, moved);
-      const next = { ...current, order };
+      const next = { ...current, order: newOrder };
       persistUnifiedColumnConfig(next);
       return next;
     });
@@ -1163,6 +1161,19 @@ export default function QcOutboundCenter() {
   // 确认发货弹窗：逐单选快递+重量
   const [confirmShipOpen, setConfirmShipOpen] = useState(false);
   const [confirmShipRows, setConfirmShipRows] = useState<any[]>([]);
+  // 创建发货单弹窗：选择发货仓库 + 包裹拆分
+  const [createShipModal, setCreateShipModal] = useState<{
+    open: boolean;
+    loading: boolean;
+    rows: ConsignDeliverUnifiedRow[];
+    addresses: Array<{ id: string; isDefault: boolean; label: string }>;
+    selectedAddressId: string;
+    // 单单模式：SKU 明细 + 包裹分配
+    skus: Array<{ productSkuId: number; qty: number; skuName: string; spec: string }>;
+    packages: Array<Array<{ productSkuId: number; skuNum: number }>>;
+    // 多单模式：简单包裹数
+    packageCount: number;
+  } | null>(null);
   // 装箱弹窗：查看/编辑某发货单的分箱（单箱模式，改各 SKU 发货数量）。
   const [packageModal, setPackageModal] = useState<{ open: boolean; soId: string; mallId: string; deliveryOrderSn: string; loading: boolean; saving: boolean; rows: Array<{ productSkuId: string; skuNum: number }> } | null>(null);
 
@@ -1195,7 +1206,7 @@ export default function QcOutboundCenter() {
     if (skipped) message.info(`跳过 ${skipped} 单（已发货/已取消），处理 ${eligible.length} 单`);
     setShipBatchBusy(true);
     const hide = message.loading(`加入发货台中…（${eligible.length} 单）`, 0);
-    let ok = 0, already = 0, fail = 0;
+    let ok = 0, already = 0, fail = 0; const fails: string[] = [];
     for (const row of eligible) {
       try {
         const r = await erp.inventory.action({ action: "consign_official_staging_add", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
@@ -1204,15 +1215,17 @@ export default function QcOutboundCenter() {
           const prev = s[row.soId!]?.stage;
           return { ...s, [row.soId!]: { ...(s[row.soId!] || {}), stage: prev === "created" || prev === "shipped" ? prev : "staged" } };
         });
-      } catch { fail++; }
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${cleanIpcError(e)}`); }
     }
     hide();
     setShipBatchBusy(false);
-    message[fail ? "warning" : "success"](`加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}`);
+    const summary = `加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}`;
+    if (fail) message.warning(`${summary}。${fails.join("；")}`, 8);
+    else message.success(summary);
   }, [selectedShipRows, erp]);
 
-  // 批量「创建发货单」：成功后写 officialShipState（含确认发货所需子仓/地址参数）。
-  const handleBatchCreate = useCallback(async () => {
+  // 打开「创建发货单」弹窗：筛选可处理行 + 加载发货仓库 + SKU 明细。
+  const openCreateShipModal = useCallback(async () => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
     const rows = selectedShipRows;
     if (!rows.length) { message.warning("请先勾选官方单"); return; }
@@ -1221,22 +1234,66 @@ export default function QcOutboundCenter() {
     const skipped = rows.length - eligible.length;
     if (!eligible.length) { message.warning(`所选 ${rows.length} 单均已发货或已取消，无法创建发货单`); return; }
     if (skipped) message.info(`跳过 ${skipped} 单（已发货/已取消），处理 ${eligible.length} 单`);
+    const init = { open: true, loading: true, rows: eligible, addresses: [] as any[], selectedAddressId: "", skus: [] as any[], packages: [] as any[][], packageCount: 1 };
+    setCreateShipModal(init);
+    try {
+      const firstMallId = String(eligible[0].rawCloud!.mall_id);
+      const [preview, cloudItems] = await Promise.all([
+        erp.inventory.action({ action: "consign_official_ship_preview", mallId: firstMallId, soId: eligible[0].soId }).catch(() => null),
+        eligible.length === 1 && erp.consignDeliver?.cloudItems
+          ? erp.consignDeliver.cloudItems({ mallId: firstMallId, soId: eligible[0].soId }).catch(() => [])
+          : Promise.resolve([]),
+      ]);
+      const addrs = (preview?.sendAddresses || []).map((a: any) => ({
+        id: String(a.id),
+        isDefault: Boolean(a.isDefault),
+        label: [a.addressLabel, a.provinceName, a.cityName, a.districtName, a.addressDetail].filter(Boolean).join(" "),
+      }));
+      const defaultAddr = addrs.find((a: any) => a.isDefault) || addrs[0];
+      const itemsArr = Array.isArray(cloudItems) ? cloudItems : [];
+      const skus = itemsArr.filter((it: any) => it.skuId && Number(it.qty) > 0).map((it: any) => ({ productSkuId: Number(it.skuId), qty: Number(it.qty), skuName: it.name || "", spec: it.propertiesValue || "" }));
+      const defaultPkg = skus.map((s: any) => ({ productSkuId: s.productSkuId, skuNum: s.qty }));
+      setCreateShipModal((s) => s ? { ...s, loading: false, addresses: addrs, selectedAddressId: defaultAddr?.id || "", skus, packages: defaultPkg.length ? [defaultPkg] : [] } : s);
+    } catch (e: any) {
+      message.warning(`加载数据失败：${cleanIpcError(e)}`);
+      setCreateShipModal((s) => s ? { ...s, loading: false } : s);
+    }
+  }, [selectedShipRows, erp]);
+
+  // 确认创建发货单：按弹窗设置批量执行。
+  const confirmCreateShip = useCallback(async () => {
+    if (!erp?.inventory?.action || !createShipModal) return;
+    const { rows, selectedAddressId, packages } = createShipModal;
+    const isSingle = rows.length === 1 && packages.length > 0;
+    if (isSingle) {
+      const totalBySkuMap = new Map<number, number>();
+      for (const s of createShipModal.skus) totalBySkuMap.set(s.productSkuId, s.qty);
+      const allocBySkuMap = new Map<number, number>();
+      for (const pkg of packages) for (const item of pkg) allocBySkuMap.set(item.productSkuId, (allocBySkuMap.get(item.productSkuId) || 0) + item.skuNum);
+      for (const [id, need] of totalBySkuMap) {
+        if ((allocBySkuMap.get(id) || 0) !== need) { message.error(`SKU ${id} 分配数量不等于实际发货数 ${need}`); return; }
+      }
+    }
+    setCreateShipModal(null);
     setShipBatchBusy(true);
-    const hide = message.loading(`创建发货单中…（${eligible.length} 单）`, 0);
+    const hide = message.loading(`创建发货单中…（${rows.length} 单）`, 0);
     let ok = 0, fail = 0; const fails: string[] = [];
-    for (const row of eligible) {
+    for (const row of rows) {
       try {
-        const r = await erp.inventory.action({ action: "consign_official_ship_create", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
+        const params: any = { action: "consign_official_ship_create", mallId: String(row.rawCloud!.mall_id), soId: row.soId, packageCount: isSingle ? packages.length : (createShipModal.packageCount || 1) };
+        if (selectedAddressId) params.deliveryAddressId = selectedAddressId;
+        if (isSingle) params.packages = packages.map((pkg) => pkg.filter((s) => s.skuNum > 0));
+        const r = await erp.inventory.action(params);
         if (!r?.deliveryOrderSn) throw new Error("未返回发货单号");
         setOfficialShipState((s) => ({ ...s, [row.soId!]: { stage: "created", deliveryOrderSn: r.deliveryOrderSn, subWarehouseId: r.subWarehouseId, receiveAddressInfo: r.receiveAddressInfo, deliveryAddressId: r.deliveryAddressId } }));
         ok++;
-      } catch (e: any) { fail++; fails.push(`${row.soId}: ${e?.message || "失败"}`); }
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${cleanIpcError(e)}`); }
     }
     hide();
     setShipBatchBusy(false);
-    if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}。${fails.slice(0, 3).join("；")}`);
-    else message.success(`创建发货单完成：成功 ${ok} 单${skipped ? `、跳过 ${skipped}` : ""}`);
-  }, [selectedShipRows, erp]);
+    if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
+    else message.success(`创建发货单完成：成功 ${ok} 单`);
+  }, [createShipModal, erp]);
 
   // 撤销单个发货单（发货信息列用）。
   const handleCancelShipOrderBySoId = useCallback(async (row: ConsignDeliverUnifiedRow) => {
@@ -1247,7 +1304,7 @@ export default function QcOutboundCenter() {
       await erp.inventory.action({ action: "consign_official_ship_cancel", mallId: String(row.rawCloud.mall_id), deliveryOrderSn: fh });
       message.success(`已撤销发货单 ${fh}`);
       setOfficialShipState((s) => { const n = { ...s }; delete n[row.soId!]; return n; });
-    } catch (e: any) { message.error(e?.message || "撤销失败（刚创建的单需稍等几秒）"); }
+    } catch (e: any) { message.error(cleanIpcError(e) || "撤销失败（刚创建的单需稍等几秒）"); }
   }, [officialShipState, erp]);
 
   // 发货信息列「物流下单」：对单个已创建FH的官方单做官方真发货（packing.send 选平台快递、平台揽收）。
@@ -1272,7 +1329,7 @@ export default function QcOutboundCenter() {
       const companies = Array.isArray(r?.companies) ? r.companies : [];
       setConfirmShipRows((rows) => rows.map((x) => x.soId === r0.soId ? { ...x, matched: companies, selectedIdx: companies.length ? 0 : -1, loading: false, error: companies.length ? "" : "无可用物流" } : x));
     } catch (e: any) {
-      setConfirmShipRows((rows) => rows.map((x) => x.soId === r0.soId ? { ...x, loading: false, error: e?.message || "匹配失败" } : x));
+      setConfirmShipRows((rows) => rows.map((x) => x.soId === r0.soId ? { ...x, loading: false, error: cleanIpcError(e) || "匹配失败" } : x));
     }
   }, [officialShipState, erp]);
 
@@ -1295,7 +1352,7 @@ export default function QcOutboundCenter() {
         );
         if (result?.idempotent) skip++; else ok++;
         doneIds.add(row.soId!);
-      } catch (e: any) { fail++; fails.push(`${row.soId}: ${e?.message || "失败"}`); }
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${cleanIpcError(e)}`); }
     }
     hide();
     setShipBatchBusy(false);
@@ -1328,7 +1385,7 @@ export default function QcOutboundCenter() {
         );
         if (result?.idempotent) skip++; else ok++;
         doneIds.add(row.soId!);
-      } catch (e: any) { fail++; fails.push(`${row.soId}: ${e?.message || "失败"}`); }
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${cleanIpcError(e)}`); }
     }
     hide();
     setShipBatchBusy(false);
@@ -1350,7 +1407,7 @@ export default function QcOutboundCenter() {
       const r = await erp.inventory.action({ action: "consign_official_print_boxmark", mallId: String(row.rawCloud.mall_id), deliveryOrderSn: fh });
       if (r?.printUrl) window.open(r.printUrl, "_blank");
       else message.error("未拿到箱唛打印链接");
-    } catch (e: any) { message.error(e?.message || "打印箱唛失败"); }
+    } catch (e: any) { message.error(cleanIpcError(e) || "打印箱唛失败"); }
   }, [officialShipState, erp]);
 
   // 打印商品条码：按该单 SKC 取 Temu 打印页 URL，不依赖发货单、随时可打。
@@ -1362,7 +1419,7 @@ export default function QcOutboundCenter() {
       const r = await erp.inventory.action({ action: "consign_official_print_label", mallId: String(row.rawCloud.mall_id), skcIds: [skc] });
       if (r?.printUrl) window.open(r.printUrl, "_blank");
       else message.error("未拿到条码打印链接");
-    } catch (e: any) { message.error(e?.message || "打印条码失败"); }
+    } catch (e: any) { message.error(cleanIpcError(e) || "打印条码失败"); }
   }, [erp]);
 
   // 打印面单：发货后平台分配快递单号才有；后端带鉴权下载 PDF→base64，主进程写临时文件用系统阅读器打开（可打印）。
@@ -1376,7 +1433,7 @@ export default function QcOutboundCenter() {
       if (r?.pdfBase64 && window.electronAPI?.app?.openPdf) {
         await window.electronAPI.app.openPdf({ base64: r.pdfBase64, filename: r.filename });
       } else { message.error("未拿到面单 PDF"); }
-    } catch (e: any) { message.error(e?.message || "打印面单失败（可能平台还没分配快递单号）"); }
+    } catch (e: any) { message.error(cleanIpcError(e) || "打印面单失败（可能平台还没分配快递单号）"); }
     finally { hide(); }
   }, [officialShipState, erp]);
 
@@ -1399,7 +1456,7 @@ export default function QcOutboundCenter() {
       }
       setPackageModal((m) => m ? { ...m, loading: false, rows: Array.from(map.values()) } : m);
     } catch (e: any) {
-      message.error(e?.message || "查询装箱失败");
+      message.error(cleanIpcError(e) || "查询装箱失败");
       setPackageModal((m) => m ? { ...m, loading: false } : m);
     }
   }, [officialShipState, erp]);
@@ -1421,7 +1478,7 @@ export default function QcOutboundCenter() {
       message.success("装箱已更新");
       setPackageModal(null);
     } catch (e: any) {
-      message.error(e?.message || "更新装箱失败");
+      message.error(cleanIpcError(e) || "更新装箱失败");
       setPackageModal((m) => m ? { ...m, saving: false } : m);
     }
   }, [packageModal, erp]);
@@ -1444,7 +1501,7 @@ export default function QcOutboundCenter() {
         message.success("备货单已提交");
       }
       setApplyPo((s) => ({ ...s, open: false }));
-    } catch (e: any) { message.error(e?.message || "操作失败"); }
+    } catch (e: any) { message.error(cleanIpcError(e) || "操作失败"); }
   }, [applyPo, erp]);
 
   // 取消备货单（批量，对勾选官方单；后端只对「待接单」生效，其它状态平台忽略）。
@@ -1496,7 +1553,7 @@ export default function QcOutboundCenter() {
             const r = await erp.inventory.action({ action: "consign_official_packing_send", mallId: x.mallId, confirm: true, deliveryAddressId: x.deliveryAddressId, deliveryOrderSnList: [x.deliveryOrderSn], expressCompanyId: sel.expressCompanyId, expressCompanyName: sel.expressCompanyName, predictId: sel.predictId, pickupMethod: sel.pickupMethod ?? 0, predictTotalPackageWeight: Math.round(Number(x.weightKg || 1) * 1000), expressPackageNum: x.packageNum || 1 });
             setOfficialShipState((s) => ({ ...s, [x.soId]: { ...(s[x.soId] || {}), stage: "shipped", expressBatchSn: r?.expressBatchSn } }));
             ok++;
-          } catch (e: any) { fail++; fails.push(`${x.soId}: ${e?.message || "失败"}`); }
+          } catch (e: any) { fail++; fails.push(`${x.soId}: ${cleanIpcError(e)}`); }
         }
         hide();
         setShipBatchBusy(false);
@@ -1998,7 +2055,7 @@ export default function QcOutboundCenter() {
                   <Text strong>批量操作</Text>
                   <Text type="secondary">已选 {selectedShipKeys.length} 单（官方 {selectedShipRows.length}）</Text>
                   <Button size="small" disabled={!canCreateOutbound || !selectedShipRows.length} loading={shipBatchBusy} onClick={handleBatchStaging}>① 加入发货台</Button>
-                  <Button size="small" disabled={!canCreateOutbound || !selectedShipRows.length} loading={shipBatchBusy} onClick={handleBatchCreate}>② 创建发货单</Button>
+                  <Button size="small" disabled={!canCreateOutbound || !selectedShipRows.length} loading={shipBatchBusy} onClick={openCreateShipModal}>② 创建发货单</Button>
                   <Button size="small" type="primary" disabled={!canCreateOutbound || !selectedShipKeys.length} loading={shipBatchBusy} onClick={handleBatchConsignShip}>③ 确认发货（本地扣库存）</Button>
                   <Button size="small" danger disabled={!canCreateOutbound || !selectedShipKeys.length} loading={shipBatchBusy} onClick={handleBatchUnship}>批量撤销</Button>
                   <Button size="small" onClick={() => setApplyPo((s) => ({ ...s, open: true }))}>申请备货</Button>
@@ -2175,6 +2232,147 @@ export default function QcOutboundCenter() {
             <Text type="secondary" style={{ fontSize: 12 }}>第一阶段：只读预览，不触发任何发货操作。</Text>
           </Space>
         ) : null}
+      </Modal>
+
+      <Modal
+        title="创建发货单"
+        open={!!createShipModal?.open}
+        onCancel={() => setCreateShipModal(null)}
+        onOk={confirmCreateShip}
+        okText="确认创建"
+        cancelText="取消"
+        confirmLoading={shipBatchBusy}
+        okButtonProps={{ disabled: createShipModal?.loading }}
+        destroyOnClose
+        width={createShipModal?.skus.length ? 720 : 520}
+      >
+        {createShipModal?.loading ? (
+          <div style={{ textAlign: "center", padding: "24px 0" }}><Spin tip="加载数据…" /></div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div>
+              <Text strong>待处理订单：</Text>
+              <Text>{createShipModal?.rows.length} 单</Text>
+            </div>
+            <div>
+              <Text strong style={{ display: "block", marginBottom: 6 }}>发货仓库：</Text>
+              {createShipModal?.addresses.length ? (
+                <Select
+                  style={{ width: "100%" }}
+                  value={createShipModal?.selectedAddressId}
+                  onChange={(v) => setCreateShipModal((s) => s ? { ...s, selectedAddressId: v } : s)}
+                  options={createShipModal?.addresses.map((a) => ({ value: a.id, label: `${a.label}${a.isDefault ? "（默认）" : ""}` }))}
+                />
+              ) : (
+                <Text type="secondary">未获取到地址，将使用店铺默认发货地址</Text>
+              )}
+            </div>
+
+            {/* 单单模式：包裹拆分编辑器 */}
+            {createShipModal?.skus.length ? (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <Text strong>包裹设置</Text>
+                  <Button
+                    size="small"
+                    onClick={() => setCreateShipModal((s) => {
+                      if (!s) return s;
+                      const newPkg = s.skus.map((sk) => ({ productSkuId: sk.productSkuId, skuNum: 0 }));
+                      return { ...s, packages: [...s.packages, newPkg] };
+                    })}
+                  >+ 添加包裹</Button>
+                </div>
+
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: "#fafafa" }}>
+                      <th style={{ padding: "6px 8px", textAlign: "left", borderBottom: "1px solid #f0f0f0" }}>SKU</th>
+                      <th style={{ padding: "6px 8px", textAlign: "center", borderBottom: "1px solid #f0f0f0", width: 60 }}>发货数</th>
+                      {createShipModal.packages.map((_, pi) => (
+                        <th key={pi} style={{ padding: "6px 8px", textAlign: "center", borderBottom: "1px solid #f0f0f0", width: 80 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
+                            <span>包裹{pi + 1}</span>
+                            {createShipModal.packages.length > 1 && (
+                              <span
+                                style={{ cursor: "pointer", color: "#ff4d4f", fontSize: 12 }}
+                                onClick={() => setCreateShipModal((s) => s ? { ...s, packages: s.packages.filter((_, i) => i !== pi) } : s)}
+                              >删</span>
+                            )}
+                          </div>
+                        </th>
+                      ))}
+                      <th style={{ padding: "6px 8px", textAlign: "center", borderBottom: "1px solid #f0f0f0", width: 60 }}>剩余</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {createShipModal.skus.map((sku) => {
+                      const allocated = createShipModal.packages.reduce((sum, pkg) => {
+                        const item = pkg.find((p) => p.productSkuId === sku.productSkuId);
+                        return sum + (item?.skuNum || 0);
+                      }, 0);
+                      const remaining = sku.qty - allocated;
+                      return (
+                        <tr key={sku.productSkuId} style={{ borderBottom: "1px solid #f0f0f0" }}>
+                          <td style={{ padding: "6px 8px" }}>
+                            <div>{sku.skuName || `SKU ${sku.productSkuId}`}</div>
+                            {sku.spec && <div style={{ fontSize: 11, color: "#999" }}>{sku.spec}</div>}
+                          </td>
+                          <td style={{ padding: "6px 8px", textAlign: "center" }}>{sku.qty}</td>
+                          {createShipModal.packages.map((pkg, pi) => {
+                            const item = pkg.find((p) => p.productSkuId === sku.productSkuId);
+                            return (
+                              <td key={pi} style={{ padding: "4px 6px", textAlign: "center" }}>
+                                <InputNumber
+                                  size="small"
+                                  min={0}
+                                  max={sku.qty}
+                                  value={item?.skuNum || 0}
+                                  style={{ width: 60 }}
+                                  onChange={(v) => setCreateShipModal((s) => {
+                                    if (!s) return s;
+                                    const newPkgs = s.packages.map((p, i) => {
+                                      if (i !== pi) return p;
+                                      return p.map((it) => it.productSkuId === sku.productSkuId ? { ...it, skuNum: v || 0 } : it);
+                                    });
+                                    return { ...s, packages: newPkgs };
+                                  })}
+                                />
+                              </td>
+                            );
+                          })}
+                          <td style={{ padding: "6px 8px", textAlign: "center", color: remaining !== 0 ? "#ff4d4f" : "#52c41a", fontWeight: 500 }}>
+                            {remaining}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+
+                <Button
+                  size="small"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setCreateShipModal((s) => {
+                    if (!s || !s.skus.length) return s;
+                    const singlePkg = s.skus.map((sk) => ({ productSkuId: sk.productSkuId, skuNum: sk.qty }));
+                    return { ...s, packages: [singlePkg] };
+                  })}
+                >重置为 1 个包裹</Button>
+              </div>
+            ) : (
+              /* 多单批量模式：简单包裹数 */
+              <div>
+                <Text strong style={{ display: "block", marginBottom: 6 }}>包裹数：</Text>
+                <InputNumber
+                  min={1}
+                  max={99}
+                  value={createShipModal?.packageCount}
+                  onChange={(v) => setCreateShipModal((s) => s ? { ...s, packageCount: v || 1 } : s)}
+                />
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
 
       <Modal
