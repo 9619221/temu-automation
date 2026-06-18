@@ -15372,14 +15372,14 @@ async function generateComboListing(params) {
     message: "正在创建套装商品草稿",
   });
 
-  const firstProduct = products[0] || {};
+  const leadProduct = [...products].sort((a, b) => (Number(b.usd_price) || 0) - (Number(a.usd_price) || 0))[0] || {};
   try {
     const draftResult = await createProductViaAPI({
       title: zhTitle,
       rawTitle: enTitle,
       imageUrls: orderedImageUrls,
       price: comboCnyPrice,
-      categorySearch: firstProduct.category_zh || zhTitle,
+      categorySearch: leadProduct.category_zh || zhTitle,
       categoryLockMode: "guided",
       keepOpen: false,
       config: params.config || {},
