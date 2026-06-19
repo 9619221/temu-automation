@@ -4,8 +4,8 @@ const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
 function showBanner(text, ok) {
   const b = $("banner");
   b.textContent = text;
-  b.className = "banner " + (ok ? "ok" : "err");
-  setTimeout(() => { b.className = "banner"; b.textContent = ""; }, 4000);
+  b.className = "banner show " + (ok ? "ok" : "err");
+  setTimeout(() => { b.className = "banner"; }, 3000);
 }
 
 function load() {
@@ -18,17 +18,14 @@ function load() {
 
 $("toggleToken").addEventListener("click", () => {
   const input = $("auth_token");
-  const isPassword = input.type === "password";
-  input.type = isPassword ? "text" : "password";
-  $("toggleToken").textContent = isPassword ? "🙈" : "👁";
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  $("toggleToken").textContent = show ? "🙈" : "👁";
 });
 
 $("save").addEventListener("click", () => {
   const auth_token = $("auth_token").value.trim();
-  if (!auth_token) {
-    showBanner("请填写 Token", false);
-    return;
-  }
+  if (!auth_token) { showBanner("请输入访问令牌", false); return; }
   chrome.storage.local.set({ cloud_endpoint: HK_CLOUD_ENDPOINT, auth_token }, () => {
     showBanner("已保存", true);
   });
@@ -36,24 +33,22 @@ $("save").addEventListener("click", () => {
 
 $("test").addEventListener("click", async () => {
   const token = $("auth_token").value.trim();
-  if (!token) { showBanner("先填写 Token", false); return; }
+  if (!token) { showBanner("请先输入令牌", false); return; }
   try {
-    const resp = await fetch(HK_CLOUD_ENDPOINT + "/api/ingest/v1/health", {
-      method: "GET",
-      headers: { "Authorization": `Bearer ${token}` },
+    const r = await fetch(HK_CLOUD_ENDPOINT + "/api/ingest/v1/health", {
+      headers: { Authorization: "Bearer " + token },
     });
-    if (resp.ok) showBanner("连通成功", true);
-    else showBanner(`连接失败 HTTP ${resp.status}`, false);
+    showBanner(r.ok ? "连接成功" : `失败 (${r.status})`, r.ok);
   } catch (e) {
-    showBanner("连接失败: " + String(e).slice(0, 80), false);
+    showBanner("无法连接: " + String(e).slice(0, 60), false);
   }
 });
 
 $("purge").addEventListener("click", () => {
-  if (!confirm("确认清空待上报队列？未发送的数据将丢失。")) return;
+  if (!confirm("确认清空队列？未上报数据将丢失。")) return;
   chrome.runtime.sendMessage({ type: "FLUSH_NOW" });
   const req = indexedDB.deleteDatabase("temu-monitor");
-  req.onsuccess = () => showBanner("队列已清空", true);
+  req.onsuccess = () => showBanner("已清空", true);
   req.onerror = () => showBanner("清空失败", false);
 });
 

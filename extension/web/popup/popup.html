@@ -4,157 +4,76 @@
   <meta charset="UTF-8" />
   <title>Temu 多店监控</title>
   <style>
-    * { box-sizing: border-box; }
+    :root {
+      --bg: #f5f5f7;
+      --card: rgba(255,255,255,0.82);
+      --text-1: #1d1d1f;
+      --text-2: #86868b;
+      --text-3: #aeaeb2;
+      --accent: #0071e3;
+      --green: #34c759;
+      --yellow: #ff9f0a;
+      --red: #ff3b30;
+      --sep: rgba(0,0,0,0.06);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 380px; margin: 0; padding: 0;
-      font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-      font-size: 13px; color: #1f2328; background: #f6f8fa;
+      width: 340px; background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+      font-size: 13px; color: var(--text-1); -webkit-font-smoothing: antialiased;
     }
-
-    /* Header */
-    .header {
-      background: linear-gradient(135deg, #0969da 0%, #1f6feb 100%);
-      color: #fff; padding: 16px 18px 14px; position: relative;
-    }
-    .header h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
-    .header .subtitle { font-size: 11px; opacity: 0.8; }
-    .header .version { position: absolute; right: 16px; top: 16px; font-size: 10px; opacity: 0.6; }
-
-    /* Cards */
-    .content { padding: 12px 14px 14px; }
-    .card {
-      background: #fff; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-    }
-    .card-title {
-      font-size: 11px; font-weight: 600; color: #57606a; text-transform: uppercase;
-      letter-spacing: 0.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
-    }
-    .card-title .icon { font-size: 13px; }
-
-    /* Status rows */
-    .stat-row {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 5px 0; border-bottom: 1px solid #f0f2f5;
-    }
-    .stat-row:last-child { border-bottom: none; }
-    .stat-label { color: #57606a; font-size: 12px; }
-    .stat-value { font-weight: 500; font-size: 12px; }
-
-    /* Status dots */
-    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
-    .dot-green { background: #1a7f37; box-shadow: 0 0 4px rgba(26,127,55,0.4); }
-    .dot-yellow { background: #bf8700; box-shadow: 0 0 4px rgba(191,135,0,0.3); }
-    .dot-red { background: #cf222e; box-shadow: 0 0 4px rgba(207,34,46,0.3); }
-    .dot-gray { background: #8c959f; }
-
-    /* Task grid */
-    .task-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
-    .task-item {
-      display: flex; align-items: center; gap: 5px;
-      padding: 4px 0; font-size: 11px; color: #1f2328;
-    }
-    .task-item .task-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .task-item .task-time { color: #8c959f; font-size: 10px; font-variant-numeric: tabular-nums; }
-
-    /* Mall list */
-    .mall-list { max-height: 110px; overflow-y: auto; }
-    .mall-item {
-      display: flex; align-items: center; gap: 8px;
-      padding: 5px 0; border-bottom: 1px solid #f0f2f5;
-    }
-    .mall-item:last-child { border-bottom: none; }
-    .mall-name { font-weight: 500; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .mall-id { font-size: 10px; color: #8c959f; font-family: monospace; }
-    .site-badge {
-      font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 3px;
-      text-transform: uppercase; letter-spacing: 0.3px;
-    }
-    .site-eu { background: #ddf4ff; color: #0550ae; }
-    .site-us { background: #dafbe1; color: #116329; }
-    .site-jp { background: #fff8c5; color: #6f5e00; }
-    .site-default { background: #f0f2f5; color: #57606a; }
-    .empty-hint { color: #8c959f; font-size: 11px; text-align: center; padding: 8px; font-style: italic; }
-
-    /* Buttons */
-    .btn-group { display: flex; gap: 8px; margin-top: 2px; }
-    .btn {
-      flex: 1; padding: 9px 12px; border: none; border-radius: 8px;
-      font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
-      text-align: center;
-    }
-    .btn-primary { background: #0969da; color: #fff; }
-    .btn-primary:hover { background: #0860ca; }
-    .btn-secondary { background: #f0f2f5; color: #1f2328; }
-    .btn-secondary:hover { background: #e5e8eb; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-    /* Footer */
-    .footer {
-      text-align: center; padding: 8px; font-size: 10px; color: #8c959f;
-    }
-    .footer a { color: #0969da; text-decoration: none; cursor: pointer; }
-    .footer a:hover { text-decoration: underline; }
+    .top { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; }
+    .top h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+    .pill { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 20px; background: var(--green); color: #fff; }
+    .pill.off { background: var(--red); }
+    .card { background: var(--card); border-radius: 12px; margin: 0 14px 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); overflow: hidden; }
+    .row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 0.5px solid var(--sep); }
+    .row:last-child { border-bottom: none; }
+    .row .l { color: var(--text-2); font-size: 12px; }
+    .row .r { font-size: 12px; font-variant-numeric: tabular-nums; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+    .dot-g { background: var(--green); } .dot-y { background: var(--yellow); } .dot-r { background: var(--red); } .dot-x { background: var(--text-3); }
+    .tasks-summary { cursor: pointer; user-select: none; }
+    .tasks-summary .arrow { transition: transform 0.2s; display: inline-block; font-size: 10px; margin-left: 4px; color: var(--text-3); }
+    .tasks-summary.open .arrow { transform: rotate(90deg); }
+    .tasks-detail { display: none; padding: 4px 14px 8px; font-size: 11px; color: var(--text-2); line-height: 1.8; }
+    .tasks-detail.show { display: block; }
+    .tag { font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 5px; background: rgba(0,113,227,0.08); color: var(--accent); }
+    .btns { display: flex; gap: 8px; padding: 2px 14px 14px; }
+    .btn { flex: 1; padding: 9px; border: none; border-radius: 9px; font-size: 12px; font-weight: 500; cursor: pointer; transition: transform 0.15s; text-align: center; }
+    .btn:active { transform: scale(0.96); }
+    .btn:disabled { opacity: 0.4; }
+    .btn-a { background: var(--accent); color: #fff; }
+    .btn-b { background: rgba(0,0,0,0.04); color: var(--text-1); }
+    .foot { text-align: center; padding: 0 0 12px; font-size: 10px; color: var(--text-3); }
+    .foot a { color: var(--accent); text-decoration: none; }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Temu 多店监控</h1>
-    <div class="subtitle" id="statusLine">加载中...</div>
-    <div class="version" id="ver"></div>
+  <div class="top">
+    <h1>多店监控</h1>
+    <span class="pill" id="pill">已连接</span>
   </div>
 
-  <div class="content">
-    <!-- 连接 & 统计 -->
-    <div class="card">
-      <div class="card-title"><span class="icon">📡</span> 连接状态</div>
-      <div class="stat-row">
-        <span class="stat-label">云端连接</span>
-        <span class="stat-value" id="cfg">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">已抓接口</span>
-        <span class="stat-value" id="captured">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">已上报 / 待发</span>
-        <span class="stat-value"><span id="sent">—</span> / <span id="queue">—</span></span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">最近上报</span>
-        <span class="stat-value" id="lastFlush">—</span>
-      </div>
-    </div>
-
-    <!-- 后台任务 -->
-    <div class="card">
-      <div class="card-title"><span class="icon">⚙️</span> 后台采集任务</div>
-      <div class="task-grid" id="taskGrid"></div>
-    </div>
-
-    <!-- 店铺列表 -->
-    <div class="card">
-      <div class="card-title"><span class="icon">🏪</span> 已识别店铺 (<span id="mallCount">0</span>)</div>
-      <div class="mall-list" id="mallList">
-        <div class="empty-hint">尚未识别到店铺</div>
-      </div>
-    </div>
-
-    <!-- 操作按钮 -->
-    <div class="btn-group">
-      <button class="btn btn-primary" id="flushBtn">立即上报</button>
-      <button class="btn btn-secondary" id="collectBtn">立即采集</button>
-    </div>
-    <div class="btn-group" style="margin-top: 6px;">
-      <button class="btn btn-secondary" id="optBtn">设置</button>
-      <button class="btn btn-secondary" id="startCollectorBtn">启动巡检</button>
-      <button class="btn btn-secondary" id="stopCollectorBtn">停止巡检</button>
-    </div>
+  <div class="card">
+    <div class="row"><span class="l">已捕获</span><span class="r" id="captured">—</span></div>
+    <div class="row"><span class="l">已上报 / 队列</span><span class="r"><span id="sent">—</span> / <span id="queue">—</span></span></div>
+    <div class="row"><span class="l">最近同步</span><span class="r" id="lastFlush">—</span></div>
+    <div class="row tasks-summary" id="taskToggle"><span class="l">采集任务</span><span class="r" id="taskSummary">—<span class="arrow">›</span></span></div>
+    <div class="tasks-detail" id="taskDetail"></div>
   </div>
 
-  <div class="footer">
-    <a id="reload">刷新状态</a>
+  <div class="card">
+    <div class="row tasks-summary" id="mallToggle"><span class="l">店铺</span><span class="r"><span id="mallCount">0</span><span class="arrow">›</span></span></div>
+    <div class="tasks-detail" id="mallDetail"></div>
   </div>
+
+  <div class="btns">
+    <button class="btn btn-a" id="flushBtn">同步</button>
+    <button class="btn btn-b" id="collectBtn">采集</button>
+    <button class="btn btn-b" id="optBtn">设置</button>
+  </div>
+  <div class="foot"><a id="reload">刷新</a> · <span id="ver"></span></div>
 
   <script src="popup.js"></script>
 </body>
