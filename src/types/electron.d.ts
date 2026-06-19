@@ -11,6 +11,7 @@ import type {
   NativeImagePayload,
 } from "../utils/imageStudio";
 import type { DesignBrief, DesignerResult, SharedDNA } from "../components/designer";
+import type { GoodsDataSnapshotRow } from "./opsWorkbench";
 
 interface AutomationAPI {
   login: (accountId: string, phone: string, password: string) => Promise<{ success: boolean; matchedStoreName?: string }>;
@@ -237,6 +238,11 @@ interface AppAPI {
   openChromeExtensions?: () => Promise<string>;
   openExternal: (url: string) => Promise<string>;
   openPdf?: (payload: { base64: string; filename?: string }) => Promise<string>;
+  getPrinters?: () => Promise<Array<{ name: string; displayName: string; isDefault: boolean }>>;
+  printSilent?: (payload: { html: string; printerName: string; pageWidth: number; pageHeight: number; copies: number }) => Promise<{ ok: boolean }>;
+  printDialog?: (payload: { html: string; pageWidth: number; pageHeight: number }) => Promise<{ ok: boolean }>;
+  printPdfSilent?: (payload: { base64: string; printerName?: string; copies?: number }) => Promise<{ ok: boolean }>;
+  openGuluWindow?: (payload: { printUrl: string; printerName?: string }) => Promise<{ ok: boolean }>;
   openLogisticsWindow?: (billNo: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
     logFile?: string;
@@ -926,6 +932,7 @@ interface ErpAPI {
     riskList: (options?: { includeTest?: boolean }) => Promise<ErpRiskListResponse>;
     activityList: (options?: { includeTest?: boolean }) => Promise<ErpActivityListResponse>;
     shopHealth: (options?: { includeTest?: boolean }) => Promise<ErpShopHealthResponse>;
+    goodsDataSnapshot: (options?: { includeTest?: boolean; mallId?: string }) => Promise<{ ok: boolean; data?: { generated_at: number; row_count: number; rows: GoodsDataSnapshotRow[] }; error?: string }>;
     stockOrders: (options?: { includeTest?: boolean }) => Promise<ErpStockOrderResponse>;
     salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
     productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;

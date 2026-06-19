@@ -811,7 +811,7 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     if (search) { values.search = `%${search}%`; cond.push("search_blob LIKE @search"); }
     if (statusFilter) { values.status_filter = statusFilter; cond.push(`${statusCol} = @status_filter`); }
     if (onlineStatusFilter && hasOnlineStatus) { values.online_status_filter = onlineStatusFilter; cond.push("online_status = @online_status_filter"); }
-    if (shopFilter) { values.shop_like = `%${shopFilter}%`; cond.push("search_blob LIKE @shop_like"); }
+    if (shopFilter) { values.shop_filter = shopFilter; values.shop_like = `%${shopFilter}%`; cond.push("(json_extract(payload_json, '$.shopName') = @shop_filter OR (json_extract(payload_json, '$.shopName') IS NULL AND search_blob LIKE @shop_like))"); }
     if (skuCodeFilter) { values.sku_like = `%${skuCodeFilter}%`; cond.push("search_blob LIKE @sku_like"); }
     if (dateFrom) { values.date_from = dateFrom; cond.push("order_key >= @date_from"); }
     if (dateTo) { values.date_to = dateTo; cond.push("order_key <= @date_to"); }
@@ -938,8 +938,9 @@ function runConsignDeliveriesUnified(db, params = {}) {
     filterConditions.push("cloud_temu_status = @online_status");
   }
   if (shopFilter) {
+    baseValues.shop_filter = shopFilter;
     baseValues.shop_like = `%${shopFilter}%`;
-    filterConditions.push("COALESCE(cloud_shop_name, jst_shop_name, cloud_mall_id) LIKE @shop_like");
+    filterConditions.push("(cloud_shop_name = @shop_filter OR (cloud_shop_name IS NULL AND jst_shop_name LIKE @shop_like))");
   }
   if (skuCodeFilter) {
     baseValues.sku_like = `%${skuCodeFilter}%`;

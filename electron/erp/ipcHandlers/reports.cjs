@@ -210,6 +210,25 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台：商品数据看板（抓包 goodsDataShow）
+  ipcMain.handle("erp:reports:goods-data-snapshot", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        const qs = new URLSearchParams();
+        if (payload?.includeTest) qs.set("include_test", "1");
+        if (payload?.mallId) qs.set("mall_id", payload.mallId);
+        return await remoteRequest(`/api/erp/reports/goods-data-snapshot?${qs}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildGoodsDataSnapshot } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildGoodsDataSnapshot(erpState.db, { includeTest: payload?.includeTest, mallId: payload?.mallId, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：备货在途（未完成备货/发货单）
   ipcMain.handle("erp:reports:stock-orders", async (_event, payload) => {
     try {

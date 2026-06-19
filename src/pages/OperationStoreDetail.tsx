@@ -23,6 +23,21 @@ interface ShopRow {
   sale_volume: number; sale_7d: number; sale_30d: number; on_sale: number; wait_online: number;
   lack_skc: number; advice_prepare_skc: number; about_to_sell_out: number; already_sold_out: number;
   high_price_limit: number; after_sale_ratio_90d: number | null;
+  enrollable_activity_count?: number | null; enrolled_activity_count?: number | null;
+  ongoing_activity_count?: number | null; total_activity_count?: number | null;
+  visit_count?: number | null; pay_buyer_count?: number | null; visit_pay_rate?: number | null;
+  attention_count?: number | null; attention_rate?: number | null;
+  trade_amount_cents?: number | null; trade_order_count?: number | null;
+  dsr_score?: number | null; dsr_logistics_score?: number | null;
+  dsr_service_score?: number | null; dsr_description_score?: number | null;
+  coupon_active_count?: number | null; daily_consult_visit_count?: number | null;
+}
+interface GoodsDataRow {
+  mall_id: string; product_id: string; title: string | null; thumb_url: string | null;
+  category_name: string | null; expose_num: number; click_num: number; detail_visit_num: number;
+  order_num: number; pay_amount_cents: number; collect_num: number; add_cart_num: number;
+  click_rate: number | null; cart_rate: number | null; pay_rate: number | null;
+  stat_date: string | null;
 }
 interface RiskRow { mall_id: string; severity: string | null; risk_type: string | null; title: string | null; status: string | null; skc_id: string | null; quantity: number; }
 interface ActRow { mall_id: string; kind: string | null; title: string | null; status: string | null; product_name: string | null; sku_ext_code: string | null; signup_price: number | null; suggested_price: number | null; activity_stock: number; end_at: string | null; }
@@ -49,6 +64,7 @@ export default function OperationStoreDetail() {
   const [stocks, setStocks] = useState<StockRow[]>([]);
   const [trend, setTrend] = useState<TrendRow[]>([]);
   const [panel, setPanel] = useState<PanelRow[]>([]);
+  const [goodsData, setGoodsData] = useState<GoodsDataRow[]>([]);
   const [ad, setAd] = useState<AdRow | null>(null);
 
   const load = useCallback(async () => {
@@ -65,6 +81,10 @@ export default function OperationStoreDetail() {
       setShop((mine(sh as ShopRow[])[0]) || null);
       setRisks(mine(rk as RiskRow[])); setActs(mine(ac as ActRow[]));
       setStocks(mine(st as StockRow[])); setTrend(mine(tr as TrendRow[])); setPanel(mine(pn as PanelRow[]));
+      try {
+        const gdResp = await reports.goodsDataSnapshot?.({ includeTest: false, mallId });
+        setGoodsData((gdResp?.ok && gdResp.data?.rows) ? gdResp.data.rows as GoodsDataRow[] : []);
+      } catch { setGoodsData([]); }
       // 广告（店铺维度，结构特殊）
       try {
         const api = (window as any).electronAPI?.erp?.temuOpenApi;
@@ -208,6 +228,71 @@ export default function OperationStoreDetail() {
       <Card size="small" title={`备货 · 在途 · 缺口 ${stockGap}`} style={{ marginBottom: 12 }}>
         <Table<StockRow> dataSource={stocks} columns={stockCols} rowKey={(_, i) => String(i)} size="small" scroll={{ x: 900 }} pagination={{ defaultPageSize: 10, showSizeChanger: true }} locale={{ emptyText: "无未完成备货/发货单" }} />
       </Card>
+
+      {(shop?.visit_count != null || shop?.dsr_score != null || shop?.enrollable_activity_count != null) && (
+        <Row gutter={12}>
+          <Col span={8}>
+            <Card size="small" title="店铺流量" style={{ marginBottom: 12 }}>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="访客数">{fmtNum(shop?.visit_count)}</Descriptions.Item>
+                <Descriptions.Item label="支付人数">{fmtNum(shop?.pay_buyer_count)}</Descriptions.Item>
+                <Descriptions.Item label="支付转化率">{shop?.visit_pay_rate == null ? "—" : (shop.visit_pay_rate * 100).toFixed(2) + "%"}</Descriptions.Item>
+                <Descriptions.Item label="收藏人数">{fmtNum(shop?.attention_count)}</Descriptions.Item>
+                <Descriptions.Item label="收藏率">{shop?.attention_rate == null ? "—" : (shop.attention_rate * 100).toFixed(2) + "%"}</Descriptions.Item>
+                <Descriptions.Item label="成交金额">{shop?.trade_amount_cents == null ? "—" : fmtMoney(shop.trade_amount_cents / 100)}</Descriptions.Item>
+                <Descriptions.Item label="订单数">{fmtNum(shop?.trade_order_count)}</Descriptions.Item>
+              </Descriptions>
+            </Card>
+          </Col>
+          <Col span={8}>
+            <Card size="small" title="DSR 评分" style={{ marginBottom: 12 }}>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="综合评分">{shop?.dsr_score == null ? "—" : <span style={{ fontWeight: 600, color: (shop.dsr_score ?? 5) < 4.5 ? "#cf1322" : "#3f8600" }}>{shop.dsr_score.toFixed(2)}</span>}</Descriptions.Item>
+                <Descriptions.Item label="商品描述">{shop?.dsr_description_score == null ? "—" : shop.dsr_description_score.toFixed(2)}</Descriptions.Item>
+                <Descriptions.Item label="服务态度">{shop?.dsr_service_score == null ? "—" : shop.dsr_service_score.toFixed(2)}</Descriptions.Item>
+                <Descriptions.Item label="物流服务">{shop?.dsr_logistics_score == null ? "—" : shop.dsr_logistics_score.toFixed(2)}</Descriptions.Item>
+              </Descriptions>
+            </Card>
+          </Col>
+          <Col span={8}>
+            <Card size="small" title="活动总览" style={{ marginBottom: 12 }}>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="可报名活动">{fmtNum(shop?.enrollable_activity_count)}</Descriptions.Item>
+                <Descriptions.Item label="已报名活动">{fmtNum(shop?.enrolled_activity_count)}</Descriptions.Item>
+                <Descriptions.Item label="进行中活动">{fmtNum(shop?.ongoing_activity_count)}</Descriptions.Item>
+                <Descriptions.Item label="活动总数">{fmtNum(shop?.total_activity_count)}</Descriptions.Item>
+                <Descriptions.Item label="优惠券">{fmtNum(shop?.coupon_active_count)}</Descriptions.Item>
+              </Descriptions>
+            </Card>
+          </Col>
+        </Row>
+      )}
+
+      {goodsData.length > 0 && (
+        <Card size="small" title={`商品数据看板 · ${goodsData.length} 个商品`} style={{ marginBottom: 12 }}>
+          <Table<GoodsDataRow>
+            dataSource={goodsData}
+            rowKey={(r) => r.product_id}
+            size="small"
+            scroll={{ x: 1100 }}
+            pagination={{ defaultPageSize: 10, showSizeChanger: true, showTotal: (t) => `共 ${t}` }}
+            columns={[
+              { title: "商品", dataIndex: "title", ellipsis: true, width: 200, render: (v: string | null) => v || "—" },
+              { title: "分类", dataIndex: "category_name", ellipsis: true, width: 120 },
+              { title: "曝光", dataIndex: "expose_num", width: 80, align: "right", sorter: (a, b) => a.expose_num - b.expose_num, render: fmtNum },
+              { title: "点击", dataIndex: "click_num", width: 80, align: "right", render: fmtNum },
+              { title: "点击率", dataIndex: "click_rate", width: 80, align: "right", render: (v: number | null) => v == null ? "—" : v.toFixed(2) + "%" },
+              { title: "详情页", dataIndex: "detail_visit_num", width: 80, align: "right", render: fmtNum },
+              { title: "加购", dataIndex: "add_cart_num", width: 70, align: "right", render: fmtNum },
+              { title: "加购率", dataIndex: "cart_rate", width: 80, align: "right", render: (v: number | null) => v == null ? "—" : v.toFixed(2) + "%" },
+              { title: "下单", dataIndex: "order_num", width: 70, align: "right", sorter: (a, b) => a.order_num - b.order_num, render: fmtNum },
+              { title: "支付转化", dataIndex: "pay_rate", width: 90, align: "right", render: (v: number | null) => v == null ? "—" : v.toFixed(2) + "%" },
+              { title: "销售额", dataIndex: "pay_amount_cents", width: 100, align: "right", sorter: (a, b) => a.pay_amount_cents - b.pay_amount_cents, render: (v: number) => fmtMoney(v / 100) },
+              { title: "日期", dataIndex: "stat_date", width: 100 },
+            ]}
+          />
+        </Card>
+      )}
 
       <Card size="small" title="流量 / 广告（近 7 天）" style={{ marginBottom: 12 }}>
         {ad ? (

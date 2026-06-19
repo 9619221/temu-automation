@@ -140,6 +140,8 @@
     "electron-updater": "^6.8.3",
     "fs-extra": "^10.1.0",
     "graceful-fs": "^4.2.11",
+    "jsbarcode": "^3.12.3",
+    "jspdf": "^4.2.1",
     "playwright": "^1.58.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -6802,6 +6802,122 @@ ipcMain.handle("app:open-pdf", async (_event, payload) => {
   return filePath;
 });
 
+// ============ 条码标签打印 ============
+
+ipcMain.handle("print:get-printers", async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return [];
+  const list = await mainWindow.webContents.getPrintersAsync();
+  return list.map((p) => ({ name: p.name, displayName: p.displayName || p.name, isDefault: p.isDefault }));
+});
+
+let printWindow = null;
+function printHtml({ html, silent, printerName, pageWidth, pageHeight, copies }) {
+  return new Promise((resolve, reject) => {
+    if (printWindow && !printWindow.isDestroyed()) printWindow.destroy();
+    const win = new BrowserWindow({ show: false, width: 400, height: 300, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+    printWindow = win;
+    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, 30000);
+    win.webContents.on("did-finish-load", () => {
+      const opts = {
+        silent: !!silent,
+        printBackground: true,
+        pageSize: { width: Math.round(pageWidth * 1000), height: Math.round(pageHeight * 1000) },
+        margins: { marginType: "none" },
+      };
+      if (silent && printerName) opts.deviceName = printerName;
+      if (copies > 1) opts.copies = copies;
+      win.webContents.print(opts, (success, failureReason) => {
+        clearTimeout(timer);
+        if (!win.isDestroyed()) win.destroy();
+        printWindow = null;
+        if (success) resolve({ ok: true });
+        else reject(new Error(failureReason || "打印失败"));
+      });
+    });
+    win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+  });
+}
+
+ipcMain.handle("print:silent", async (_event, payload) => {
+  return printHtml({ ...payload, silent: true });
+});
+
+ipcMain.handle("print:dialog", async (_event, payload) => {
+  return printHtml({ ...payload, silent: false });
+});
+
+ipcMain.handle("print:pdf-silent", async (_event, payload) => {
+  const { base64, printerName, copies } = payload || {};
+  if (!base64) throw new Error("缺少 PDF 数据");
+  const os = require("node:os");
+  const tmpPath = path.join(os.tmpdir(), `temu-label-${Date.now()}.pdf`);
+  fs.writeFileSync(tmpPath, Buffer.from(base64, "base64"));
+
+  return new Promise((resolve, reject) => {
+    const win = new BrowserWindow({ show: false, width: 400, height: 300, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, 30000);
+    win.webContents.on("did-finish-load", () => {
+      setTimeout(() => {
+        const opts = { printBackground: true, margins: { marginType: "none" } };
+        if (printerName) { opts.silent = true; opts.deviceName = printerName; } else { opts.silent = false; }
+        if (copies > 1) opts.copies = copies;
+        win.webContents.print(opts, (success, reason) => {
+          clearTimeout(timer);
+          if (!win.isDestroyed()) win.destroy();
+          try { fs.unlinkSync(tmpPath); } catch {}
+          if (success) resolve({ ok: true });
+          else reject(new Error(reason || "打印失败"));
+        });
+      }, 800);
+    });
+    win.loadURL(pathToFileURL(tmpPath).href);
+  });
+});
+
+// ============ 咕噜噜内嵌窗口 ============
+
+let guluWindow = null;
+ipcMain.handle("print:open-gulu", async (_event, payload) => {
+  const { printUrl, printerName } = payload || {};
+  if (!printUrl) throw new Error("缺少 printUrl");
+
+  if (guluWindow && !guluWindow.isDestroyed()) {
+    guluWindow.loadURL(printUrl);
+    guluWindow.focus();
+    return { ok: true };
+  }
+
+  const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 780,
+    title: "条码标签打印",
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: false,
+      preload: path.join(__dirname, "preload-gulu.cjs"),
+    },
+  });
+  guluWindow = win;
+  win.webContents.setUserAgent(chromeUA);
+
+  guluWindow = win;
+  win.on("closed", () => { guluWindow = null; });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url) shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  try {
+    await win.loadURL(printUrl);
+  } catch (e) {
+    console.log("[Gulu] loadURL error:", e?.message || e);
+  }
+  return { ok: true };
+});
+
 let logisticsWindow = null;
 ipcMain.handle("app:open-logistics-window", async (_event, billNo) => {
   const no = String(billNo || "").trim();

@@ -4,45 +4,158 @@
   <meta charset="UTF-8" />
   <title>Temu 多店监控</title>
   <style>
-    body { width: 340px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; color: #1f2328; }
-    h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
-    .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #eef0f3; }
-    .row:last-child { border-bottom: none; }
-    .label { color: #57606a; }
-    .value { font-weight: 500; max-width: 180px; text-align: right; word-break: break-word; }
-    .ok { color: #1a7f37; }
-    .err { color: #cf222e; }
-    button { margin-top: 10px; width: 100%; padding: 8px; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; cursor: pointer; font-size: 13px; }
-    button:hover { background: #eaeef2; }
-    button.primary { background: #0969da; color: white; border-color: #0969da; }
-    button.primary:hover { background: #0860ca; }
-    .footer { margin-top: 10px; color: #8c959f; font-size: 11px; text-align: center; }
-    .footer a { color: #0969da; text-decoration: none; cursor: pointer; }
-    .section-title { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 4px; }
-    .mall-list { max-height: 100px; overflow-y: auto; border: 1px solid #eef0f3; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
-    .mall-item { padding: 2px 0; border-bottom: 1px dashed #eef0f3; }
+    * { box-sizing: border-box; }
+    body {
+      width: 380px; margin: 0; padding: 0;
+      font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px; color: #1f2328; background: #f6f8fa;
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, #0969da 0%, #1f6feb 100%);
+      color: #fff; padding: 16px 18px 14px; position: relative;
+    }
+    .header h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+    .header .subtitle { font-size: 11px; opacity: 0.8; }
+    .header .version { position: absolute; right: 16px; top: 16px; font-size: 10px; opacity: 0.6; }
+
+    /* Cards */
+    .content { padding: 12px 14px 14px; }
+    .card {
+      background: #fff; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .card-title {
+      font-size: 11px; font-weight: 600; color: #57606a; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+    }
+    .card-title .icon { font-size: 13px; }
+
+    /* Status rows */
+    .stat-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 5px 0; border-bottom: 1px solid #f0f2f5;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: #57606a; font-size: 12px; }
+    .stat-value { font-weight: 500; font-size: 12px; }
+
+    /* Status dots */
+    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+    .dot-green { background: #1a7f37; box-shadow: 0 0 4px rgba(26,127,55,0.4); }
+    .dot-yellow { background: #bf8700; box-shadow: 0 0 4px rgba(191,135,0,0.3); }
+    .dot-red { background: #cf222e; box-shadow: 0 0 4px rgba(207,34,46,0.3); }
+    .dot-gray { background: #8c959f; }
+
+    /* Task grid */
+    .task-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+    .task-item {
+      display: flex; align-items: center; gap: 5px;
+      padding: 4px 0; font-size: 11px; color: #1f2328;
+    }
+    .task-item .task-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .task-item .task-time { color: #8c959f; font-size: 10px; font-variant-numeric: tabular-nums; }
+
+    /* Mall list */
+    .mall-list { max-height: 110px; overflow-y: auto; }
+    .mall-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 0; border-bottom: 1px solid #f0f2f5;
+    }
     .mall-item:last-child { border-bottom: none; }
-    .empty { color: #8c959f; font-style: italic; padding: 4px; font-size: 11px; text-align: center; }
+    .mall-name { font-weight: 500; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mall-id { font-size: 10px; color: #8c959f; font-family: monospace; }
+    .site-badge {
+      font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 3px;
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .site-eu { background: #ddf4ff; color: #0550ae; }
+    .site-us { background: #dafbe1; color: #116329; }
+    .site-jp { background: #fff8c5; color: #6f5e00; }
+    .site-default { background: #f0f2f5; color: #57606a; }
+    .empty-hint { color: #8c959f; font-size: 11px; text-align: center; padding: 8px; font-style: italic; }
+
+    /* Buttons */
+    .btn-group { display: flex; gap: 8px; margin-top: 2px; }
+    .btn {
+      flex: 1; padding: 9px 12px; border: none; border-radius: 8px;
+      font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+      text-align: center;
+    }
+    .btn-primary { background: #0969da; color: #fff; }
+    .btn-primary:hover { background: #0860ca; }
+    .btn-secondary { background: #f0f2f5; color: #1f2328; }
+    .btn-secondary:hover { background: #e5e8eb; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Footer */
+    .footer {
+      text-align: center; padding: 8px; font-size: 10px; color: #8c959f;
+    }
+    .footer a { color: #0969da; text-decoration: none; cursor: pointer; }
+    .footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>Temu 多店监控</h1>
-  <div class="row"><span class="label">配置状态</span><span class="value" id="cfg">—</span></div>
-  <div class="row"><span class="label">已抓接口</span><span class="value" id="captured">—</span></div>
-  <div class="row"><span class="label">已上报</span><span class="value" id="sent">—</span></div>
-  <div class="row"><span class="label">待上报</span><span class="value" id="queue">—</span></div>
-  <div class="row"><span class="label">最近上报</span><span class="value" id="lastFlush">—</span></div>
-  <div class="row"><span class="label">最近结果</span><span class="value" id="lastResult">—</span></div>
-  <div class="row"><span class="label">后台采集</span><span class="value" id="collector">—</span></div>
+  <div class="header">
+    <h1>Temu 多店监控</h1>
+    <div class="subtitle" id="statusLine">加载中...</div>
+    <div class="version" id="ver"></div>
+  </div>
 
-  <div class="section-title">已识别店铺 (<span id="mallCount">0</span>)</div>
-  <div class="mall-list" id="mallList"><div class="empty">尚未识别到店铺，需要打开 Temu 后台首页让 userInfo 接口被拦截</div></div>
+  <div class="content">
+    <!-- 连接 & 统计 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">📡</span> 连接状态</div>
+      <div class="stat-row">
+        <span class="stat-label">云端连接</span>
+        <span class="stat-value" id="cfg">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">已抓接口</span>
+        <span class="stat-value" id="captured">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">已上报 / 待发</span>
+        <span class="stat-value"><span id="sent">—</span> / <span id="queue">—</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">最近上报</span>
+        <span class="stat-value" id="lastFlush">—</span>
+      </div>
+    </div>
 
-  <button id="flushBtn" class="primary">立即上报</button>
-  <button id="startCollectorBtn">启动后台采集</button>
-  <button id="stopCollectorBtn">停止后台采集</button>
-  <button id="optBtn">打开设置</button>
-  <div class="footer"><a id="reload">重新读取状态</a></div>
+    <!-- 后台任务 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">⚙️</span> 后台采集任务</div>
+      <div class="task-grid" id="taskGrid"></div>
+    </div>
+
+    <!-- 店铺列表 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">🏪</span> 已识别店铺 (<span id="mallCount">0</span>)</div>
+      <div class="mall-list" id="mallList">
+        <div class="empty-hint">尚未识别到店铺</div>
+      </div>
+    </div>
+
+    <!-- 操作按钮 -->
+    <div class="btn-group">
+      <button class="btn btn-primary" id="flushBtn">立即上报</button>
+      <button class="btn btn-secondary" id="collectBtn">立即采集</button>
+    </div>
+    <div class="btn-group" style="margin-top: 6px;">
+      <button class="btn btn-secondary" id="optBtn">设置</button>
+      <button class="btn btn-secondary" id="startCollectorBtn">启动巡检</button>
+      <button class="btn btn-secondary" id="stopCollectorBtn">停止巡检</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a id="reload">刷新状态</a>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>

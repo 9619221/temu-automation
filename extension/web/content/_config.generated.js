@@ -1,6 +1,6 @@
 // ! 自动生成，勿手改 — 由 scripts/build-bridge.cjs 同步自 hook-config.js
-// 生成时间: 2026-06-09T09:55:58.838Z
-// 白名单数量: 217
+// 生成时间: 2026-06-19T07:39:40.289Z
+// 白名单数量: 221
 window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_WHITELIST": [
     "/api/seller/auth/userInfo",
@@ -208,6 +208,10 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
     "/bg-luna-mms/goods/quality/optimize/order/wait/optimize/count",
     "/bg-luna-agent-seller/goods/quality/supplyChain/",
     "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
+    "/ms/bg-flux-ms/compliance_property/page_query",
+    "/ms/bg-flux-ms/compliance_property/query_detail",
+    "/ms/bg-flux-ms/compliance_property/query_template",
+    "/bg-flux-ms/compliance_property/",
     "/api/kiana/direnjie/common/gray/match",
     "/api/kiana/direnjie/common/gray/matchSubGroup",
     "/lollipop/gray/agent/seller/batchMatchBySupplierIdsWithMulGray",
@@ -245,6 +249,7 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_DISCOVERY_ALLOWLIST": [
     "/api/",
     "/mms/",
+    "/ms/",
     "/bg/",
     "/bgSongbird-api/",
     "/bg-supplier-delivery-api/",
@@ -266,6 +271,6 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "DISCOVERY_MAX_BODY_CHARS": 60000,
   "EVENT_NAME": "temu-monitor.captured",
   "BYPASS_SYMBOL_KEY": "temu-monitor.fetch.bypass",
-  "GENERATED_AT": "2026-06-09T09:55:58.838Z",
-  "WHITELIST_COUNT": 217
+  "GENERATED_AT": "2026-06-19T07:39:40.289Z",
+  "WHITELIST_COUNT": 221
 };

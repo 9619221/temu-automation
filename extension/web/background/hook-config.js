@@ -245,6 +245,11 @@ export const URL_WHITELIST = [
   // 商品品质看板(/main/quality/dashboard):品质分(goodsAfsScore)/售后率/售后·差评问题分布/趋势,供运营工作台「商品品质」Tab。子串前缀覆盖 pageQuery/query/count/trend
   "/bg-luna-agent-seller/goods/quality/supplyChain/",
   "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
+  // 合规属性（制造商/欧代/土代/进口商）——条码标签打印自动填充数据源
+  "/ms/bg-flux-ms/compliance_property/page_query",
+  "/ms/bg-flux-ms/compliance_property/query_detail",
+  "/ms/bg-flux-ms/compliance_property/query_template",
+  "/bg-flux-ms/compliance_property/",
 
   // === 灰度 / 配置 ===
   "/api/kiana/direnjie/common/gray/match",
@@ -293,6 +298,7 @@ export const URL_BLACKLIST = [
 export const URL_DISCOVERY_ALLOWLIST = [
   "/api/",
   "/mms/",
+  "/ms/",
   "/bg/",
   "/bgSongbird-api/",
   "/bg-supplier-delivery-api/",

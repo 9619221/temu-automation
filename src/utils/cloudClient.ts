@@ -858,3 +858,39 @@ export const fetchAgentHeartbeats = (
   qs.set("limit", String(params.limit || 120));
   return request<AgentHeartbeat[]>(cfg, `/api/dashboard/agent?${qs.toString()}`);
 };
+
+export interface CompliancePropertyRow {
+  product_skc_id: string;
+  product_name: string | null;
+  mall_id: string | null;
+  manufacturer_name: string | null;
+  manufacturer_address: string | null;
+  manufacturer_email: string | null;
+  ec_rep_name: string | null;
+  ec_rep_address: string | null;
+  ec_rep_email: string | null;
+  tur_rep_name: string | null;
+  tur_rep_address: string | null;
+  importer_name: string | null;
+  importer_address: string | null;
+  last_updated_at: string | null;
+}
+
+export const fetchComplianceProperties = async (
+  params: { mall_id?: string; skc_id?: string; limit?: number } = {},
+): Promise<CompliancePropertyRow[]> => {
+  const cfg = await loadCloudConfig();
+  if (!cfg) return [];
+  const qs = new URLSearchParams();
+  if (params.skc_id) qs.set("skc_id", params.skc_id);
+  else if (params.mall_id) qs.set("mall_id", params.mall_id);
+  qs.set("limit", String(params.limit || 10));
+  try {
+    const data = await request<{ ok: boolean; rows: CompliancePropertyRow[] }>(
+      cfg, `/api/ingest/v1/compliance-properties?${qs.toString()}`
+    );
+    return data?.rows || [];
+  } catch {
+    return [];
+  }
+};

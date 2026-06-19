@@ -45,6 +45,23 @@ export interface ShopHealthRow {
   on_sale: number; wait_online: number; lack_skc: number; advice_prepare_skc: number;
   about_to_sell_out: number; already_sold_out: number; high_price_limit: number;
   after_sale_ratio_90d: number | null; stat_date: string | null; __rk?: number;
+  enrollable_activity_count?: number | null; enrolled_activity_count?: number | null;
+  ongoing_activity_count?: number | null; total_activity_count?: number | null;
+  visit_count?: number | null; pay_buyer_count?: number | null; visit_pay_rate?: number | null;
+  attention_count?: number | null; attention_rate?: number | null;
+  trade_amount_cents?: number | null; trade_order_count?: number | null;
+  dsr_score?: number | null; dsr_logistics_score?: number | null;
+  dsr_service_score?: number | null; dsr_description_score?: number | null;
+  coupon_active_count?: number | null; daily_consult_visit_count?: number | null;
+}
+export interface GoodsDataSnapshotRow {
+  mall_id: string; store_code: string | null; mall_name: string | null;
+  product_id: string; goods_id: string | null; skc_id: string | null;
+  title: string | null; thumb_url: string | null; category_name: string | null;
+  expose_num: number; click_num: number; detail_visit_num: number; detail_visitor_num: number;
+  add_cart_num: number; collect_num: number; order_num: number; pay_amount_cents: number;
+  guv: number; pv: number; module_name: string | null; stat_date: string | null;
+  click_rate: number | null; cart_rate: number | null; pay_rate: number | null;
 }
 export interface StockOrderRow {
   mall_id: string; store_code: string | null; mall_name: string | null;

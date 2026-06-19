@@ -3626,8 +3626,8 @@ function buildActivityList(db, options = {}) {
     SELECT a.mall_id, m.store_code, m.mall_name, a.activity_kind, a.activity_title, a.activity_status,
            a.sku_ext_code, a.skc_id, a.signup_price_cents, a.suggested_price_cents,
            a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date, k.wac AS cost,
-           a.activity_id, a.product_id, a.activity_type, a.sku_id,
-           sc.title AS prod_title, sc.thumb_url AS thumb,
+           a.activity_id, a.product_id, a.activity_type, a.sku_id, a.goods_id,
+           sc.title AS prod_title, sc.thumb_url AS thumb, sc.product_id AS spu_id,
            COALESCE(a.sku_attr_text, oa.spec_name, k.color_spec) AS color_spec
       FROM cloud.temu_activity_snapshot a
       JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
@@ -3655,12 +3655,16 @@ function buildActivityList(db, options = {}) {
     console.log("[ACT-DEBUG] color_spec sample (first 5):", JSON.stringify(sample, null, 2));
     const hasSpec = rows.filter(r => r.color_spec).length;
     console.log(`[ACT-DEBUG] rows with color_spec: ${hasSpec}/${rows.length}`);
+    const gpSample = rows.filter(r => r.sku_ext_code && r.sku_ext_code.startsWith("250922")).slice(0, 5).map(r => ({
+      sku: r.sku_ext_code, skc_id: r.skc_id, product_id: r.product_id, goods_id: r.goods_id, spu_id: r.spu_id
+    }));
+    if (gpSample.length) console.log("[ACT-DEBUG] grouping keys for 250922*:", JSON.stringify(gpSample, null, 2));
   }
   const centsToYuan = (v) => (v == null ? null : Number(v) / 100);
   const out = rows.map((a) => ({
     mall_id: a.mall_id, store_code: a.store_code || null, mall_name: a.mall_name || null,
     kind: a.activity_kind || null, title: a.activity_title || null, status: a.activity_status || null,
-    activity_id: a.activity_id || null, product_id: a.product_id || null,
+    activity_id: a.activity_id || null, product_id: a.product_id || null, goods_id: a.goods_id || null, spu_id: a.spu_id || null,
     activity_type: a.activity_type != null ? Number(a.activity_type) : null, sku_id: a.sku_id || null,
     sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null, color_spec: a.color_spec || null,
     product_name: a.prod_title || a.activity_title || null, thumb: a.thumb || null,
@@ -3688,17 +3692,20 @@ function buildActivityList(db, options = {}) {
   for (const r of out) {
     if (!r.sku_ext_code) continue; // 无货号的活动表头噪声行不进概览
     const dk = `${r.store_code || r.mall_id}|${r.sku_ext_code}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
-    if (seen.has(dk)) continue; seen.add(dk); // 同 货号+活动+申报价+参考价 完全重复只留一条
-    const pkey = `${r.store_code || r.mall_id}|${r.sku_ext_code}`;
+    if (seen.has(dk)) continue; seen.add(dk);
+    const pid = r.spu_id || r.goods_id || r.product_id || r.sku_ext_code;
+    const pkey = `${r.store_code || r.mall_id}|${pid}`;
     let e = pmap.get(pkey);
     if (!e) {
       e = { key: pkey, mall_id: r.mall_id, store_code: r.store_code, mall_name: r.mall_name,
-        sku_ext_code: r.sku_ext_code, product_id: r.product_id, skc_id: r.skc_id, color_spec: r.color_spec,
+        sku_ext_code: r.sku_ext_code, sku_ext_codes: [r.sku_ext_code],
+        product_id: r.product_id, skc_id: r.skc_id, color_spec: r.color_spec,
         product_name: r.product_name, thumb: r.thumb,
         act_count: 0, pending_count: 0, best_margin: null, best_profit: null,
-        enrolled_count: enrMap.get(`${r.mall_id}|${r.sku_ext_code}`) || 0, kinds: [], activities: [] };
+        enrolled_count: 0, kinds: [], activities: [] };
       pmap.set(pkey, e);
     }
+    if (r.sku_ext_code && !e.sku_ext_codes.includes(r.sku_ext_code)) e.sku_ext_codes.push(r.sku_ext_code);
     if (!e.product_name && r.product_name) e.product_name = r.product_name;
     if (!e.thumb && r.thumb) e.thumb = r.thumb;
     if (!e.product_id && r.product_id) e.product_id = r.product_id;
@@ -3721,6 +3728,9 @@ function buildActivityList(db, options = {}) {
       }
     }
     e.act_count = ids.size; e.pending_count = pend.size;
+    let ec = 0;
+    for (const code of (e.sku_ext_codes || [])) ec += enrMap.get(`${e.mall_id}|${code}`) || 0;
+    e.enrolled_count = ec;
   }
   const products = [...pmap.values()].sort((a, b) => {
     const s = (a.store_code || a.mall_id).localeCompare(b.store_code || b.mall_id); if (s) return s;
@@ -3745,7 +3755,14 @@ function _buildShopHealthScrapeFresh(db, options = {}) {
            s.sale_volume, s.seven_days_sale_volume, s.thirty_days_sale_volume,
            s.on_sale_product_number, s.wait_product_number, s.lack_skc_number,
            s.advice_prepare_skc_number, s.about_to_sell_out_number, s.already_sold_out_number,
-           s.high_price_limit_number, s.quality_after_sale_ratio_90d, s.stat_date
+           s.high_price_limit_number, s.quality_after_sale_ratio_90d, s.stat_date,
+           s.enrollable_activity_count, s.enrolled_activity_count,
+           s.ongoing_activity_count, s.total_activity_count,
+           s.visit_count, s.pay_buyer_count, s.visit_pay_rate,
+           s.attention_count, s.attention_rate,
+           s.trade_amount_cents, s.trade_order_count,
+           s.dsr_score, s.dsr_logistics_score, s.dsr_service_score, s.dsr_description_score,
+           s.coupon_active_count, s.daily_consult_visit_count
       FROM cloud.temu_shop_stats s
       JOIN latest l ON l.mall_id = s.mall_id AND l.sd = s.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
@@ -3763,6 +3780,23 @@ function _buildShopHealthScrapeFresh(db, options = {}) {
     high_price_limit: toNum(s.high_price_limit_number),
     after_sale_ratio_90d: s.quality_after_sale_ratio_90d == null ? null : Number(s.quality_after_sale_ratio_90d),
     stat_date: s.stat_date || null,
+    enrollable_activity_count: toNum(s.enrollable_activity_count) || null,
+    enrolled_activity_count: toNum(s.enrolled_activity_count) || null,
+    ongoing_activity_count: toNum(s.ongoing_activity_count) || null,
+    total_activity_count: toNum(s.total_activity_count) || null,
+    visit_count: toNum(s.visit_count) || null,
+    pay_buyer_count: toNum(s.pay_buyer_count) || null,
+    visit_pay_rate: s.visit_pay_rate == null ? null : Number(s.visit_pay_rate),
+    attention_count: toNum(s.attention_count) || null,
+    attention_rate: s.attention_rate == null ? null : Number(s.attention_rate),
+    trade_amount_cents: toNum(s.trade_amount_cents) || null,
+    trade_order_count: toNum(s.trade_order_count) || null,
+    dsr_score: s.dsr_score == null ? null : Number(s.dsr_score),
+    dsr_logistics_score: s.dsr_logistics_score == null ? null : Number(s.dsr_logistics_score),
+    dsr_service_score: s.dsr_service_score == null ? null : Number(s.dsr_service_score),
+    dsr_description_score: s.dsr_description_score == null ? null : Number(s.dsr_description_score),
+    coupon_active_count: toNum(s.coupon_active_count) || null,
+    daily_consult_visit_count: toNum(s.daily_consult_visit_count) || null,
   }));
   return { generated_at: Date.now(), row_count: out.length, rows: out };
 }
@@ -3818,6 +3852,74 @@ function buildShopHealth(db, options = {}) {
     data = _buildShopHealthScrapeFresh(db, options);
   }
   _shopHealthCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+// ===== 商品数据看板（cloud.temu_goods_data_snapshot） =====
+const _goodsDataCache = new Map();
+function buildGoodsDataSnapshot(db, options = {}) {
+  if (!db) throw new Error("buildGoodsDataSnapshot: db is required");
+  const key = (options.includeTest ? "1" : "0") + ":" + (options.mallId || "all");
+  if (!options.force) {
+    const c = _goodsDataCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const mallFilter = options.mallId ? "AND g.mall_id = ?" : "";
+  const params = options.mallId ? [tid, tid, options.mallId] : [tid, tid];
+  const rows = optionalAllLocal(db, `
+    WITH latest AS (
+      SELECT mall_id, product_id, MAX(stat_date) AS sd
+        FROM cloud.temu_goods_data_snapshot
+       WHERE tenant_id = ? AND mall_id <> ''
+       GROUP BY mall_id, product_id
+    )
+    SELECT g.mall_id, m.store_code, m.mall_name,
+           g.product_id, g.goods_id, g.skc_id, g.title, g.thumb_url, g.category_name,
+           g.expose_num, g.click_num, g.detail_visit_num, g.detail_visitor_num,
+           g.add_cart_num, g.collect_num, g.order_num, g.pay_amount_cents,
+           g.guv, g.pv, g.module_name, g.stat_date
+      FROM cloud.temu_goods_data_snapshot g
+      JOIN latest l ON l.mall_id = g.mall_id AND l.product_id = g.product_id AND l.sd = g.stat_date
+      LEFT JOIN erp_temu_malls m ON m.mall_id = g.mall_id
+     WHERE g.tenant_id = ?
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+       ${mallFilter}
+     ORDER BY g.expose_num DESC NULLS LAST, g.mall_id, g.product_id
+     LIMIT 10000
+  `, params);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id,
+    store_code: r.store_code || null,
+    mall_name: r.mall_name || null,
+    product_id: r.product_id,
+    goods_id: r.goods_id || null,
+    skc_id: r.skc_id || null,
+    title: r.title || null,
+    thumb_url: r.thumb_url || null,
+    category_name: r.category_name || null,
+    expose_num: toNum(r.expose_num),
+    click_num: toNum(r.click_num),
+    detail_visit_num: toNum(r.detail_visit_num),
+    detail_visitor_num: toNum(r.detail_visitor_num),
+    add_cart_num: toNum(r.add_cart_num),
+    collect_num: toNum(r.collect_num),
+    order_num: toNum(r.order_num),
+    pay_amount_cents: toNum(r.pay_amount_cents),
+    guv: toNum(r.guv),
+    pv: toNum(r.pv),
+    module_name: r.module_name || null,
+    stat_date: r.stat_date || null,
+    click_rate: r.expose_num > 0 ? Number(((r.click_num || 0) / r.expose_num * 100).toFixed(2)) : null,
+    cart_rate: r.detail_visit_num > 0 ? Number(((r.add_cart_num || 0) / r.detail_visit_num * 100).toFixed(2)) : null,
+    pay_rate: r.detail_visit_num > 0 ? Number(((r.order_num || 0) / r.detail_visit_num * 100).toFixed(2)) : null,
+  }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _goodsDataCache.set(key, { data, ts: Date.now() });
   return data;
 }
 
@@ -5419,6 +5521,7 @@ module.exports = {
   buildPipelineOverview,
   buildPipelineOverviewFast,
   buildProductRiskTags,
+  buildGoodsDataSnapshot,
   // 暴露给测试用
   _internal: {
     fetchCloudReport, readMallDictionary, loginCloud,

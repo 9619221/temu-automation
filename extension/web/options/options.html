@@ -4,67 +4,109 @@
   <meta charset="UTF-8" />
   <title>Temu 多店监控 · 设置</title>
   <style>
-    body { max-width: 640px; margin: 32px auto; padding: 0 24px; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2328; }
-    h1 { font-size: 18px; margin-bottom: 24px; }
-    .field { margin-bottom: 20px; }
-    label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-    input[type=text], input[type=password], textarea {
-      width: 100%; padding: 8px 10px; box-sizing: border-box;
-      border: 1px solid #d0d7de; border-radius: 6px; font-size: 13px; font-family: inherit;
+    * { box-sizing: border-box; }
+    body {
+      max-width: 600px; margin: 40px auto; padding: 0 24px;
+      font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #1f2328; background: #f6f8fa;
     }
-    input:focus, textarea:focus { outline: none; border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.15); }
-    .hint { color: #57606a; font-size: 12px; margin-top: 4px; }
-    button { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; border: 1px solid #d0d7de; background: #f6f8fa; }
-    button.primary { background: #0969da; color: white; border-color: #0969da; }
-    button.primary:hover { background: #0860ca; }
-    button.danger { background: #fff; color: #cf222e; border-color: #cf222e; }
-    .row { display: flex; gap: 8px; }
-    .info { background: #ddf4ff; border: 1px solid #54aeff; padding: 12px; border-radius: 6px; font-size: 12px; margin-bottom: 20px; }
-    code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
-    .ok-banner { color: #1a7f37; margin-top: 8px; font-size: 13px; }
-    .err-banner { color: #cf222e; margin-top: 8px; font-size: 13px; }
-    hr { border: none; border-top: 1px solid #eef0f3; margin: 28px 0; }
+    .page-header {
+      background: linear-gradient(135deg, #0969da 0%, #1f6feb 100%);
+      color: #fff; padding: 24px 28px; border-radius: 12px; margin-bottom: 24px;
+    }
+    .page-header h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+    .page-header p { margin: 0; font-size: 13px; opacity: 0.85; }
+
+    .card {
+      background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .card-title { font-size: 14px; font-weight: 600; margin: 0 0 16px; }
+
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 6px; color: #57606a; }
+    .input-wrap { position: relative; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 8px;
+      font-size: 13px; font-family: inherit; background: #fff; transition: border-color 0.15s;
+    }
+    input:focus { outline: none; border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.12); }
+    input[readonly] { background: #f6f8fa; color: #57606a; }
+    .hint { color: #8c959f; font-size: 11px; margin-top: 4px; }
+    .toggle-vis {
+      position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; font-size: 14px; color: #57606a; padding: 4px;
+    }
+    .toggle-vis:hover { color: #1f2328; }
+
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
+      border: 1px solid transparent; transition: all 0.15s;
+    }
+    .btn-primary { background: #0969da; color: #fff; border-color: #0969da; }
+    .btn-primary:hover { background: #0860ca; }
+    .btn-secondary { background: #f0f2f5; color: #1f2328; border-color: #d0d7de; }
+    .btn-secondary:hover { background: #e5e8eb; }
+    .btn-danger { background: #fff; color: #cf222e; border-color: #cf222e; }
+    .btn-danger:hover { background: #fff5f5; }
+
+    .banner {
+      margin-top: 12px; padding: 10px 14px; border-radius: 8px; font-size: 12px;
+      display: none; font-weight: 500;
+    }
+    .banner.ok { display: block; background: #dafbe1; color: #116329; }
+    .banner.err { display: block; background: #ffebe9; color: #cf222e; }
+
+    code { background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
   </style>
 </head>
 <body>
-  <h1>Temu 多店监控 · 设置</h1>
-
-  <div class="info">
-    扩展会拦截 Temu 卖家后台请求，把白名单内的接口响应加入队列，每 30s 批量上报到下面的云端。
-    设备 ID 在首次安装时自动生成，用于云端识别同一台机器多次安装。
+  <div class="page-header">
+    <h1>Temu 多店监控 · 设置</h1>
+    <p>扩展会拦截 Temu 卖家后台请求，将白名单内的接口响应批量上报到云端存储。</p>
   </div>
 
-  <div class="field">
-    <label for="cloud_endpoint">云端 Ingest URL</label>
-    <input type="text" id="cloud_endpoint" placeholder="https://erp.temu.chat/cloud" value="https://erp.temu.chat/cloud" readonly />
-    <div class="hint">扩展会向 <code>{URL}/api/ingest/v1/batch</code> 发 POST，body 是 <code>{items:[...]}</code></div>
+  <div class="card">
+    <div class="card-title">云端连接</div>
+    <div class="field">
+      <label for="cloud_endpoint">Ingest 服务地址</label>
+      <input type="text" id="cloud_endpoint" value="https://erp.temu.chat/cloud" readonly />
+      <div class="hint">数据上报到 <code>{URL}/api/ingest/v1/batch</code></div>
+    </div>
+    <div class="field">
+      <label for="auth_token">访问 Token (JWT)</label>
+      <div class="input-wrap">
+        <input type="password" id="auth_token" placeholder="ey..." />
+        <button class="toggle-vis" id="toggleToken" title="显示/隐藏">👁</button>
+      </div>
+      <div class="hint">请求头 <code>Authorization: Bearer {token}</code></div>
+    </div>
+    <div class="field">
+      <label>设备 ID</label>
+      <input type="text" id="device_id" readonly />
+      <div class="hint">只读，用于云端识别同一物理机器</div>
+    </div>
   </div>
 
-  <div class="field">
-    <label for="auth_token">访问 Token (JWT)</label>
-    <input type="password" id="auth_token" placeholder="ey..." />
-    <div class="hint">附在 <code>Authorization: Bearer {token}</code> 头里</div>
+  <div class="card">
+    <div class="card-title">操作</div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="save">保存配置</button>
+      <button class="btn btn-secondary" id="test">测试连通性</button>
+      <button class="btn btn-danger" id="purge">清空队列</button>
+    </div>
+    <div class="banner" id="banner"></div>
   </div>
 
-  <div class="field">
-    <label>设备 ID</label>
-    <input type="text" id="device_id" readonly />
-    <div class="hint">只读，云端用它把同一物理机器的不同店铺归并</div>
+  <div class="card">
+    <div class="card-title">监控范围</div>
+    <div class="hint" style="margin: 0;">
+      URL 白名单与黑名单内置在 <code>hook-config.js</code>。
+      当前白名单覆盖 221 个接口，phantom / pftk / thtk 等反爬埋点在黑名单中不上报。
+    </div>
   </div>
 
-  <div class="row">
-    <button class="primary" id="save">保存</button>
-    <button id="test">测试连通性</button>
-    <button class="danger" id="purge">清空待上报队列</button>
-  </div>
-  <div id="banner"></div>
-
-  <hr />
-  <h2 style="font-size: 14px;">监控范围</h2>
-  <div class="hint">
-    URL 白名单与黑名单当前内置在 <code>web/background/hook-config.js</code>，热更下发会在 M3 阶段引入。
-    当前白名单覆盖 218 个接口（基于你浏览器中实测），其中 phantom / pftk / thtk 等反爬埋点路径在黑名单中，不上报。
-  </div>
   <script src="options.js"></script>
 </body>
 </html>

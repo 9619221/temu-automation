@@ -21,6 +21,7 @@ const ALARM_ENROLL = "temu-monitor.enroll"; // 轮询云端待报名任务
 const ALARM_SALES_TREND = "temu-monitor.sales-trend";
 const ALARM_REVIEW = "temu-monitor.review";
 const ALARM_HPF = "temu-monitor.hpf";
+const ALARM_SHOP_STATS = "temu-monitor.shop-stats";
 const STATS_KEY = "temu_monitor_stats";
 const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
@@ -149,6 +150,14 @@ const COMPLIANCE_MAX_MALLS_PER_RUN = 8;
 const COMPLIANCE_MAX_PAGES = 10;
 const COMPLIANCE_PAGE_SIZE = 50;
 const COMPLIANCE_PAGE_DELAY_MS = 500;
+// 合规属性主动采集：制造商/欧代/土代/进口商，用于条码标签打印自动填充。
+// 接口 /ms/bg-flux-ms/compliance_property/page_query，带 mallid 头。
+// 与合规巡查共用 alarm（ALARM_COMPLIANCE），独立 state key 控制间隔。
+const COMPLIANCE_PROP_STATE_KEY = "temu_monitor_compliance_prop_state";
+const COMPLIANCE_PROP_RUN_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h 一轮（数据变化慢）
+const COMPLIANCE_PROP_MAX_PAGES = 20;
+const COMPLIANCE_PROP_PAGE_SIZE = 50;
+const COMPLIANCE_PROP_PAGE_DELAY_MS = 600;
 const FLOW_STATE_KEY = "temu_monitor_flow_state";
 const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
 const FLOW_PAGE_SIZE = 100;
@@ -183,6 +192,27 @@ const AFTERSALES_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const AFTERSALES_PAGE_SIZE = 50;
 const AFTERSALES_MAX_PAGES = 20; // 50×20 = 1000 条/店
 const AFTERSALES_PAGE_DELAY_MS = 600;
+// 店铺统计主动采集（流量/DSR/活动总览/商品数据/优惠券）：SW 后台定时按店调 agentseller API，
+// 带 mallid 头（不需要 anti-content）。数据 enqueue→cloud parseMallTraffic/parseMallDsr/parseMallActivityOverview/parseGoodsDataShow/parseCouponDaily 入库。
+const SHOP_STATS_STATE_KEY = "temu_monitor_shop_stats_state";
+const SHOP_STATS_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
+const SHOP_STATS_MAX_MALLS_PER_RUN = 8;
+const SHOP_STATS_PAGE_DELAY_MS = 500;
+const SHOP_STATS_PROBES = [
+  { kind: "fetch-mall-traffic", path: "/bg-brando-mms/supplier/data/center/mallFlow/getMallVisitPayPercent", body: {} },
+  { kind: "fetch-mall-visit-pay", path: "/bg-brando-mms/supplier/data/center/mallInfo/mallVisitPay", body: {} },
+  { kind: "fetch-mall-dsr", path: "/bg-brando-mms/supplier/data/center/mallDsr/dsrResult", body: {} },
+  { kind: "fetch-mall-activity-overview", path: "/bg-goku-mms/api/kiana/gamblers/marketing/activity/queryMallActivityOverView", body: {} },
+  { kind: "fetch-mall-activity-type-list", path: "/bg-goku-mms/api/kiana/gamblers/marketing/activity/queryMallActivityTypeList", body: {} },
+  { kind: "fetch-coupon-daily", path: "/bg-goku-mms/api/kiana/gamblers/marketing/coupon/couponDailyList", body: { pageNo: 1, pageSize: 1 } },
+];
+const SHOP_STATS_GOODS_DATA_PATH = "/bg-brando-mms/supplier/data/center/goodsDataShow/overviewList";
+const SHOP_STATS_GOODS_DATA_PAGE_SIZE = 50;
+const SHOP_STATS_GOODS_DATA_MAX_PAGES = 10;
+const ACTIVITY_LIST_PATH = "/bg-goku-mms/api/kiana/gamblers/marketing/enroll/activity/list";
+const ACTIVITY_LIST_PAGE_SIZE = 50;
+const ACTIVITY_LIST_MAX_PAGES = 10;
+
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -221,6 +251,8 @@ chrome.runtime.onInstalled.addListener(async () => {
   await ensureRuntimeDefaults();
   // reload/更新扩展时清品质采集节流(last_success_at),让新版立即采一次;SW 唤醒走 onStartup 不清,保留每店 6h 节流
   try { const qs = (await getStorage([QUALITY_STATE_KEY]))[QUALITY_STATE_KEY] || {}; await setStorage({ [QUALITY_STATE_KEY]: { ...qs, last_success_at: 0 } }); } catch {}
+  // 清合规属性采集节流，让更新后立即采一次制造商/欧代/土代
+  try { await setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { last_success_at: 0 } }); } catch {}
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -237,9 +269,10 @@ async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_SETTLEMENT, { periodInMinutes: Math.max(1, SETTLEMENT_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_FUND_DETAIL, { periodInMinutes: Math.max(1, FUND_DETAIL_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_PRICE, { periodInMinutes: Math.max(1, PRICE_RUN_INTERVAL_MS / 60000) });
-  chrome.alarms.create(ALARM_COMPLIANCE, { periodInMinutes: Math.max(1, COMPLIANCE_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_COMPLIANCE, { delayInMinutes: 1, periodInMinutes: Math.max(1, COMPLIANCE_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_SHOP_STATS, { periodInMinutes: Math.max(1, SHOP_STATS_RUN_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY, INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY]);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY, INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY, SHOP_STATS_STATE_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
   if (!cur[SALES_TREND_STATE_KEY]) {
@@ -287,6 +320,13 @@ async function ensureRuntimeDefaults() {
       enabled: true,
       updated_at: Date.now(),
       reason: "enabled_for_fund_detail_automation",
+    };
+  }
+  if (!cur[SHOP_STATS_STATE_KEY]) {
+    patch[SHOP_STATS_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_shop_stats_automation",
     };
   }
   if (!cur[COLLECTOR_STATE_KEY]) {
@@ -379,6 +419,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === ALARM_COMPLIANCE) {
     collectComplianceFromTargets().catch((e) => console.warn("[sw] compliance collect err", e?.message || e));
+    collectCompliancePropertyFromMalls().catch((e) => console.warn("[sw] compliance-property collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_SHOP_STATS) {
+    collectShopStatsFromTargets().catch((e) => console.warn("[sw] shop-stats collect err", e?.message || e));
     return;
   }
   if (alarm.name !== ALARM_FLUSH) return;
@@ -2051,6 +2096,79 @@ async function collectComplianceFromTargets() {
   return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
 }
 
+// 合规属性主动采集：制造商/欧代/土代/进口商信息。
+// 接口：POST /ms/bg-flux-ms/compliance_property/page_query（带 mallid 头）。
+// 复用 getAllAgentSellerMalls 取当前打开 tab 的登录店。
+async function collectCompliancePropertyFromMalls() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", COMPLIANCE_PROP_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[COMPLIANCE_PROP_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < COMPLIANCE_PROP_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const malls = await getAllAgentSellerMalls();
+  let mallCount = 0, callCount = 0, enqueuedCount = 0, errorCount = 0;
+
+  for (const m of malls) {
+    const mallId = String(m?.mallId || "").trim();
+    const origin = m?.origin || "https://agentseller.temu.com";
+    if (!mallId) continue;
+    mallCount++;
+    const siteTag = (origin.match(/\/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
+    const url = `${origin}/ms/bg-flux-ms/compliance_property/page_query`;
+    let total = null;
+    for (let page = 1; page <= COMPLIANCE_PROP_MAX_PAGES; page++) {
+      const requestBody = JSON.stringify({ pageNo: page, pageSize: COMPLIANCE_PROP_PAGE_SIZE });
+      callCount++;
+      let listLen = 0;
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object" && body.success !== false) {
+          const result = body.result || body.data || {};
+          const list = result.pageItems || result.dataList || result.list || result.items || [];
+          listLen = Array.isArray(list) ? list.length : 0;
+          if (total == null) {
+            const t = Number(result.total || result.totalCount || 0);
+            if (Number.isFinite(t)) total = t;
+          }
+          if (listLen > 0) {
+            await enqueue({
+              kind: "fetch-active-compliance-property", url, method: "POST", status: resp.status, ts: Date.now(),
+              site: siteTag, page: "background/compliance-property", mall_id: mallId,
+              body, bodyText: text.length > 200000 ? null : text, requestBodyText: requestBody,
+              bodySize: text.length, activeSource: "compliance_property_background",
+            });
+            await bumpStats({ captured_count_delta: 1 });
+            enqueuedCount++;
+          }
+        } else { errorCount++; }
+      } catch { errorCount++; }
+      await new Promise((resolve) => setTimeout(resolve, COMPLIANCE_PROP_PAGE_DELAY_MS));
+      if (listLen < COMPLIANCE_PROP_PAGE_SIZE) break;
+      if (total != null && page * COMPLIANCE_PROP_PAGE_SIZE >= total) break;
+    }
+  }
+
+  await setStorage({
+    [COMPLIANCE_PROP_STATE_KEY]: {
+      ...state, last_run_at: now, last_success_at: Date.now(),
+      last_call_count: callCount, last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount, last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
@@ -2072,17 +2190,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "QUERY_STATUS") {
-    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY, COLLECTOR_STATE_KEY])])
+    const taskKeys = [
+      SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY,
+      COMPLIANCE_STATE_KEY, COMPLIANCE_PROP_STATE_KEY, PRICE_STATE_KEY,
+      INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY,
+      SHOP_STATS_STATE_KEY, FLOW_STATE_KEY, QUALITY_STATE_KEY, PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY,
+    ];
+    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY, COLLECTOR_STATE_KEY, ...taskKeys])])
       .then(([depth, cfg]) => {
+        const tasks = {
+          sales_trend: cfg[SALES_TREND_STATE_KEY] || {},
+          review: cfg[REVIEW_STATE_KEY] || {},
+          hpf: cfg[HPF_STATE_KEY] || {},
+          compliance: cfg[COMPLIANCE_STATE_KEY] || {},
+          compliance_prop: cfg[COMPLIANCE_PROP_STATE_KEY] || {},
+          price: cfg[PRICE_STATE_KEY] || {},
+          income: cfg[INCOME_SUMMARY_STATE_KEY] || {},
+          settlement: cfg[SETTLEMENT_STATE_KEY] || {},
+          fund_detail: cfg[FUND_DETAIL_STATE_KEY] || {},
+          shop_stats: cfg[SHOP_STATS_STATE_KEY] || {},
+          flow: cfg[FLOW_STATE_KEY] || {},
+          quality: cfg[QUALITY_STATE_KEY] || {},
+          products: cfg[PRODUCTS_STATE_KEY] || {},
+          aftersales: cfg[AFTERSALES_STATE_KEY] || {},
+        };
         sendResponse({
           queueDepth: depth,
           stats: cfg[STATS_KEY] || {},
           malls: cfg[MALLS_KEY] || [],
           collector: cfg[COLLECTOR_STATE_KEY] || { enabled: false },
           configured: !!(cfg.cloud_endpoint && cfg.auth_token),
+          tasks,
         });
       })
-      .catch(() => sendResponse({ queueDepth: -1, stats: {}, configured: false }));
+      .catch(() => sendResponse({ queueDepth: -1, stats: {}, configured: false, tasks: {} }));
     return true; // async
   }
 
@@ -2090,6 +2231,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     flush()
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, reason: String(e) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_COMPLIANCE_PROP") {
+    setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { last_success_at: 0 } })
+      .then(() => collectCompliancePropertyFromMalls())
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
     return true;
   }
 
@@ -2653,4 +2802,140 @@ async function collectProductsAndAfterSalesViaPage() {
     await setStorage({ [AFTERSALES_STATE_KEY]: { ...aState, last_run_at: now, ...(afterSalesPages > 0 ? { last_success_at: now } : {}), last_pages: afterSalesPages, last_malls: byOrigin.size } });
   }
   return { ok: true, productPages, afterSalesPages, malls: byOrigin.size };
+}
+
+// ---------- 店铺统计主动采集（流量/DSR/活动总览/商品数据/优惠券） ----------
+async function collectShopStatsFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", SHOP_STATS_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[SHOP_STATS_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < SHOP_STATS_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [SHOP_STATS_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/review-targets?limit=100`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch { return { ok: false, reason: "targets_failed" }; }
+
+  const start = Number(state.cursor || 0) % Math.max(targets.length, 1);
+  const slice = [];
+  for (let i = 0; i < SHOP_STATS_MAX_MALLS_PER_RUN && i < targets.length; i++) {
+    slice.push(targets[(start + i) % targets.length]);
+  }
+
+  let enqueuedCount = 0;
+  let errorCount = 0;
+  for (const target of slice) {
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    const origin = "https://agentseller.temu.com";
+
+    for (const probe of SHOP_STATS_PROBES) {
+      const url = `${origin}${probe.path}`;
+      const requestBody = JSON.stringify(probe.body);
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: probe.kind, url, method: "POST", status: resp.status, ts: Date.now(),
+            site: "agentseller", page: "background/shop-stats", mall_id: mallId,
+            body, bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody, bodySize: text.length,
+            activeSource: "shop_stats_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        } else { errorCount++; }
+      } catch { errorCount++; }
+      await new Promise((r) => setTimeout(r, SHOP_STATS_PAGE_DELAY_MS));
+    }
+
+    // 商品数据翻页采集
+    for (let page = 1; page <= SHOP_STATS_GOODS_DATA_MAX_PAGES; page++) {
+      const url = `${origin}${SHOP_STATS_GOODS_DATA_PATH}`;
+      const requestBody = JSON.stringify({ pageNum: page, pageSize: SHOP_STATS_GOODS_DATA_PAGE_SIZE });
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: "fetch-goods-data-show", url, method: "POST", status: resp.status, ts: Date.now(),
+            site: "agentseller", page: "background/goods-data", mall_id: mallId,
+            body, bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody, bodySize: text.length,
+            activeSource: "goods_data_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+          const result = body.result || {};
+          const list = result.list || result.pageItems || result.dataList || [];
+          if (!Array.isArray(list) || list.length < SHOP_STATS_GOODS_DATA_PAGE_SIZE) break;
+          const total = Number(result.total || 0);
+          if (total && page * SHOP_STATS_GOODS_DATA_PAGE_SIZE >= total) break;
+        } else { errorCount++; break; }
+      } catch { errorCount++; break; }
+      await new Promise((r) => setTimeout(r, SHOP_STATS_PAGE_DELAY_MS));
+    }
+
+    // 活动商品列表翻页采集
+    for (let page = 1; page <= ACTIVITY_LIST_MAX_PAGES; page++) {
+      const url = `${origin}${ACTIVITY_LIST_PATH}`;
+      const requestBody = JSON.stringify({ pageNo: page, pageSize: ACTIVITY_LIST_PAGE_SIZE });
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: "fetch-activity-list", url, method: "POST", status: resp.status, ts: Date.now(),
+            site: "agentseller", page: "background/activity-list", mall_id: mallId,
+            body, bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody, bodySize: text.length,
+            activeSource: "activity_list_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+          const result = body.result || {};
+          const list = result.list || result.pageItems || result.dataList || [];
+          if (!Array.isArray(list) || list.length < ACTIVITY_LIST_PAGE_SIZE) break;
+          const total = Number(result.total || 0);
+          if (total && page * ACTIVITY_LIST_PAGE_SIZE >= total) break;
+        } else { errorCount++; break; }
+      } catch { errorCount++; break; }
+      await new Promise((r) => setTimeout(r, SHOP_STATS_PAGE_DELAY_MS));
+    }
+  }
+
+  await setStorage({
+    [SHOP_STATS_STATE_KEY]: {
+      ...state, last_run_at: now, last_success_at: Date.now(),
+      cursor: (start + SHOP_STATS_MAX_MALLS_PER_RUN) % Math.max(targets.length, 1),
+      total_malls: targets.length, last_malls: slice.length,
+      last_enqueued: enqueuedCount, last_errors: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, malls: slice.length, enqueuedCount, errorCount };
 }

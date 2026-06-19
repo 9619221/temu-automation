@@ -48,6 +48,7 @@ import dayjs from "dayjs";
 import { useSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import OtherInoutSection from "../components/OtherInoutSection";
+import BarcodeLabelModal from "../components/BarcodeLabelModal";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 import type { TemuStockOrderRow } from "../utils/cloudClient";
@@ -1152,6 +1153,7 @@ export default function QcOutboundCenter() {
     // 多单模式：简单包裹数
     packageCount: number;
   } | null>(null);
+  const [barcodeLabelModal, setBarcodeLabelModal] = useState<{ open: boolean; rows: ConsignDeliverUnifiedRow[] }>({ open: false, rows: [] });
   // 装箱弹窗：查看/编辑某发货单的分箱（单箱模式，改各 SKU 发货数量）。
   const [packageModal, setPackageModal] = useState<{ open: boolean; soId: string; mallId: string; deliveryOrderSn: string; loading: boolean; saving: boolean; rows: Array<{ productSkuId: string; skuNum: number }> } | null>(null);
 
@@ -1431,29 +1433,16 @@ export default function QcOutboundCenter() {
     else message.success(`撤销发货完成：成功 ${ok}、跳过(未扣) ${skip}`);
   }, [unifiedRows, selectedShipKeys, erp]);
 
-  // 打印箱唛：取 Temu 打印页 URL（浏览器打开即印）。需已创建发货单(FH)。
   const handlePrintBoxmark = useCallback(async (row: ConsignDeliverUnifiedRow) => {
     if (!erp?.inventory?.action || !row.soId || !row.rawCloud?.mall_id) return;
     const fh = officialShipState[row.soId]?.deliveryOrderSn || row.rawCloud?.delivery_order_sn;
     if (!fh) { message.warning("该单还没有发货单号，请先创建发货单再打印箱唛"); return; }
     try {
       const r = await erp.inventory.action({ action: "consign_official_print_boxmark", mallId: String(row.rawCloud.mall_id), deliveryOrderSn: fh });
-      if (r?.printUrl) window.open(r.printUrl, "_blank");
+      if (r?.printUrl) window.electronAPI?.app?.openExternal?.(r.printUrl);
       else message.error("未拿到箱唛打印链接");
     } catch (e: any) { message.error(cleanIpcError(e) || "打印箱唛失败"); }
   }, [officialShipState, erp]);
-
-  // 打印商品条码：按该单 SKC 取 Temu 打印页 URL，不依赖发货单、随时可打。
-  const handlePrintLabel = useCallback(async (row: ConsignDeliverUnifiedRow) => {
-    if (!erp?.inventory?.action || !row.rawCloud?.mall_id) return;
-    const skc = row.rawCloud?.skc_id;
-    if (!skc) { message.warning("该单缺少 SKC，无法打印条码"); return; }
-    try {
-      const r = await erp.inventory.action({ action: "consign_official_print_label", mallId: String(row.rawCloud.mall_id), skcIds: [skc] });
-      if (r?.printUrl) window.open(r.printUrl, "_blank");
-      else message.error("未拿到条码打印链接");
-    } catch (e: any) { message.error(cleanIpcError(e) || "打印条码失败"); }
-  }, [erp]);
 
   // 打印面单：发货后平台分配快递单号才有；后端带鉴权下载 PDF→base64，主进程写临时文件用系统阅读器打开（可打印）。
   const handlePrintExpressNote = useCallback(async (row: ConsignDeliverUnifiedRow) => {
@@ -2116,7 +2105,7 @@ export default function QcOutboundCenter() {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                   <Text type="secondary">单行操作（选中官方单）</Text>
-                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintLabel(selectedShipRows[0])}>打印条码</Button>
+                  <Button size="small" disabled={!selectedShipRows.length} onClick={() => setBarcodeLabelModal({ open: true, rows: selectedShipRows })}>打印条码</Button>
                   <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintBoxmark(selectedShipRows[0])}>打印箱唛</Button>
                   <Button size="small" disabled={!selectedShipRows.length} onClick={() => openShipLogistics(selectedShipRows[0])}>物流下单</Button>
                   <Button size="small" disabled={!selectedShipRows.length} onClick={() => handleOpenPackage(selectedShipRows[0])}>装箱</Button>
@@ -2577,6 +2566,12 @@ export default function QcOutboundCenter() {
           </div>
         </Space>
       </Modal>
+
+      <BarcodeLabelModal
+        open={barcodeLabelModal.open}
+        rows={barcodeLabelModal.rows}
+        onClose={() => setBarcodeLabelModal({ open: false, rows: [] })}
+      />
 
     </div>
   );

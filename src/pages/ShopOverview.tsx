@@ -237,6 +237,12 @@ interface OfficialShopHealthRow {
   high_price_limit: number;
   after_sale_ratio_90d: number | null;
   stat_date: string | null;
+  visit_count?: number | null;
+  pay_buyer_count?: number | null;
+  visit_pay_rate?: number | null;
+  dsr_score?: number | null;
+  trade_amount_cents?: number | null;
+  trade_order_count?: number | null;
 }
 
 function normalizeShopHealthKey(value?: string | null) {

@@ -924,6 +924,335 @@ function parseShopStatistics(db, ctx, evt, body) {
   });
 }
 
+// ---------- 活动总览（queryMallActivityOverView / TypeList） ----------
+
+function parseMallActivityOverview(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const enrollable = toNullableInteger(firstDefined(result, [
+    "enrollableCount", "canEnrollCount", "canSignupCount", "availableActivityCount",
+    "waitEnrollCount", "toBeEnrolledNum", "toBeEnrolledCount",
+  ]));
+  const enrolled = toNullableInteger(firstDefined(result, [
+    "enrolledCount", "signedUpCount", "alreadyEnrollCount", "enrolledNum",
+  ]));
+  const ongoing = toNullableInteger(firstDefined(result, [
+    "ongoingCount", "inProgressCount", "runningCount", "activeCount", "ongoingNum",
+  ]));
+  const total = toNullableInteger(firstDefined(result, [
+    "totalCount", "totalActivityCount", "allCount", "total",
+  ]));
+  if ([enrollable, enrolled, ongoing, total].every((v) => v == null)) return;
+  const upsertShopStats = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date,
+      enrollable_activity_count, enrolled_activity_count, ongoing_activity_count, total_activity_count, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date,
+      @enrollable_activity_count, @enrolled_activity_count, @ongoing_activity_count, @total_activity_count, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      enrollable_activity_count = COALESCE(excluded.enrollable_activity_count, enrollable_activity_count),
+      enrolled_activity_count   = COALESCE(excluded.enrolled_activity_count, enrolled_activity_count),
+      ongoing_activity_count    = COALESCE(excluded.ongoing_activity_count, ongoing_activity_count),
+      total_activity_count      = COALESCE(excluded.total_activity_count, total_activity_count),
+      sources_json              = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at           = datetime('now')
+  `);
+  upsertShopStats.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: eventMallId(ctx, evt),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    enrollable_activity_count: enrollable,
+    enrolled_activity_count: enrolled,
+    ongoing_activity_count: ongoing,
+    total_activity_count: total,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
+// ---------- 店铺流量 / 经营数据（mallFlow / mallInfo） ----------
+
+function parseMallTraffic(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const visit_count = toNullableInteger(firstDefined(result, [
+    "visitCount", "mallVisitCount", "totalVisitors", "visitorsNum", "visitNum", "uv",
+  ]));
+  const pay_buyer_count = toNullableInteger(firstDefined(result, [
+    "payBuyerCount", "payCount", "payNum", "payUserCount", "payVisitorsNum", "buyerNum",
+  ]));
+  const visit_pay_rate = toNullableNumber(firstDefined(result, [
+    "visitPayRate", "visitPayPercent", "payRate", "conversionRate", "payConversionRate",
+  ]));
+  const attention_count = toNullableInteger(firstDefined(result, [
+    "attentionCount", "collectCount", "followCount", "favoriteCount",
+  ]));
+  const attention_rate = toNullableNumber(firstDefined(result, [
+    "attentionRate", "attentionPercent", "mallAttentionPercent", "collectRate",
+  ]));
+  const trade_amount_cents = toCents(firstDefined(result, [
+    "tradeAmount", "payAmount", "gmv", "saleAmount", "totalPayAmount",
+  ]), "tradeAmount");
+  const trade_order_count = toNullableInteger(firstDefined(result, [
+    "tradeOrderCount", "orderCount", "payOrderCount", "totalOrderCount",
+  ]));
+  if ([visit_count, pay_buyer_count, visit_pay_rate, attention_count, trade_amount_cents, trade_order_count].every((v) => v == null)) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date,
+      visit_count, pay_buyer_count, visit_pay_rate, attention_count, attention_rate,
+      trade_amount_cents, trade_order_count, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date,
+      @visit_count, @pay_buyer_count, @visit_pay_rate, @attention_count, @attention_rate,
+      @trade_amount_cents, @trade_order_count, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      visit_count        = COALESCE(excluded.visit_count, visit_count),
+      pay_buyer_count    = COALESCE(excluded.pay_buyer_count, pay_buyer_count),
+      visit_pay_rate     = COALESCE(excluded.visit_pay_rate, visit_pay_rate),
+      attention_count    = COALESCE(excluded.attention_count, attention_count),
+      attention_rate     = COALESCE(excluded.attention_rate, attention_rate),
+      trade_amount_cents = COALESCE(excluded.trade_amount_cents, trade_amount_cents),
+      trade_order_count  = COALESCE(excluded.trade_order_count, trade_order_count),
+      sources_json       = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at    = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: eventMallId(ctx, evt),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    visit_count, pay_buyer_count, visit_pay_rate, attention_count, attention_rate,
+    trade_amount_cents, trade_order_count,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
+// ---------- DSR 评分（mallDsr） ----------
+
+function parseMallDsr(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const dsr_score = toNullableNumber(firstDefined(result, [
+    "dsrScore", "score", "totalScore", "overallScore", "mallScore",
+  ]));
+  const dsr_logistics_score = toNullableNumber(firstDefined(result, [
+    "logisticsScore", "logisticsDsrScore", "deliveryScore", "shippingScore",
+  ]));
+  const dsr_service_score = toNullableNumber(firstDefined(result, [
+    "serviceScore", "serviceDsrScore", "customerServiceScore",
+  ]));
+  const dsr_description_score = toNullableNumber(firstDefined(result, [
+    "descriptionScore", "descriptionDsrScore", "productScore", "goodsScore",
+  ]));
+  if ([dsr_score, dsr_logistics_score, dsr_service_score, dsr_description_score].every((v) => v == null)) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date,
+      dsr_score, dsr_logistics_score, dsr_service_score, dsr_description_score, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date,
+      @dsr_score, @dsr_logistics_score, @dsr_service_score, @dsr_description_score, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      dsr_score             = COALESCE(excluded.dsr_score, dsr_score),
+      dsr_logistics_score   = COALESCE(excluded.dsr_logistics_score, dsr_logistics_score),
+      dsr_service_score     = COALESCE(excluded.dsr_service_score, dsr_service_score),
+      dsr_description_score = COALESCE(excluded.dsr_description_score, dsr_description_score),
+      sources_json          = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at       = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: eventMallId(ctx, evt),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    dsr_score, dsr_logistics_score, dsr_service_score, dsr_description_score,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
+// ---------- 商品数据看板（goodsDataShow） ----------
+
+function parseGoodsDataShow(db, ctx, evt, body) {
+  const list = pickList(body);
+  if (!Array.isArray(list) || !list.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_goods_data_snapshot (
+      id, tenant_id, mall_id, site, stat_date,
+      product_id, goods_id, skc_id, title, thumb_url, category_name,
+      expose_num, click_num, detail_visit_num, detail_visitor_num,
+      add_cart_num, collect_num, order_num, pay_amount_cents, guv, pv,
+      module_name, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date,
+      @product_id, @goods_id, @skc_id, @title, @thumb_url, @category_name,
+      @expose_num, @click_num, @detail_visit_num, @detail_visitor_num,
+      @add_cart_num, @collect_num, @order_num, @pay_amount_cents, @guv, @pv,
+      @module_name, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, product_id, stat_date) DO UPDATE SET
+      goods_id          = COALESCE(excluded.goods_id, goods_id),
+      skc_id            = COALESCE(excluded.skc_id, skc_id),
+      title             = COALESCE(excluded.title, title),
+      thumb_url         = COALESCE(excluded.thumb_url, thumb_url),
+      category_name     = COALESCE(excluded.category_name, category_name),
+      expose_num        = COALESCE(excluded.expose_num, expose_num),
+      click_num         = COALESCE(excluded.click_num, click_num),
+      detail_visit_num  = COALESCE(excluded.detail_visit_num, detail_visit_num),
+      detail_visitor_num= COALESCE(excluded.detail_visitor_num, detail_visitor_num),
+      add_cart_num       = COALESCE(excluded.add_cart_num, add_cart_num),
+      collect_num       = COALESCE(excluded.collect_num, collect_num),
+      order_num         = COALESCE(excluded.order_num, order_num),
+      pay_amount_cents  = COALESCE(excluded.pay_amount_cents, pay_amount_cents),
+      guv               = COALESCE(excluded.guv, guv),
+      pv                = COALESCE(excluded.pv, pv),
+      module_name       = COALESCE(excluded.module_name, module_name),
+      source_event_id   = excluded.source_event_id,
+      sources_json      = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at   = datetime('now')
+  `);
+  const stat_date = normalizeStatDate(firstDefined(body?.result || body?.data || {}, ["statDate", "date", "dataDate", "updateTime"]), evt);
+  const mall_id = eventMallId(ctx, evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    const product_id = toNullableString(firstDefined(row, ["productId", "goodsId", "spuId", "productSpuId"]));
+    if (!product_id) continue;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || "",
+      stat_date,
+      product_id,
+      goods_id: toNullableString(firstDefined(row, ["goodsId", "goods_id"])),
+      skc_id: toNullableString(firstDefined(row, ["productSkcId", "skcId"])),
+      title: toNullableString(firstDefined(row, ["goodsName", "productName", "title", "name"]), 500),
+      thumb_url: toNullableString(firstDefined(row, ["thumbUrl", "imageUrl", "mainImage", "goodsImg"]), 1000),
+      category_name: toNullableString(firstDefined(row, ["categoryName", "catName", "catePathName"]), 300),
+      expose_num: toNullableInteger(firstDefined(row, ["exposeNum", "exposureCount", "impressionNum", "showNum"])),
+      click_num: toNullableInteger(firstDefined(row, ["clickNum", "clickCount", "tapNum"])),
+      detail_visit_num: toNullableInteger(firstDefined(row, ["detailVisitNum", "detailPageView", "detailPv"])),
+      detail_visitor_num: toNullableInteger(firstDefined(row, ["detailVisitorNum", "detailUv", "detailVisitUv"])),
+      add_cart_num: toNullableInteger(firstDefined(row, ["addToCartNum", "addCartNum", "addToCartUserNum", "cartNum"])),
+      collect_num: toNullableInteger(firstDefined(row, ["collectNum", "collectUserNum", "favoriteNum"])),
+      order_num: toNullableInteger(firstDefined(row, ["orderNum", "payOrderNum", "payGoodsNum", "saleNum"])),
+      pay_amount_cents: toCents(firstDefined(row, ["payAmount", "gmv", "saleAmount", "tradeAmount"]), "payAmount"),
+      guv: toNullableInteger(firstDefined(row, ["guv", "goodsUv", "productUv"])),
+      pv: toNullableInteger(firstDefined(row, ["pv", "goodsPv", "productPv", "pageView"])),
+      module_name: toNullableString(firstDefined(row, ["moduleName", "module", "channelName"]), 200),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
+// ---------- 优惠券日报（couponDailyList） ----------
+
+function parseCouponDaily(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const list = Array.isArray(result) ? result : (result.list || result.items || result.dataList);
+  const count = Array.isArray(list) ? list.length : toNullableInteger(firstDefined(result, ["activeCount", "totalCount", "count"]));
+  if (count == null && !Array.isArray(list)) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date, coupon_active_count, sources_json
+    ) VALUES (@id, @tenant_id, @mall_id, @site, @stat_date, @coupon_active_count, @sources_json)
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      coupon_active_count = COALESCE(excluded.coupon_active_count, coupon_active_count),
+      sources_json = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: eventMallId(ctx, evt),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    coupon_active_count: count,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
+// ---------- 每日商品咨询访问（dailyMallGoods） ----------
+
+function parseDailyMallGoods(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const count = toNullableInteger(firstDefined(result, [
+    "consultVisitCount", "visitCount", "totalCount", "count",
+  ]));
+  if (count == null) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date, daily_consult_visit_count, sources_json
+    ) VALUES (@id, @tenant_id, @mall_id, @site, @stat_date, @daily_consult_visit_count, @sources_json)
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      daily_consult_visit_count = COALESCE(excluded.daily_consult_visit_count, daily_consult_visit_count),
+      sources_json = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: eventMallId(ctx, evt),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    daily_consult_visit_count: count,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
+// ---------- 商品 UV/PV（goodsInfo/guvPv） ----------
+
+function parseGoodsInfoGuvPv(db, ctx, evt, body) {
+  const list = pickList(body);
+  if (!Array.isArray(list) || !list.length) return;
+  const stat_date = normalizeStatDate(firstDefined(body?.result || body?.data || {}, ["statDate", "date"]), evt);
+  const mall_id = eventMallId(ctx, evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  const upsert = db.prepare(`
+    INSERT INTO temu_goods_data_snapshot (
+      id, tenant_id, mall_id, site, stat_date, product_id, goods_id, guv, pv,
+      source_event_id, sources_json
+    ) VALUES (@id, @tenant_id, @mall_id, @site, @stat_date, @product_id, @goods_id, @guv, @pv,
+      @source_event_id, @sources_json)
+    ON CONFLICT(tenant_id, mall_id, product_id, stat_date) DO UPDATE SET
+      goods_id    = COALESCE(excluded.goods_id, goods_id),
+      guv         = COALESCE(excluded.guv, guv),
+      pv          = COALESCE(excluded.pv, pv),
+      source_event_id = excluded.source_event_id,
+      sources_json = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    const product_id = toNullableString(firstDefined(row, ["productId", "goodsId", "spuId"]));
+    if (!product_id) continue;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || "",
+      stat_date,
+      product_id,
+      goods_id: toNullableString(firstDefined(row, ["goodsId", "goods_id"])),
+      guv: toNullableInteger(firstDefined(row, ["guv", "goodsUv", "uv"])),
+      pv: toNullableInteger(firstDefined(row, ["pv", "goodsPv", "pageView"])),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
 // ---------- magneto/price-adjust：申报价 ----------
 
 function parsePriceAdjust(db, ctx, evt, body) {
@@ -2376,10 +2705,131 @@ function parseActivitySnapshot(db, ctx, evt, body) {
   });
 }
 
+// ---------- 合规属性(制造商/欧代/土代/进口商):compliance_property API ----------
+
+function parseComplianceProperty(db, ctx, evt, body) {
+  const items = pickList(body);
+  if (!Array.isArray(items) || !items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_compliance_property (
+      id, tenant_id, mall_id, site, product_skc_id, product_name,
+      manufacturer_name, manufacturer_address, manufacturer_email,
+      ec_rep_name, ec_rep_address, ec_rep_email,
+      tur_rep_name, tur_rep_address,
+      importer_name, importer_address,
+      raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @product_skc_id, @product_name,
+      @manufacturer_name, @manufacturer_address, @manufacturer_email,
+      @ec_rep_name, @ec_rep_address, @ec_rep_email,
+      @tur_rep_name, @tur_rep_address,
+      @importer_name, @importer_address,
+      @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, product_skc_id) DO UPDATE SET
+      site                 = COALESCE(excluded.site, site),
+      product_name         = COALESCE(excluded.product_name, product_name),
+      manufacturer_name    = COALESCE(excluded.manufacturer_name, manufacturer_name),
+      manufacturer_address = COALESCE(excluded.manufacturer_address, manufacturer_address),
+      manufacturer_email   = COALESCE(excluded.manufacturer_email, manufacturer_email),
+      ec_rep_name          = COALESCE(excluded.ec_rep_name, ec_rep_name),
+      ec_rep_address       = COALESCE(excluded.ec_rep_address, ec_rep_address),
+      ec_rep_email         = COALESCE(excluded.ec_rep_email, ec_rep_email),
+      tur_rep_name         = COALESCE(excluded.tur_rep_name, tur_rep_name),
+      tur_rep_address      = COALESCE(excluded.tur_rep_address, tur_rep_address),
+      importer_name        = COALESCE(excluded.importer_name, importer_name),
+      importer_address     = COALESCE(excluded.importer_address, importer_address),
+      raw_json             = excluded.raw_json,
+      source_event_id      = excluded.source_event_id,
+      sources_json         = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at      = datetime('now')
+  `);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const item of items) {
+    const skc = toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id", "productSKCId"]));
+    if (!skc) continue;
+    const props = extractComplianceProps(item);
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id: ctx.mall_id || "",
+      site: ctx.site || null,
+      product_skc_id: skc,
+      product_name: toNullableString(firstDefined(item, ["productName", "goodsName", "skcName", "product_name"])),
+      manufacturer_name: props.manufacturer_name,
+      manufacturer_address: props.manufacturer_address,
+      manufacturer_email: props.manufacturer_email,
+      ec_rep_name: props.ec_rep_name,
+      ec_rep_address: props.ec_rep_address,
+      ec_rep_email: props.ec_rep_email,
+      tur_rep_name: props.tur_rep_name,
+      tur_rep_address: props.tur_rep_address,
+      importer_name: props.importer_name,
+      importer_address: props.importer_address,
+      raw_json: JSON.stringify(item).slice(0, 20000),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
+function extractComplianceProps(item) {
+  const out = {
+    manufacturer_name: null, manufacturer_address: null, manufacturer_email: null,
+    ec_rep_name: null, ec_rep_address: null, ec_rep_email: null,
+    tur_rep_name: null, tur_rep_address: null,
+    importer_name: null, importer_address: null,
+  };
+  const propsList = item.compliancePropertyList || item.propertyList || item.properties || item.complianceProperties || [];
+  if (Array.isArray(propsList) && propsList.length) {
+    for (const p of propsList) {
+      const name = String(p.propertyName || p.name || p.type || p.key || "").toUpperCase();
+      const val = p.propertyValue || p.value || p.content || "";
+      const addr = p.propertyValueAddress || p.address || p.addressValue || "";
+      const email = p.propertyValueEmail || p.email || p.emailValue || "";
+      if (/MANUFACTURER|制造商/.test(name)) {
+        out.manufacturer_name = val || null;
+        out.manufacturer_address = addr || null;
+        out.manufacturer_email = email || null;
+      } else if (/EC.?REP|欧代/.test(name)) {
+        out.ec_rep_name = val || null;
+        out.ec_rep_address = addr || null;
+        out.ec_rep_email = email || null;
+      } else if (/TUR.?REP|土.{0,2}代/.test(name)) {
+        out.tur_rep_name = val || null;
+        out.tur_rep_address = addr || null;
+      } else if (/IMPORTER|进口商/.test(name)) {
+        out.importer_name = val || null;
+        out.importer_address = addr || null;
+      }
+    }
+  }
+  if (!out.manufacturer_name) {
+    out.manufacturer_name = toNullableString(firstDefined(item, ["manufacturerName", "manufacturer", "mfrName"]));
+    out.manufacturer_address = toNullableString(firstDefined(item, ["manufacturerAddress", "mfrAddress"]));
+    out.manufacturer_email = toNullableString(firstDefined(item, ["manufacturerEmail", "mfrEmail"]));
+  }
+  if (!out.ec_rep_name) {
+    out.ec_rep_name = toNullableString(firstDefined(item, ["ecRepName", "ecRep", "authorizedRepresentativeName"]));
+    out.ec_rep_address = toNullableString(firstDefined(item, ["ecRepAddress", "authorizedRepresentativeAddress"]));
+    out.ec_rep_email = toNullableString(firstDefined(item, ["ecRepEmail", "authorizedRepresentativeEmail"]));
+  }
+  if (!out.tur_rep_name) {
+    out.tur_rep_name = toNullableString(firstDefined(item, ["turRepName", "turkeyRepName"]));
+    out.tur_rep_address = toNullableString(firstDefined(item, ["turRepAddress", "turkeyRepAddress"]));
+  }
+  if (!out.importer_name) {
+    out.importer_name = toNullableString(firstDefined(item, ["importerName", "importer"]));
+    out.importer_address = toNullableString(firstDefined(item, ["importerAddress"]));
+  }
+  return out;
+}
+
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
   { match: /\/retrieval\/board\/pageQuery/, fn: parseComplianceBoard, name: "complianceBoard" },
+  { match: /compliance_property\/(page_query|query_detail|query_template)/, fn: parseComplianceProperty, name: "complianceProperty" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|listWarehouse|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/(detail|trend)/, fn: parseProductFlowTrend, name: "productFlowTrend" },
@@ -2392,6 +2842,13 @@ const PARSERS = [
   { match: /\/bg-luna-agent-seller\/review\/pageQuery/i, fn: parseTemuReview, name: "temuReview" },
   { match: /\/mms\/api\/appalachian\/afs\/queryPageV3|\/dunland\/api\/gmp\/returnSupplier\//, fn: parseTemuAfterSales, name: "temuAfterSales" },
   { match: /\/tmod_punish\/|pageQueryDeliveryBatch|queryAllFeedbackRecordInfo|searchQcSubBill|queryWeekInboundExceptionDetailInfo|returnSupplier|high\/price\/flow\/reduce|queryCompetitor|querySiteTargetPrice|batchQueryCustomerQueryLimit|bg-brando-mms\/supplier\/data\/center\/skc\/sales\/data|purchase\/manager\/querySubOrderList/, fn: parseOperationRisk, name: "operationRisk" },
+  { match: /queryMallActivityOverView|queryMallActivityTypeList/, fn: parseMallActivityOverview, name: "mallActivityOverview" },
+  { match: /mallFlow\/|mallTradeFlowRT|mallVisitPay|mallPayList|mallAttentionPercent|mallVisitPayPercent|mallVisitPayAttentionList|getMallVisitPayPercent|queryMallFlowOverViewReadyTime/, fn: parseMallTraffic, name: "mallTraffic" },
+  { match: /mallDsr\/|queryDsrResult|mallScore\/queryMallConfigurationList/, fn: parseMallDsr, name: "mallDsr" },
+  { match: /goodsDataShow\/(overviewList|detailList|moduleShow)|goodsDateOverview|queryGoodsPageOverView|queryGoodsPageOverViewReadyDate/, fn: parseGoodsDataShow, name: "goodsDataShow" },
+  { match: /coupon\/couponDailyList/, fn: parseCouponDaily, name: "couponDaily" },
+  { match: /dailyMallGoods\/consultVisit/, fn: parseDailyMallGoods, name: "dailyMallGoods" },
+  { match: /goodsInfo\/guvPv|goodsInfo\/noGoods/, fn: parseGoodsInfoGuvPv, name: "goodsInfoGuvPv" },
 ];
 
 export function dispatchParsers(db, ctx, items) {

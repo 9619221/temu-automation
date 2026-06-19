@@ -693,4 +693,56 @@ r.post("/v1/batch", authMiddleware, async (req, res) => {
   res.json({ ok: true, inserted });
 });
 
+// 合规属性查询：桌面端打印标签时拉取制造商/欧代/土代/进口商
+r.get("/v1/compliance-properties", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const mallId = req.query.mall_id || "";
+  const skcId = req.query.skc_id || "";
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+  try {
+    let rows;
+    if (skcId) {
+      rows = db.prepare(`
+        SELECT product_skc_id, product_name, mall_id,
+               manufacturer_name, manufacturer_address, manufacturer_email,
+               ec_rep_name, ec_rep_address, ec_rep_email,
+               tur_rep_name, tur_rep_address,
+               importer_name, importer_address,
+               last_updated_at
+        FROM temu_compliance_property
+        WHERE tenant_id = ? AND product_skc_id = ?
+        ORDER BY last_updated_at DESC LIMIT ?
+      `).all(tenantId, skcId, limit);
+    } else if (mallId) {
+      rows = db.prepare(`
+        SELECT product_skc_id, product_name, mall_id,
+               manufacturer_name, manufacturer_address, manufacturer_email,
+               ec_rep_name, ec_rep_address, ec_rep_email,
+               tur_rep_name, tur_rep_address,
+               importer_name, importer_address,
+               last_updated_at
+        FROM temu_compliance_property
+        WHERE tenant_id = ? AND mall_id = ?
+        ORDER BY last_updated_at DESC LIMIT ?
+      `).all(tenantId, mallId, limit);
+    } else {
+      rows = db.prepare(`
+        SELECT product_skc_id, product_name, mall_id,
+               manufacturer_name, manufacturer_address, manufacturer_email,
+               ec_rep_name, ec_rep_address, ec_rep_email,
+               tur_rep_name, tur_rep_address,
+               importer_name, importer_address,
+               last_updated_at
+        FROM temu_compliance_property
+        WHERE tenant_id = ?
+        ORDER BY last_updated_at DESC LIMIT ?
+      `).all(tenantId, limit);
+    }
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e).slice(0, 200) });
+  }
+});
+
 export default r;

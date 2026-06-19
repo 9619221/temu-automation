@@ -37,7 +37,8 @@ function getMallShipCreds(db, mallId) {
 
 // 调一个官方接口，success!=true 时抛错（带 errorCode）。
 async function callShipApi(creds, type, bizParams = {}) {
-  const r = await callOpenApi({ ...creds, type, bizParams });
+  const region = /^bg\.(glo|qtg)\./.test(type) ? "PA" : creds.region;
+  const r = await callOpenApi({ ...creds, region, type, bizParams });
   const body = r && r.response;
   if (!body || body.success !== true) {
     const err = new Error((body && body.errorMsg) || `${type} 调用失败`);
@@ -486,7 +487,13 @@ async function sendOfficialPacking(opts) {
 // ── 打印（箱唛 / 商品条码）──────────────────────────────────────────
 // Temu 官方：带 return_data_key=true 调接口，返回的 result 是个 dataKey 字符串，
 // 拼成 tool/print?dataKey=xxx 用浏览器打开就是渲染好的打印页（10 分钟单次有效，无需自渲染条码）。
-const TEMU_PRINT_BASE = "https://openapi.kuajingmaihuo.com/tool/print";
+const TEMU_PRINT_BASES = {
+  CN: "https://openapi.kuajingmaihuo.com/tool/print",
+  PA: "https://openapi-b-partner.temu.com/tool/print",
+};
+function getPrintBase(type) {
+  return /^bg\.(glo|qtg)\./.test(type) ? TEMU_PRINT_BASES.PA : TEMU_PRINT_BASES.CN;
+}
 
 // 打印箱唛：要发货单号（创建发货单后才有）。一次可传多个发货单，合并到一份打印页。
 async function printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrderSnList }) {
@@ -494,12 +501,13 @@ async function printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrder
   const list = (deliveryOrderSnList && deliveryOrderSnList.length ? deliveryOrderSnList : [deliveryOrderSn])
     .map((x) => (x != null ? String(x) : "")).filter(Boolean);
   if (!list.length) throw new Error("缺少发货单号 deliveryOrderSn");
-  const dataKey = await callShipApi(creds, "bg.logistics.boxmarkinfo.get", {
+  const type = "bg.logistics.boxmarkinfo.get";
+  const dataKey = await callShipApi(creds, type, {
     deliveryOrderSnList: list,
     return_data_key: "true",
   });
   if (!dataKey || typeof dataKey !== "string") throw new Error("未返回箱唛打印 dataKey");
-  return { dataKey, printUrl: `${TEMU_PRINT_BASE}?dataKey=${encodeURIComponent(dataKey)}` };
+  return { dataKey, printUrl: `${getPrintBase(type)}?dataKey=${encodeURIComponent(dataKey)}` };
 }
 
 // 打印商品条码（SKU 条码）：按 SKC 或 SKU id，不依赖发货单、随时可打。
@@ -511,10 +519,10 @@ async function printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }) {
   if (skcs.length) biz.productSkcIdList = skcs;
   else if (skus.length) biz.productSkuIdList = skus;
   else throw new Error("缺少 SKC/SKU id");
-  // 授权名是 bg.glo.goods.labelv2.get（文档请求样例误写 temu.goods.labelv2.get）。
-  const dataKey = await callShipApi(creds, "bg.glo.goods.labelv2.get", biz);
+  const type = "bg.glo.goods.labelv2.get";
+  const dataKey = await callShipApi(creds, type, biz);
   if (!dataKey || typeof dataKey !== "string") throw new Error("未返回条码打印 dataKey");
-  return { dataKey, printUrl: `${TEMU_PRINT_BASE}?dataKey=${encodeURIComponent(dataKey)}` };
+  return { dataKey, printUrl: `${getPrintBase(type)}?dataKey=${encodeURIComponent(dataKey)}` };
 }
 
 // ── 第三阶段补充：发货前增强（体积/装箱）+ 面单 + 备货单写 ────────────────

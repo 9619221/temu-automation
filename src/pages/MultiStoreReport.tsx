@@ -272,6 +272,9 @@ interface ShopHealthRow {
   high_price_limit: number;
   after_sale_ratio_90d: number | null;
   stat_date: string | null;
+  visit_count?: number | null;
+  dsr_score?: number | null;
+  trade_order_count?: number | null;
 }
 
 interface StoreSalesView {
@@ -1137,6 +1140,9 @@ export default function MultiStoreReport() {
     { title: "30日销量", key: "last30d", width: 110, align: "right", render: (_, r) => fmtNum(r.sales.last30d), sorter: (a, b) => a.sales.last30d - b.sales.last30d },
     { title: "在售", key: "onSale", width: 90, align: "right", render: (_, r) => fmtNum(shopHealthByMall.get(r.store.mall_id)?.on_sale ?? r.store.shop_stats.on_sale_skc) },
     { title: "缺货 SKC", key: "lack", width: 90, align: "right", render: (_, r) => <HeatNum value={shopHealthByMall.get(r.store.mall_id)?.lack_skc ?? r.store.shop_stats.lack_skc} max={maxes.lack} hue="gold" /> },
+    { title: "访客", key: "visit", width: 80, align: "right", render: (_, r) => fmtNum(shopHealthByMall.get(r.store.mall_id)?.visit_count) },
+    { title: "订单", key: "orders", width: 80, align: "right", render: (_, r) => fmtNum(shopHealthByMall.get(r.store.mall_id)?.trade_order_count) },
+    { title: "DSR", key: "dsr", width: 70, align: "right", render: (_, r) => { const d = shopHealthByMall.get(r.store.mall_id)?.dsr_score; return d == null ? "—" : <span style={{ color: d < 4.5 ? "#cf1322" : "#3f8600" }}>{d.toFixed(1)}</span>; } },
     { title: "数据源", key: "source", width: 120, render: (_, r) => r.sales.source === "shopHealth" ? <Tag color="green">官方聚合</Tag> : r.sales.source === "shopStats" ? <Tag color="blue">店铺快照</Tag> : <Tag>SKU汇总</Tag> },
   ];
 
