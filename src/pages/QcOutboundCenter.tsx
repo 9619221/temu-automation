@@ -1302,12 +1302,14 @@ export default function QcOutboundCenter() {
     let receiveAddressInfo = st?.receiveAddressInfo || null;
     let deliveryAddressId = st?.deliveryAddressId || "";
     if (!deliveryOrderSn) {
+      const hide = message.loading("正在查找发货单号...", 0);
       try {
         const lookup = await erp.inventory.action({ action: "consign_official_shiporder_lookup", mallId, soId: row.soId });
         deliveryOrderSn = lookup?.deliveryOrderSn || "";
         if (lookup?.deliveryAddressId && !deliveryAddressId) deliveryAddressId = String(lookup.deliveryAddressId);
         if (lookup?.subWarehouseId && !subWarehouseId) subWarehouseId = String(lookup.subWarehouseId);
       } catch { /* ignore */ }
+      hide();
       if (!deliveryOrderSn) { message.warning("该单还没有创建发货单，请先点「创建发货单」"); return; }
     }
     if (!subWarehouseId || !receiveAddressInfo) {
@@ -1596,7 +1598,7 @@ export default function QcOutboundCenter() {
           const sel = x.matched[x.selectedIdx];
           try {
             const pickupTs = x.selectedScheduleDate && x.selectedPickupHour ? new Date(`${x.selectedScheduleDate}T${x.selectedPickupHour}:${x.selectedPickupMinute || "00"}:00+08:00`).getTime() : undefined;
-            const r = await erp.inventory.action({ action: "consign_official_packing_send", mallId: x.mallId, confirm: true, deliveryAddressId: x.deliveryAddressId, deliveryOrderSnList: [x.deliveryOrderSn], expressCompanyId: sel.expressCompanyId, expressCompanyName: sel.expressCompanyName, predictId: sel.predictId, pickupMethod: sel.pickupMethod ?? 0, predictTotalPackageWeight: Math.ceil(Number(x.weightKg || 1)) * 1000, expressPackageNum: x.packageNum || 1, expectPickUpGoodsTime: pickupTs });
+            const r = await erp.inventory.action({ action: "consign_official_packing_send", mallId: x.mallId, soId: x.soId, confirm: true, deliveryAddressId: x.deliveryAddressId, deliveryOrderSnList: [x.deliveryOrderSn], expressCompanyId: sel.expressCompanyId, expressCompanyName: sel.expressCompanyName, predictId: sel.predictId, pickupMethod: sel.pickupMethod ?? 0, predictTotalPackageWeight: Math.ceil(Number(x.weightKg || 1)) * 1000, expressPackageNum: x.packageNum || 1, expectPickUpGoodsTime: pickupTs });
             setOfficialShipState((s) => ({ ...s, [x.soId]: { ...(s[x.soId] || {}), stage: "shipped", expressBatchSn: r?.expressBatchSn } }));
             ok++;
           } catch (e: any) { fail++; fails.push(`${x.soId}: ${cleanIpcError(e)}`); }
@@ -1959,8 +1961,12 @@ export default function QcOutboundCenter() {
             <Button
               icon={<ReloadOutlined />}
               loading={loading || unifiedLoading}
-              onClick={() => {
+              onClick={async () => {
                 void loadData({ notify: true });
+                const soIds = unifiedRows.map((r: any) => r.soId).filter(Boolean);
+                if (soIds.length && erp?.inventory?.action) {
+                  try { await erp.inventory.action({ action: "consign_sync_ship_status", soIds }); } catch { /* ignore */ }
+                }
                 void loadUnified({
                   page: unifiedPage,
                   pageSize: unifiedPageSize,

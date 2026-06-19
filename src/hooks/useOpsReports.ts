@@ -70,7 +70,7 @@ export function useActivityList(enabled = true) {
         flat.push({ mall_id: p.mall_id, store_code: p.store_code, mall_name: p.mall_name,
           kind: a.kind, title: a.title, status: a.status, activity_id: a.activity_id,
           product_id: p.product_id, activity_type: a.activity_type, sku_id: a.sku_id,
-          sku_ext_code: p.sku_ext_code, skc_id: p.skc_id, product_name: p.product_name, thumb: p.thumb,
+          sku_ext_code: p.sku_ext_code, skc_id: p.skc_id, color_spec: p.color_spec ?? null, product_name: p.product_name, thumb: p.thumb,
           signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
           activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: flat.length });
       }

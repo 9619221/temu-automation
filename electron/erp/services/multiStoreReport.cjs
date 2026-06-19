@@ -3627,28 +3627,42 @@ function buildActivityList(db, options = {}) {
            a.sku_ext_code, a.skc_id, a.signup_price_cents, a.suggested_price_cents,
            a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date, k.wac AS cost,
            a.activity_id, a.product_id, a.activity_type, a.sku_id,
-           sc.title AS prod_title, sc.thumb_url AS thumb
+           sc.title AS prod_title, sc.thumb_url AS thumb,
+           COALESCE(a.sku_attr_text, oa.spec_name, k.color_spec) AS color_spec
       FROM cloud.temu_activity_snapshot a
       JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = a.mall_id
       LEFT JOIN cloud.skc_snapshots sc ON sc.tenant_id = a.tenant_id AND sc.skc_id = a.skc_id
       LEFT JOIN (SELECT internal_sku_code,
-                        MAX(COALESCE(NULLIF(weighted_avg_cost,0), NULLIF(jst_cost_price,0))) AS wac
+                        MAX(COALESCE(NULLIF(weighted_avg_cost,0), NULLIF(jst_cost_price,0))) AS wac,
+                        MAX(color_spec) AS color_spec
                    FROM erp_skus GROUP BY internal_sku_code) k
         ON k.internal_sku_code = a.sku_ext_code
+      LEFT JOIN erp_temu_openapi_sku_sales oa
+        ON oa.mall_id = a.mall_id AND (oa.product_sku_id = a.sku_id OR oa.ext_code = a.sku_ext_code)
      WHERE a.tenant_id = ?
        AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
        ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
      ORDER BY a.mall_id, a.activity_kind
      LIMIT 4000
   `, [tid, tid]);
+  // [DEBUG] 临时诊断：查看 color_spec 三层回退的命中情况
+  if (rows.length > 0) {
+    const sample = rows.slice(0, 5).map(r => ({
+      sku: r.sku_ext_code, sku_id: r.sku_id, color_spec: r.color_spec,
+      raw_keys: Object.keys(r).filter(k => /color|spec|attr/i.test(k))
+    }));
+    console.log("[ACT-DEBUG] color_spec sample (first 5):", JSON.stringify(sample, null, 2));
+    const hasSpec = rows.filter(r => r.color_spec).length;
+    console.log(`[ACT-DEBUG] rows with color_spec: ${hasSpec}/${rows.length}`);
+  }
   const centsToYuan = (v) => (v == null ? null : Number(v) / 100);
   const out = rows.map((a) => ({
     mall_id: a.mall_id, store_code: a.store_code || null, mall_name: a.mall_name || null,
     kind: a.activity_kind || null, title: a.activity_title || null, status: a.activity_status || null,
     activity_id: a.activity_id || null, product_id: a.product_id || null,
     activity_type: a.activity_type != null ? Number(a.activity_type) : null, sku_id: a.sku_id || null,
-    sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null,
+    sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null, color_spec: a.color_spec || null,
     product_name: a.prod_title || a.activity_title || null, thumb: a.thumb || null,
     signup_price: centsToYuan(a.signup_price_cents), suggested_price: centsToYuan(a.suggested_price_cents),
     price_diff: centsToYuan(a.signup_price_diff_cents), activity_stock: toNum(a.activity_stock),
@@ -3679,7 +3693,7 @@ function buildActivityList(db, options = {}) {
     let e = pmap.get(pkey);
     if (!e) {
       e = { key: pkey, mall_id: r.mall_id, store_code: r.store_code, mall_name: r.mall_name,
-        sku_ext_code: r.sku_ext_code, product_id: r.product_id, skc_id: r.skc_id,
+        sku_ext_code: r.sku_ext_code, product_id: r.product_id, skc_id: r.skc_id, color_spec: r.color_spec,
         product_name: r.product_name, thumb: r.thumb,
         act_count: 0, pending_count: 0, best_margin: null, best_profit: null,
         enrolled_count: enrMap.get(`${r.mall_id}|${r.sku_ext_code}`) || 0, kinds: [], activities: [] };

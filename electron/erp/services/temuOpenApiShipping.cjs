@@ -646,6 +646,105 @@ async function cancelOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSnList 
   return { result: res };
 }
 
+const SHIP_STATUS_MAP = { "0": "待发货", "1": "已发货", "2": "已收货", "5": "取消", "6": "异常" };
+
+// 增量同步发货单状态：对指定备货单，调 shiporderv2.get 查最新状态并回写 consign 表。
+async function syncShipOrderStatus({ db, soIds }) {
+  if (!Array.isArray(soIds) || !soIds.length) return { updated: 0 };
+  const placeholders = soIds.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT mall_id, so_id, delivery_order_sn FROM erp_temu_openapi_consign WHERE so_id IN (${placeholders})`
+  ).all(...soIds);
+  // 按 mall 分组：有 delivery_order_sn 的走批量查询，没有的走逐个 subPurchaseOrderSn 查
+  const byMall = new Map();
+  const missingSnByMall = new Map();
+  for (const r of rows) {
+    if (r.delivery_order_sn) {
+      if (!byMall.has(r.mall_id)) byMall.set(r.mall_id, new Set());
+      byMall.get(r.mall_id).add(r.delivery_order_sn);
+    } else {
+      if (!missingSnByMall.has(r.mall_id)) missingSnByMall.set(r.mall_id, []);
+      missingSnByMall.get(r.mall_id).push(r.so_id);
+    }
+  }
+  let updated = 0;
+  const upd = db.prepare(`
+    UPDATE erp_temu_openapi_consign SET
+      ship_status = COALESCE(?, ship_status),
+      temu_status = COALESCE(?, temu_status),
+      express_company = COALESCE(?, express_company),
+      express_delivery_sn = COALESCE(?, express_delivery_sn),
+      delivery_order_sn = COALESCE(?, delivery_order_sn),
+      delivery_method = COALESCE(?, delivery_method),
+      deliver_package_num = COALESCE(?, deliver_package_num),
+      receive_package_num = COALESCE(?, receive_package_num),
+      predict_package_weight = COALESCE(?, predict_package_weight)
+    WHERE so_id = ? AND mall_id = ?`);
+  for (const [mallId, snSet] of byMall) {
+    let creds;
+    try { creds = getMallShipCreds(db, mallId); } catch { continue; }
+    const snList = [...snSet];
+    for (let i = 0; i < snList.length; i += 20) {
+      const batch = snList.slice(i, i + 20);
+      try {
+        const r = await callShipApi(creds, "bg.shiporderv2.get", {
+          pageSize: 20, pageNo: 1, deliveryOrderSnList: batch,
+        });
+        for (const it of ((r && r.list) || [])) {
+          const wb = it.subPurchaseOrderSn ? String(it.subPurchaseOrderSn) : null;
+          if (!wb) continue;
+          const ss = SHIP_STATUS_MAP[String(it.status)] || null;
+          upd.run(
+            ss, ss,
+            it.expressCompany || null,
+            it.expressDeliverySn ? String(it.expressDeliverySn) : null,
+            it.deliveryOrderSn ? String(it.deliveryOrderSn) : null,
+            it.deliveryMethod != null ? Number(it.deliveryMethod) : null,
+            it.deliverPackageNum != null ? Number(it.deliverPackageNum) : null,
+            it.receivePackageNum != null ? Number(it.receivePackageNum) : null,
+            it.predictTotalPackageWeight != null ? Number(it.predictTotalPackageWeight) : null,
+            wb, mallId,
+          );
+          updated++;
+        }
+      } catch (e) { console.log("[syncShipOrderStatus] error mall", mallId, ":", e.message); }
+    }
+  }
+  // 对没有 delivery_order_sn 的单，逐个用 subPurchaseOrderSn 查（API 不稳定，最多重试2次）
+  for (const [mallId, wbList] of missingSnByMall) {
+    let creds;
+    try { creds = getMallShipCreds(db, mallId); } catch { continue; }
+    for (const wb of wbList) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await callShipApi(creds, "bg.shiporderv2.get", { pageSize: 20, pageNo: 1, subPurchaseOrderSn: wb });
+          const it = ((r && r.list) || []).find((x) => x && x.deliveryOrderSn);
+          if (it) {
+            const ss = SHIP_STATUS_MAP[String(it.status)] || null;
+            upd.run(
+              ss, ss,
+              it.expressCompany || null,
+              it.expressDeliverySn ? String(it.expressDeliverySn) : null,
+              it.deliveryOrderSn ? String(it.deliveryOrderSn) : null,
+              it.deliveryMethod != null ? Number(it.deliveryMethod) : null,
+              it.deliverPackageNum != null ? Number(it.deliverPackageNum) : null,
+              it.receivePackageNum != null ? Number(it.receivePackageNum) : null,
+              it.predictTotalPackageWeight != null ? Number(it.predictTotalPackageWeight) : null,
+              wb, mallId,
+            );
+            updated++;
+          }
+          break;
+        } catch (e) {
+          console.log("[syncShipOrderStatus] subPurchaseOrderSn", wb, "attempt", attempt + 1, "error:", e.message);
+          if (attempt < 1) await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+    }
+  }
+  return { updated };
+}
+
 module.exports = {
   getMallShipCreds,
   getOfficialShipPreview,
@@ -667,4 +766,5 @@ module.exports = {
   applyOfficialPurchaseOrder,
   editOfficialPurchaseOrder,
   cancelOfficialPurchaseOrder,
+  syncShipOrderStatus,
 };

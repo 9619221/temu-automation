@@ -19,7 +19,7 @@ export interface ActivityRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
   kind: string | null; title: string | null; status: string | null;
   activity_id: string | null; product_id: string | null; activity_type: number | null; sku_id: string | null;
-  sku_ext_code: string | null; skc_id: string | null;
+  sku_ext_code: string | null; skc_id: string | null; color_spec: string | null;
   product_name: string | null; thumb: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
@@ -33,7 +33,7 @@ export interface ActivityDetail {
 }
 export interface ActProductRow {
   key: string; mall_id: string; store_code: string | null; mall_name: string | null;
-  sku_ext_code: string; product_id: string | null; skc_id: string | null;
+  sku_ext_code: string; product_id: string | null; skc_id: string | null; color_spec: string | null;
   product_name: string | null; thumb: string | null;
   act_count: number; pending_count: number;
   best_margin: number | null; best_profit: number | null;

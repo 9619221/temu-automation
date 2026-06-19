@@ -33,6 +33,7 @@ const {
   fetchStagingSkusDetailed,
   stagingAddOfficial,
   lookupDeliveryOrderSn,
+  syncShipOrderStatus,
   createOfficialShipOrder,
   cancelOfficialShipOrder,
   getOfficialLogisticsCompanies,
@@ -22131,6 +22132,11 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
       return lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
     }
+    case "consign_sync_ship_status": {
+      const soIds = Array.isArray(payload.soIds) ? payload.soIds.map(String).filter(Boolean) : [];
+      if (!soIds.length) return { action, updated: 0 };
+      return syncShipOrderStatus({ db, soIds }).then((r) => ({ action, ...r }));
+    }
     case "consign_official_ship_create": {
       // 创建官方发货单（生成 FH 单，可撤销、不真发货）。skuList=[{productSkuId,qty}]。
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
@@ -22178,6 +22184,7 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       // ⚠️ 物流下单真发货、生成 EB 运单、不可逆。需 confirm===true。平台 TMS 揽收：带 predictId。
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
       const snList = Array.isArray(payload.deliveryOrderSnList) ? payload.deliveryOrderSnList : [];
+      const packingSoId = optionalString(payload.soId || payload.so_id);
       return sendOfficialPacking({
         db, mallId, confirm: payload.confirm === true,
         deliveryAddressId: payload.deliveryAddressId,
@@ -22191,7 +22198,15 @@ function performInventoryAction(payload = {}, actorInput = {}) {
         expressPackageNum: payload.expressPackageNum,
         expectPickUpGoodsTime: payload.expectPickUpGoodsTime,
         expressDeliverySn: payload.expressDeliverySn,
-      }).then((r) => ({ action, ...r }));
+      }).then((r) => {
+        if (packingSoId && snList.length) {
+          try {
+            db.prepare(`UPDATE erp_temu_openapi_consign SET delivery_order_sn = COALESCE(?, delivery_order_sn), express_company = COALESCE(?, express_company), ship_status = COALESCE(?, ship_status), temu_status = '待发货' WHERE so_id = ? AND mall_id = ?`)
+              .run(snList[0], payload.expressCompanyName || null, '待发货', packingSoId, mallId);
+          } catch (e) { console.log("[packing_send_writeback]", e.message); }
+        }
+        return { action, ...r };
+      });
     }
     case "consign_official_print_boxmark": {
       // 打印箱唛：取 Temu 打印页 URL（浏览器打开即印）。需发货单号（创建发货单后）。
