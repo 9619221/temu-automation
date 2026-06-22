@@ -204,6 +204,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/goods-created-today": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/quality-panel": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/reviews": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/site-exceptions": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/qc-flaw-images": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
   "/api/erp/reports/settlement": ["admin", "manager", "operations", "finance"],
@@ -501,7 +502,8 @@ cloud_agg AS (
     sku_count AS cloud_item_count,
     receive_address_json AS cloud_receive_address_json,
     COALESCE(m.store_code, m.mall_name) AS cloud_shop_name,
-    json_extract(items_json, '$[0].picUrl') AS cloud_thumb_url
+    json_extract(items_json, '$[0].picUrl') AS cloud_thumb_url,
+    label_codes AS cloud_label_codes
   FROM erp_temu_openapi_consign c
   LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
 ),
@@ -560,7 +562,8 @@ jst_left AS (
     c.cloud_item_count,
     c.cloud_shop_name,
     c.cloud_thumb_url,
-    c.cloud_receive_address_json
+    c.cloud_receive_address_json,
+    c.cloud_label_codes
   FROM jst_base j
   LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
   LEFT JOIN jst_ship_agg sa ON sa.o_id = j.o_id
@@ -620,7 +623,8 @@ cloud_only AS (
     c.cloud_item_count,
     c.cloud_shop_name,
     c.cloud_thumb_url,
-    c.cloud_receive_address_json
+    c.cloud_receive_address_json,
+    c.cloud_label_codes
   FROM cloud_agg c
   LEFT JOIN erp_consign_local_state ls
     ON ls.mall_id = c.cloud_mall_id AND ls.so_id = c.cloud_so
@@ -703,6 +707,7 @@ function unifiedRowToPayload(row) {
     receive_address_json: row.cloud_receive_address_json,
     send_address_json: null,
     thumb_url: row.cloud_thumb_url || null,
+    label_codes: row.cloud_label_codes || null,
   } : null;
   const rawJst = (source === "jst" || source === "both") ? {
     o_id: row.jst_o_id,
@@ -6195,6 +6200,37 @@ async function handleRequest({
         const svc = require("./services/multiStoreReport.cjs");
         const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.getOpenapiQcFast : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.getQualityPanelFast : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : svc.buildActivityList;
         const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/site-exceptions") {
+      if (req.method !== "GET") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const includeTest = parsed.searchParams.get("include_test") === "1";
+        const svc = require("./services/multiStoreReport.cjs");
+        svc.syncSiteExceptionsFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible });
+        const data = svc.buildSiteExceptionList(db, { includeTest });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/high-price-flow-detail") {
+      if (req.method !== "GET") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const mallId = parsed.searchParams.get("mall_id") || "";
+        const productId = parsed.searchParams.get("product_id") || "";
+        if (!mallId || !productId) { writeJson(res, 400, { ok: false, error: "mall_id and product_id required" }); return; }
+        const svc = require("./services/multiStoreReport.cjs");
+        const data = svc.getHighPriceFlowDetail(db, { mallId, productId, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

@@ -993,12 +993,16 @@ export default function MultiStoreReport() {
         startDate: start || stlRange[0],
         endDate: end || stlRange[1],
       });
-      if (resp.ok && resp.data) {
+      if (resp?.ok && resp.data) {
         setStlData((resp.data.stores || []) as SettlementStoreData[]);
         setStlFundAvail(resp.data.fund_detail_available ?? false);
         setStlLoaded(true);
+      } else {
+        message.warning(resp?.error || "结算数据加载失败，请重试");
       }
-    } catch { /* ignore */ } finally {
+    } catch (e: unknown) {
+      message.error("结算数据请求异常: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
       setStlLoading(false);
     }
   }, [stlRange]);
@@ -1017,6 +1021,7 @@ export default function MultiStoreReport() {
 
   const handleStlRangeChange = useCallback((range: [string, string]) => {
     setStlRange(range);
+    setStlData([]);
     setStlLoaded(false);
     void loadSettlement(range[0], range[1]);
   }, [loadSettlement, setStlRange]);

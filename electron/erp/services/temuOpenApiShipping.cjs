@@ -510,6 +510,32 @@ async function printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrder
   return { dataKey, printUrl: `${getPrintBase(type)}?dataKey=${encodeURIComponent(dataKey)}` };
 }
 
+// 查询商品条码号(labelCode)：按 skcId 批量查，返回 { [skcId]: labelCode }。
+// 用于条码打印：labelCode 是 Temu 平台分配的条形码编号，区别于供应商自定义的 sku_ext_code。
+async function queryGoodsLabelCodes({ db, mallId, skcIds }) {
+  const creds = getMallShipCreds(db, mallId);
+  const ids = (skcIds || []).map((x) => Number(x)).filter(Boolean);
+  if (!ids.length) return {};
+  const map = {};
+  const pageSize = 100;
+  for (let i = 0; i < ids.length; i += pageSize) {
+    const chunk = ids.slice(i, i + pageSize);
+    const result = await callShipApi(creds, "bg.glo.goods.labelv2.get", {
+      productSkcIdList: chunk,
+      pageSize,
+      page: 1,
+    });
+    const items = (result && result.labelCodePageResult && result.labelCodePageResult.data) || [];
+    for (const item of items) {
+      const dto = item.productSkuLabelCodeDTO || item.productLabelCodeDTO;
+      const skcId = String(dto && dto.productSkcId || item.productSkcId || "");
+      const lc = dto && dto.labelCode;
+      if (skcId && lc != null) map[skcId] = String(lc);
+    }
+  }
+  return map;
+}
+
 // 打印商品条码（SKU 条码）：按 SKC 或 SKU id，不依赖发货单、随时可打。
 async function printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }) {
   const creds = getMallShipCreds(db, mallId);
@@ -766,6 +792,7 @@ module.exports = {
   matchOfficialPacking,
   sendOfficialPacking,
   printOfficialBoxmark,
+  queryGoodsLabelCodes,
   printOfficialGoodsLabel,
   getOfficialPredictVolume,
   getOfficialPackage,

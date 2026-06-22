@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { Alert, Button, Card, Empty, Image, InputNumber, Modal, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
-import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Empty, Image, InputNumber, Modal, Popover, Progress, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { EditOutlined, EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { useNavigate } from "react-router-dom";
@@ -13,7 +13,9 @@ import { selectStatusLabel } from "../utils/temuSelectStatus";
 import PipelineTab from "../components/PipelineTab";
 import OpsCommonFilters from "../components/ops/OpsCommonFilters";
 import ReviewTab from "../components/ops/ReviewTab";
-import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
+import SiteExceptionTab from "../components/ops/SiteExceptionTab";
+import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, fetchHpfDetail, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
+import type { HpfDetail } from "../types/opsWorkbench";
 import { useStoreScope } from "../hooks/useStoreScope";
 import { useOpsWorkbenchStore } from "../stores/opsWorkbenchStore";
 
@@ -43,11 +45,16 @@ interface ActivityRow {
 }
 // 活动报名内嵌精简明细(后端 products[].activities):报名弹窗/今日待办/最小库存用。
 // 父商品字段(mall/store/sku/skc/product_name 等)摊平时从 product 补,见 loadAct。
+interface ActivitySkuDetail {
+  sku_ext_code: string; spec_name: string | null; signup_price: number | null; suggested_price: number | null;
+  activity_stock: number; cost: number | null; enroll_at: string | null; enroll_id: string | null;
+}
 interface ActivityDetail {
   activity_id: string | null; kind: string | null; title: string | null; status: string | null;
-  activity_type: number | null; sku_id: string | null;
+  activity_type: number | null; sku_id: string | null; sku_ext_code: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
-  activity_stock: number; cost: number | null; end_at: string | null;
+  activity_stock: number; cost: number | null; start_at: string | null; end_at: string | null; enroll_at: string | null; sites: string[];
+  skus: ActivitySkuDetail[];
 }
 // 活动报名「概览」行:后端已按(店×货号)聚合好,act_count=可提交活动 pending_count=缺ID待采集。
 // activities=该商品的精简活动明细(供弹窗/待办);kinds=涉及的活动类型(供前端筛选)。
@@ -340,6 +347,20 @@ export default function OperationsWorkbench() {
   const [trendModalLoading, setTrendModalLoading] = useState(false);
   const [flawPreviewVisible, setFlawPreviewVisible] = useState(false);
   const [flawPreviewImages, setFlawPreviewImages] = useState<string[]>([]);
+  const [hpfDetailOpen, setHpfDetailOpen] = useState(false);
+  const [hpfDetail, setHpfDetail] = useState<HpfDetail | null>(null);
+  const [hpfDetailLoading, setHpfDetailLoading] = useState(false);
+  const [hpfSiteDetailOpen, setHpfSiteDetailOpen] = useState(false);
+  const openHpfDetail = useCallback(async (mallId: string, productId: string) => {
+    setHpfDetailOpen(true);
+    setHpfDetailLoading(true);
+    setHpfDetail(null);
+    try {
+      const d = await fetchHpfDetail(mallId, productId);
+      setHpfDetail(d);
+    } catch { /* ignore */ }
+    setHpfDetailLoading(false);
+  }, []);
   const [error] = useState<string | null>(null);
 
   const [storeFilter, setStoreFilter] = useSessionState(owViewKey("storeFilter"), "all");
@@ -391,6 +412,9 @@ export default function OperationsWorkbench() {
     jumpWorkbench("risk", nameQuery || codeQuery || productQuery);
   }, [jumpWorkbench, setProdSeg]);
   const [enrollModalSku, setEnrollModalSku] = useState<{ mall_id: string; store_code: string | null; sku_ext_code: string; sku_ext_codes?: string[]; product_name: string | null } | null>(null);
+  const [actDetailRow, setActDetailRow] = useState<ActProductRow | null>(null);
+  const [addStockOpen, setAddStockOpen] = useState<string | null>(null);
+  const [addStockVal, setAddStockVal] = useState<number | null>(null);
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -1120,26 +1144,30 @@ export default function OperationsWorkbench() {
   const hpfColumns = useMemo<ColumnsType<HpfRow>>(() => [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
     { title: "店铺", dataIndex: "mall_name", width: 120, ellipsis: true, render: (v: string | null) => formatMallName(v) },
-    { title: "商品", key: "prod", width: 360, render: (_, r) => (
+    { title: "商品", key: "prod", width: 380, render: (_, r) => (
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 52, height: 52 }}><Image src={r.thumb} width={52} height={52} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 52, height: 52, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13, lineHeight: 1.4, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
-          <div style={{ marginTop: 3, fontSize: 12, color: "#8c8c8c", display: "flex", flexWrap: "wrap", gap: "0 10px" }}>
-            <span>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 12, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
-            {r.skc_id ? <span>SKC <Typography.Text copyable={{ text: String(r.skc_id) }} style={{ fontSize: 12, color: "#8c8c8c" }}>{r.skc_id}</Typography.Text></span> : null}
-            <a onClick={(e) => { e.stopPropagation(); setTrendOf({ productId: String(r.product_id), title: r.title || String(r.product_id) }); }} style={{ fontSize: 11 }}>销量趋势</a>
+          {r.sku_codes ? <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 1 }}>{r.sku_codes}</div> : null}
+          <div style={{ marginTop: 3, display: "flex", flexWrap: "wrap", gap: "0 8px", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "#8c8c8c" }}>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 12, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
+            {r.skc_id ? <span style={{ fontSize: 12, color: "#8c8c8c" }}>SKC <Typography.Text copyable={{ text: String(r.skc_id) }} style={{ fontSize: 12, color: "#8c8c8c" }}>{r.skc_id}</Typography.Text></span> : null}
           </div>
         </div>
       </div>
     ) },
-    { title: "货号", dataIndex: "sku_codes", width: 140, ellipsis: true, render: (v: string | null) => v ? <span style={{ fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
-    { title: "流量下降率", dataIndex: "decline_rate", width: 124, align: "right", defaultSortOrder: "descend", sorter: (a, b) => (a.decline_rate || 0) - (b.decline_rate || 0), render: (v: number | null) => v == null ? <span style={{ color: "#bbb" }}>—</span> : <Tag color={v >= 50 ? "red" : v >= 20 ? "orange" : "gold"} style={{ fontWeight: 600 }}>↓ {v.toFixed(1)}%</Tag> },
-    { title: "建议调价(降价)", key: "advise_price", width: 168, align: "right", render: (_, r) => { const cur = r.current_price != null ? r.current_price : r.declared_price; if (r.target_price == null) return cur != null ? <span>¥{cur.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; const cut = cur && cur > 0 ? Math.round((1 - r.target_price / cur) * 100) : null; return <span style={{ fontSize: 12 }}>{cur != null ? <span style={{ color: "#888" }}>¥{cur.toFixed(2)} </span> : null}<span style={{ color: "#cf1322", fontWeight: 700 }}>→¥{r.target_price.toFixed(2)}</span>{cut != null ? <span style={{ color: "#cf1322" }}> -{cut}%</span> : null}</span>; } },
-    { title: "可用库存", dataIndex: "stock", width: 100, align: "right", sorter: (a, b) => (a.stock || 0) - (b.stock || 0), render: (v: number | null) => v == null ? "—" : <span style={{ color: v <= 0 ? "#cf1322" : undefined }}>{fmtNum(v)}</span> },
-    { title: "7天销量", dataIndex: "last7d_sales", width: 92, align: "right", sorter: (a, b) => (a.last7d_sales || 0) - (b.last7d_sales || 0), render: (v: number | null) => v == null ? "—" : fmtNum(v) },
-    { title: "最近限流日", dataIndex: "last_seen_date", width: 110, render: (v: string | null) => v || "—" },
-  ], [setTrendOf]);
+    { title: "流量下降率", dataIndex: "decline_rate", width: 150, defaultSortOrder: "descend" as const, sorter: (a, b) => (a.decline_rate || 0) - (b.decline_rate || 0), render: (v: number | null) => v == null ? <span style={{ color: "#bbb" }}>—</span> : (
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <Progress percent={Math.min(v, 100)} size="small" strokeColor={v >= 50 ? "#cf1322" : v >= 20 ? "#d46b08" : "#faad14"} showInfo={false} style={{ flex: 1, margin: 0 }} />
+        <span style={{ color: v >= 50 ? "#cf1322" : "#d46b08", fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" }}>↓{v.toFixed(1)}%</span>
+      </div>
+    ) },
+    { title: "建议调价", key: "advise_price", width: 150, align: "right", render: (_, r) => { const cur = r.current_price != null ? r.current_price : r.declared_price; if (r.target_price == null) return cur != null ? <span style={{ fontSize: 12, color: "#888" }}>¥{cur.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; const cut = cur && cur > 0 ? Math.round((1 - r.target_price / cur) * 100) : null; return <div style={{ fontSize: 12 }}>{cur != null ? <div style={{ color: "#999", textDecoration: "line-through", fontSize: 11 }}>¥{cur.toFixed(2)}</div> : null}<div style={{ color: "#cf1322", fontWeight: 700 }}>¥{r.target_price.toFixed(2)}{cut != null ? <span style={{ fontWeight: 400, fontSize: 11 }}> (-{cut}%)</span> : null}</div></div>; } },
+    { title: "可用库存", dataIndex: "stock", width: 90, align: "right", sorter: (a, b) => (a.stock || 0) - (b.stock || 0), render: (v: number | null) => v == null ? "—" : <span style={{ color: v <= 0 ? "#cf1322" : undefined, fontWeight: v <= 0 ? 700 : undefined }}>{fmtNum(v)}</span> },
+    { title: "7天销量", dataIndex: "last7d_sales", width: 85, align: "right", sorter: (a, b) => (a.last7d_sales || 0) - (b.last7d_sales || 0), render: (v: number | null) => v == null ? "—" : fmtNum(v) },
+    { title: "最近限流日", dataIndex: "last_seen_date", width: 100, render: (v: string | null) => v || "—" },
+  ], [setTrendOf, openHpfDetail]);
 
   const commonFilters = useCallback((extra?: React.ReactNode) => (
     <OpsCommonFilters storeFilter={storeFilter} onStoreChange={setStoreFilter} storeOptions={storeOptions} searchInput={searchInput} onSearchChange={setSearchInput} extra={extra} />
@@ -1470,15 +1498,24 @@ export default function OperationsWorkbench() {
       key: "hpf", label: "高价限流",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-            <Statistic title="被限流商品(当前筛选)" value={hpfAgg.total} valueStyle={{ color: hpfAgg.total > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="平均流量降幅" value={hpfAgg.avg ?? "—"} suffix={hpfAgg.avg != null ? "%" : ""} valueStyle={{ color: "#d46b08" }} />
-            <Statistic title="重度限流(降幅≥50%)" value={hpfAgg.severe} valueStyle={{ color: hpfAgg.severe > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="涉及店铺" value={hpfAgg.shops} />
+          <div style={{ padding: "16px 16px 8px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+            {([
+              { label: "被限流商品", value: hpfAgg.total, bg: "#fff1f0", border: "#ffccc7", color: hpfAgg.total > 0 ? "#cf1322" : "#595959" },
+              { label: "平均流量降幅", value: hpfAgg.avg != null ? `${hpfAgg.avg}%` : "—", bg: "#fff7e6", border: "#ffe7ba", color: "#d46b08" },
+              { label: "重度限流(降幅≥50%)", value: hpfAgg.severe, bg: hpfAgg.severe > 0 ? "#fff1f0" : "#fafafa", border: hpfAgg.severe > 0 ? "#ffa39e" : "#d9d9d9", color: hpfAgg.severe > 0 ? "#a8071a" : "#595959" },
+              { label: "涉及店铺", value: hpfAgg.shops, bg: "#e6f7ff", border: "#91d5ff", color: "#096dd9" },
+            ] as const).map((c, i) => (
+              <div key={i} style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: 8, padding: "14px 18px" }}>
+                <div style={{ fontSize: 12, color: "#595959", marginBottom: 2 }}>{c.label}</div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: c.color, lineHeight: 1.2 }}>{c.value}</div>
+              </div>
+            ))}
           </div>
-          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>被 Temu「高价流量受限」的商品(申报价偏高→流量被压制)。数据来自<b>抓包</b>(运营逛 Temu 限流页时顺手采),覆盖取决于访问情况,只列<b>近 14 天</b>出现过的,按流量下降率降序。降价建议 / 目标价 Temu 未开放采集,暂不提供。</div>
+          <div style={{ padding: "0 16px 4px" }}>
+            <Alert type="info" showIcon message="数据来自扩展抓包采集(近14天),按流量下降率降序。有目标价数据时显示建议调价。" banner style={{ fontSize: 12, borderRadius: 6 }} />
+          </div>
           {commonFilters()}
-          <Table<HpfRow> dataSource={hpfView} columns={hpfColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个被限流商品` }} scroll={{ x: 1100 }} loading={hpfLoading} />
+          <Table<HpfRow> dataSource={hpfView} columns={hpfColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个被限流商品` }} scroll={{ x: 1050 }} loading={hpfLoading} onRow={(r) => ({ style: { ...(r.decline_rate != null && r.decline_rate >= 50 ? { background: "#fff8f8" } : {}), cursor: "pointer" }, onClick: () => openHpfDetail(r.mall_id, String(r.product_id)) })} />
         </div>
       ),
     },
@@ -1548,34 +1585,15 @@ export default function OperationsWorkbench() {
               <Table<ActProductRow> dataSource={actProductView} rowKey="key" size="small"
                 pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }}
                 scroll={{ x: 960 }}
-                expandable={{ expandedRowRender: (record) => (
-                  <Table<ActivityDetail & { _key: string }> dataSource={record.activities.map((a, i) => ({ ...a, _key: `${record.key}|${a.activity_id || i}` }))} rowKey="_key" size="small" pagination={false}
-                    columns={[
-                      { title: "活动名称", key: "title", width: 280, render: (_, r) => (
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: 12 }}>{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</div>
-                          {r.kind && <Tag style={{ margin: "2px 0 0", fontSize: 10 }}>{KIND_LABEL[r.kind] || r.kind}</Tag>}
-                        </div>
-                      ) },
-                      { title: "活动类型", key: "atype", width: 100, render: (_, r) => r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type] ? <span style={{ fontSize: 12 }}>{ACTIVITY_TYPE_LABEL[r.activity_type]}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                      { title: "日常申报价", key: "daily", width: 100, align: "right", render: (_, r) => r.suggested_price != null ? <span>¥{r.suggested_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                      { title: "活动申报价", key: "act_price", width: 100, align: "right", render: (_, r) => r.signup_price != null ? <span style={{ color: "#1677ff", fontWeight: 600 }}>¥{r.signup_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                      { title: "折扣", key: "disc", width: 70, align: "center", render: (_, r) => { if (r.signup_price == null || r.suggested_price == null || r.suggested_price <= 0) return <span style={{ color: "#bbb" }}>—</span>; const d = Math.round(r.signup_price / r.suggested_price * 100); return <Tag color={d <= 50 ? "red" : d <= 70 ? "orange" : d <= 85 ? "blue" : "default"} style={{ margin: 0 }}>{d}%</Tag>; } },
-                      { title: "活动库存", key: "stock", width: 80, align: "right", render: (_, r) => r.activity_stock > 0 ? fmtNum(r.activity_stock) : <span style={{ color: "#bbb" }}>—</span> },
-                      { title: "截止日期", key: "end", width: 110, render: (_, r) => r.end_at ? <span style={{ fontSize: 12 }}>{r.end_at}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                      { title: "利润", key: "profit", width: 90, align: "right", render: (_, r) => { if (r.signup_price == null || r.cost == null || r.cost <= 0) return <span style={{ color: "#bbb" }}>—</span>; const p = r.signup_price - r.cost; return <span style={{ color: p < 0 ? "#cf1322" : "#3f8600", fontWeight: 600 }}>{fmtMoney(p)}</span>; } },
-                      { title: "状态", key: "status", width: 80, render: (_, r) => { const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>; const color = s === "ongoing" || s === "进行中" ? "green" : s === "enrolled" || s === "已报名" ? "blue" : "default"; return <Tag color={color} style={{ margin: 0 }}>{s === "ongoing" ? "进行中" : s === "enrolled" ? "已报名" : s === "pending" ? "未开始" : s}</Tag>; } },
-                    ]}
-                  />
-                ), rowExpandable: (r) => r.activities.length > 0 }}
+                onRow={(r) => ({ onClick: () => r.activities.length > 0 && setActDetailRow(r), style: r.activities.length > 0 ? { cursor: "pointer" } : undefined })}
                 columns={[
                   { title: "店铺", key: "store", width: 78, fixed: "left", render: (_, r) => formatStoreNo(r.store_code, r.mall_id) },
-                  { title: "商品", key: "prod", width: 260, fixed: "left", render: (_, r) => (
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {r.thumb ? <div style={{ flexShrink: 0, width: 48, height: 48 }}><Image src={r.thumb} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
-                      <div style={{ minWidth: 0 }}>
-                        <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}{(r.sku_ext_codes?.length ?? 0) > 1 && <Tooltip title={r.sku_ext_codes!.join(", ")}><span style={{ fontSize: 10, color: "#1677ff", marginLeft: 4 }}>(+{r.sku_ext_codes!.length - 1})</span></Tooltip>}</Typography.Text>
-                        <div style={{ fontSize: 11, color: "#888", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }} title={r.product_name || undefined}>{r.product_name || "—"}</div>
+                  { title: "商品", key: "prod", width: 340, fixed: "left", render: (_, r) => (
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      {r.thumb ? <div style={{ flexShrink: 0, width: 56, height: 56 }}><Image src={r.thumb} width={56} height={56} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 56, height: 56, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 12, color: "#555", lineHeight: "18px", wordBreak: "break-word" }}>{r.product_name || "—"}</div>
+                        <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code}{(r.sku_ext_codes?.length ?? 0) > 1 && <Tooltip title={r.sku_ext_codes!.join(", ")}><span style={{ fontSize: 10, color: "#1677ff", marginLeft: 4 }}>(+{r.sku_ext_codes!.length - 1})</span></Tooltip>}</Typography.Text>
                       </div>
                     </div>
                   ) },
@@ -1583,13 +1601,108 @@ export default function OperationsWorkbench() {
                   { title: "可报", dataIndex: "act_count", width: 70, align: "right", sorter: (a, b) => a.act_count - b.act_count, defaultSortOrder: "descend", render: (v: number) => <span style={{ color: v > 0 ? "#3f8600" : "#bbb", fontWeight: v > 0 ? 600 : 400 }}>{v}</span> },
                   { title: "已报", dataIndex: "enrolled_count", width: 70, align: "right", sorter: (a, b) => a.enrolled_count - b.enrolled_count, render: (v: number) => v > 0 ? <Tag color="blue" style={{ margin: 0 }}>{v}</Tag> : <span style={{ color: "#bbb" }}>0</span> },
                   { title: "最优利润", key: "profit", width: 110, align: "right", sorter: (a, b) => (a.best_profit ?? -Infinity) - (b.best_profit ?? -Infinity), render: (_, r) => r.best_profit != null && r.best_margin != null ? <span style={{ color: r.best_profit < 0 ? "#cf1322" : "#3f8600", fontWeight: 600 }}>{fmtMoney(r.best_profit)} <span style={{ fontSize: 11, fontWeight: 400 }}>{(r.best_margin * 100).toFixed(1)}%</span></span> : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "", key: "action", width: 72, align: "center", render: (_, r) => <Button size="small" type="primary" disabled={r.act_count === 0} onClick={() => { setSelActRows([]); setEnrollModalSku({ mall_id: r.mall_id, store_code: r.store_code, sku_ext_code: r.sku_ext_code, sku_ext_codes: r.sku_ext_codes, product_name: r.product_name }); }}>报名</Button> },
+                  { title: "", key: "action", width: 72, align: "center", render: (_, r) => <Button size="small" type="primary" disabled={r.act_count === 0} onClick={(e) => { e.stopPropagation(); setSelActRows([]); setEnrollModalSku({ mall_id: r.mall_id, store_code: r.store_code, sku_ext_code: r.sku_ext_code, sku_ext_codes: r.sku_ext_codes, product_name: r.product_name }); }}>报名</Button> },
                 ]}
               />
             )
           )}
+          <Modal open={!!actDetailRow} onCancel={() => setActDetailRow(null)} footer={null} width={1520}
+            title={actDetailRow ? <div><span style={{ fontWeight: 600 }}>{actDetailRow.sku_ext_code}</span> <span style={{ color: "#888", fontWeight: 400 }}>{actDetailRow.product_name || ""}</span></div> : ""}>
+            {actDetailRow && (
+              <Table<ActivityDetail & { _key: string }> dataSource={actDetailRow.activities.map((a, i) => ({ ...a, _key: `${actDetailRow.key}|${a.activity_id || i}` }))} rowKey="_key" size="middle" pagination={false}
+                scroll={{ y: 520 }}
+                columns={[
+                  { title: "活动名称", key: "title", width: 240, render: (_, r) => (
+                    <div style={{ fontWeight: 600 }}>{r.title || (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || <span style={{ color: "#bbb" }}>(未命名)</span>}</div>
+                  ) },
+                  { title: "SKU / 规格", key: "skus", width: 240, render: (_, r) => {
+                    const skus = r.skus || [];
+                    if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
+                    return (<div style={{ fontSize: 12, lineHeight: "22px" }}>
+                      {skus.map((s, i) => (
+                        <div key={i} style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
+                          <span style={{ fontWeight: 500 }}>{s.sku_ext_code}{s.spec_name ? <span style={{ color: "#888", fontWeight: 400 }}> · {s.spec_name}</span> : ""}</span>
+                        </div>
+                      ))}
+                    </div>);
+                  } },
+                  { title: "站点", key: "sites", width: 240, render: (_, r) => {
+                    const s = r.sites || []; if (!s.length) return <span style={{ color: "#bbb" }}>—</span>;
+                    const dateRange = r.start_at && r.end_at ? `${r.start_at}~${r.end_at}` : r.end_at ? `~${r.end_at}` : "";
+                    const stLabel = r.status || "";
+                    const fmt = (name: string) => { let t = name; if (dateRange) t += `-${dateRange}`; if (stLabel) t += `,${stLabel}`; return t; };
+                    const show = s.slice(0, 3);
+                    const rest = s.length - 3;
+                    return (<div style={{ fontSize: 12, lineHeight: "20px" }}>
+                      {show.map((n, i) => <div key={i}>{fmt(n)}</div>)}
+                      {rest > 0 && <Popover trigger="click" title={`全部站点 (${s.length})`} content={<div style={{ maxHeight: 300, overflow: "auto", fontSize: 13, lineHeight: "24px" }}>{s.map((n, i) => <div key={i}>{fmt(n)}</div>)}</div>}><a style={{ fontSize: 12 }}>更多 (+{rest})</a></Popover>}
+                    </div>);
+                  } },
+                  { title: "活动类型", key: "atype", width: 100, render: (_, r) => r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type] ? ACTIVITY_TYPE_LABEL[r.activity_type] : <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "申报价", key: "suggested", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) return r.suggested_price != null ? `¥${r.suggested_price.toFixed(2)}` : <span style={{ color: "#bbb" }}>—</span>; return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => <div key={i}>{s.suggested_price != null ? `¥${s.suggested_price.toFixed(2)}` : "—"}</div>)}</div>); } },
+                  { title: "报名价", key: "price", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) return r.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{r.signup_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => <div key={i}>{s.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{s.signup_price.toFixed(2)}</span> : "—"}</div>)}</div>); } },
+                  { title: "利润", key: "profit", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) { if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>; const p = r.signup_price - r.cost; return <span style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 500 }}>¥{p.toFixed(2)}</span>; } return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => { if (s.signup_price == null || s.cost == null) return <div key={i}>—</div>; const p = s.signup_price - s.cost; return <div key={i} style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 500 }}>¥{p.toFixed(2)}</div>; })}</div>); } },
+                  { title: "活动库存", key: "stock", width: 90, align: "right" as const, render: (_, r) => {
+                    const skus = r.skus || [];
+                    const renderOne = (s: ActivitySkuDetail, key: string) => {
+                      const isOpen = addStockOpen === key;
+                      const curStock = s.activity_stock > 0 ? s.activity_stock : 0;
+                      const afterStock = addStockVal != null && addStockVal > 0 ? curStock + addStockVal : null;
+                      return (
+                        <div key={key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ minWidth: 30, textAlign: "right" }}>{curStock > 0 ? fmtNum(curStock) : "—"}</span>
+                          {r.status !== "已结束" && (
+                            <Popover
+                              open={isOpen}
+                              onOpenChange={(open) => { if (!open) { setAddStockOpen(null); setAddStockVal(null); } }}
+                              trigger="click"
+                              placement="left"
+                              content={
+                                <div style={{ width: 220 }} onClick={(e) => e.stopPropagation()}>
+                                  <div style={{ marginBottom: 12, fontSize: 14 }}>当前活动库存：<b>{fmtNum(curStock)}</b></div>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                                    <span style={{ flexShrink: 0 }}>增加</span>
+                                    <InputNumber size="small" min={1} max={99999} placeholder="请输入" style={{ flex: 1 }}
+                                      value={addStockVal} autoFocus
+                                      onChange={(n) => setAddStockVal(n as number | null)} />
+                                  </div>
+                                  <div style={{ marginBottom: 12, fontSize: 13, color: "#888" }}>改后活动库存：{afterStock != null ? <b style={{ color: "#1677ff" }}>{fmtNum(afterStock)}</b> : "—"}</div>
+                                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                                    <Button size="small" onClick={() => { setAddStockOpen(null); setAddStockVal(null); }}>取消</Button>
+                                    <Button size="small" type="primary" disabled={!addStockVal || addStockVal <= 0}
+                                      onClick={() => { message.info(`追加库存功能开发中：${s.sku_ext_code} +${addStockVal}`); setAddStockOpen(null); setAddStockVal(null); }}>
+                                      确认
+                                    </Button>
+                                  </div>
+                                </div>
+                              }
+                            >
+                              <EditOutlined style={{ fontSize: 13, color: "#1677ff", cursor: "pointer" }}
+                                onClick={(e) => { e.stopPropagation(); setAddStockOpen(key); setAddStockVal(null); }} />
+                            </Popover>
+                          )}
+                        </div>
+                      );
+                    };
+                    if (skus.length <= 1) {
+                      const s0 = skus[0];
+                      if (!s0) return <span style={{ color: "#bbb" }}>—</span>;
+                      return renderOne(s0, `${r.activity_id}|${s0.sku_ext_code}`);
+                    }
+                    return (<div style={{ fontSize: 12, lineHeight: "28px" }}>{skus.map((s, i) => renderOne(s, `${r.activity_id}|${s.sku_ext_code}`))}</div>);
+                  } },
+                  { title: "报名时间", key: "enroll_at", width: 160, render: (_, r) => r.enroll_at ? r.enroll_at : <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "状态", key: "status", width: 80, render: (_, r) => { const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>; const color = s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "已结束" ? "default" : s === "已取消" ? "red" : "default"; return <Tag color={color} style={{ margin: 0 }}>{s}</Tag>; } },
+                ]}
+              />
+            )}
+          </Modal>
         </div>
       ),
+    },
+    {
+      key: "site_exception", label: "站点异常",
+      children: <SiteExceptionTab active={activeTab === "site_exception"} storeFilter={storeFilter} search={search} commonFilters={commonFilters} />,
     },
   ], [
     // 总览 Tab
@@ -1669,6 +1782,77 @@ export default function OperationsWorkbench() {
                 <Line type="monotone" dataKey="qty" name="销量" stroke="#1a73e8" strokeWidth={2} dot={{ r: 2 }} />
               </LineChart>
             </ResponsiveContainer>}
+      </Modal>
+      <Modal open={hpfDetailOpen} onCancel={() => setHpfDetailOpen(false)} footer={null} width={820} destroyOnClose
+        title={null} closable styles={{ body: { padding: "28px 32px" } }}>
+        {hpfDetailLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>
+          : !hpfDetail ? <Empty description="未找到限流详情数据" style={{ padding: 40 }} />
+          : <div>
+              <div style={{ display: "flex", gap: 18, marginBottom: 20 }}>
+                {hpfDetail.image ? <img src={hpfDetail.image} alt="" style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 6, border: "1px solid #eee", flexShrink: 0 }} /> : null}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 600, lineHeight: 1.5, wordBreak: "break-word", color: "#262626" }}>{hpfDetail.product_name || "—"}</div>
+                  <div style={{ fontSize: 13, color: "#888", marginTop: 4 }}>
+                    {hpfDetail.skc_id ? <span>SKC: {hpfDetail.skc_id}</span> : null}
+                  </div>
+                  <div style={{ fontSize: 14, color: "#262626", marginTop: 6, fontWeight: 500 }}>共 {hpfDetail.site_count} 个限流站点：</div>
+                </div>
+              </div>
+              <div style={{ marginBottom: 20, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {hpfDetail.sites.slice(0, 6).map((s) => <span key={s.id} style={{ padding: "4px 14px", border: "1px solid #d9d9d9", borderRadius: 4, fontSize: 13, color: "#262626", background: "#fff" }}>{s.name}</span>)}
+                {hpfDetail.sites.length > 6 ? <Popover trigger="click" placement="bottomRight" content={<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, width: 280, maxHeight: 280, overflowY: "auto" }}>{hpfDetail.sites.map((s) => <div key={s.id} style={{ padding: "6px 12px", fontSize: 13, color: "#262626", borderBottom: "1px solid #f0f0f0" }}>{s.name}</div>)}</div>}><span style={{ padding: "4px 14px", border: "1px solid #1677ff", borderRadius: 4, fontSize: 13, color: "#1677ff", background: "#f0f5ff", cursor: "pointer" }}>更多</span></Popover> : null}
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                <thead>
+                  <tr style={{ borderBottom: "3px solid #1677ff" }}>
+                    {["规格", "原价(CNY)", "解除限流价(CNY)", "折扣(折)", "低价竞品", "详细限流站点"].map((h, i) => (
+                      <th key={h} style={{ padding: "10px 12px", textAlign: i === 0 ? "left" : "center", fontWeight: 600, color: "#262626", fontSize: 13 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {hpfDetail.skus.map((sku, i) => (
+                    <tr key={sku.sku_id} style={{ borderBottom: "1px solid #f0f0f0", background: i % 2 === 0 ? "#fafbff" : "#fff" }}>
+                      <td style={{ padding: "12px", color: "#262626" }}>{sku.spec || "—"}</td>
+                      <td style={{ padding: "12px", textAlign: "center", color: "#262626" }}>{sku.current_price > 0 ? sku.current_price.toFixed(2) : "—"}</td>
+                      <td style={{ padding: "12px", textAlign: "center", color: "#cf1322", fontWeight: 600 }}>{sku.target_price > 0 ? sku.target_price.toFixed(2) : "—"}</td>
+                      <td style={{ padding: "12px", textAlign: "center", color: "#cf1322" }}>{sku.discount != null ? `${sku.discount.toFixed(2)}折` : "—"}</td>
+                      <td style={{ padding: "12px", textAlign: "center" }}>{sku.has_competitor ? <Tooltip title={sku.competitor_name}><a style={{ color: "#1677ff" }}>查看</a></Tooltip> : <span style={{ color: "#bbb" }}>无</span>}</td>
+                      <td style={{ padding: "12px", textAlign: "center" }}><a onClick={() => setHpfSiteDetailOpen(true)} style={{ color: "#1677ff", cursor: "pointer" }}>查看</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {hpfDetail.min_target_price != null && hpfDetail.max_discount != null ? (
+                <div style={{ marginTop: 24, fontSize: 15, textAlign: "center", lineHeight: 2 }}>
+                  <span style={{ color: "#d4380d", fontWeight: 700 }}>提示：</span>
+                  <span style={{ color: "#262626" }}> 报名 </span>
+                  <span style={{ border: "2px solid #cf1322", borderRadius: 4, padding: "2px 10px", color: "#cf1322", fontWeight: 700 }}>{hpfDetail.max_discount.toFixed(2)}折</span>
+                  <span style={{ color: "#262626" }}> 活动 或设置活动价为：</span>
+                  <span style={{ border: "2px solid #595959", borderRadius: 4, padding: "2px 10px", color: "#262626", fontWeight: 700 }}>{hpfDetail.min_target_price.toFixed(2)}</span>
+                  <span style={{ color: "#262626" }}> 即可解除商品限流</span>
+                </div>
+              ) : null}
+            </div>}
+      </Modal>
+      <Modal open={hpfSiteDetailOpen} onCancel={() => setHpfSiteDetailOpen(false)} footer={null} width={480} destroyOnClose
+        title={<span style={{ fontSize: 16, fontWeight: 600 }}>限流站点建议申报价</span>} centered>
+        {hpfDetail && hpfDetail.sites.length > 0 ? (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 12px", fontSize: 13, color: "#888" }}>
+              <span>当前限流站点（{hpfDetail.sites.length}）</span>
+              <span>建议申报价（CNY）</span>
+            </div>
+            <div style={{ maxHeight: 360, overflowY: "auto" }}>
+              {hpfDetail.sites.map((s) => (
+                <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f0f0f0", fontSize: 14 }}>
+                  <span style={{ color: "#262626" }}>{s.name}</span>
+                  <span style={{ color: "#cf1322", fontWeight: 600, fontSize: 15 }}>{s.target_price != null ? s.target_price.toFixed(2) : "—"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : <Empty description="暂无站点数据" style={{ padding: 32 }} />}
       </Modal>
     </div>
   );

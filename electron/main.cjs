@@ -6853,13 +6853,17 @@ ipcMain.handle("print:pdf-silent", async (_event, payload) => {
   const tmpPath = path.join(os.tmpdir(), `temu-label-${Date.now()}.pdf`);
   fs.writeFileSync(tmpPath, Buffer.from(base64, "base64"));
 
+  const isVirtualPrinter = printerName && /pdf|xps|onenote|fax|evernote/i.test(printerName);
+  const useSilent = printerName && !isVirtualPrinter;
+
   return new Promise((resolve, reject) => {
-    const win = new BrowserWindow({ show: false, width: 400, height: 300, webPreferences: { contextIsolation: true, nodeIntegration: false } });
-    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, 30000);
+    const win = new BrowserWindow({ show: !useSilent, width: 400, height: 300, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+    if (!useSilent) win.setMenuBarVisibility(false);
+    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, useSilent ? 30000 : 120000);
     win.webContents.on("did-finish-load", () => {
       setTimeout(() => {
         const opts = { printBackground: true, margins: { marginType: "none" } };
-        if (printerName) { opts.silent = true; opts.deviceName = printerName; } else { opts.silent = false; }
+        if (useSilent) { opts.silent = true; opts.deviceName = printerName; } else { opts.silent = false; if (printerName) opts.deviceName = printerName; }
         if (copies > 1) opts.copies = copies;
         win.webContents.print(opts, (success, reason) => {
           clearTimeout(timer);

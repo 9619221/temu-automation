@@ -391,6 +391,24 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台：高价限流详情（点击商品弹窗,返回该商品的 SKU 级限流明细 + 站点列表）
+  ipcMain.handle("erp:reports:high-price-flow-detail", async (_event, payload) => {
+    try {
+      const { mallId, productId } = payload || {};
+      if (!mallId || !productId) return { ok: false, error: "mallId and productId required" };
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/high-price-flow-detail?mall_id=${encodeURIComponent(mallId)}&product_id=${encodeURIComponent(productId)}`, { method: "GET" });
+      }
+      requireErp();
+      const { getHighPriceFlowDetail } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: getHighPriceFlowDetail(erpState.db, { mallId, productId, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：平台质检——点击实时拉某质检单的疵点照片(私有图签名会失效,故实时调详情拿新签名+后端带 referer 拉)
   ipcMain.handle("erp:reports:qc-flaw-images", async (_event, payload) => {
     try {
@@ -468,6 +486,23 @@ function registerReportsHandlers(ipcMain, deps) {
       const { buildProductSalesTrend } = require("../services/multiStoreReport.cjs");
       const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
       return { ok: true, data: buildProductSalesTrend(erpState.db, { productId: payload?.productId, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  // 运营工作台：SKU 站点绑定异常（扩展抓包 queryFullyOtherMessage → cloud snapshot → ERP 物化）
+  ipcMain.handle("erp:reports:site-exceptions", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/site-exceptions?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { syncSiteExceptionsFromCapture, buildSiteExceptionList } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      syncSiteExceptionsFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible });
+      return { ok: true, data: buildSiteExceptionList(erpState.db, { includeTest: payload?.includeTest }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

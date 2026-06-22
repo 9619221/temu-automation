@@ -101,6 +101,7 @@ interface ConsignDeliverUnifiedRawCloud {
   receive_address_json?: string | null;
   send_address_json?: string | null;
   thumb_url?: string | null;
+  label_codes?: string | null;
 }
 interface ConsignDeliverUnifiedRawJst {
   o_id?: number | null;

@@ -41,6 +41,7 @@ const {
   matchOfficialPacking,
   sendOfficialPacking,
   printOfficialBoxmark,
+  queryGoodsLabelCodes,
   printOfficialGoodsLabel,
   getOfficialPredictVolume,
   getOfficialPackage,
@@ -22221,6 +22222,11 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const skcIds = Array.isArray(payload.skcIds) ? payload.skcIds : [];
       const skuIds = Array.isArray(payload.skuIds) ? payload.skuIds : [];
       return printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }).then((r) => ({ action, ...r }));
+    }
+    case "query_goods_label_codes": {
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const skcIds = Array.isArray(payload.skcIds) ? payload.skcIds : [];
+      return queryGoodsLabelCodes({ db, mallId, skcIds }).then((map) => ({ action, labelCodeMap: map }));
     }
     case "consign_official_predict_volume": {
       // 预估体积（predict.volume.get）：物流匹配前取，喂给 logisticsmatch 让运费/匹配更准。

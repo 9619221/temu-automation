@@ -1348,7 +1348,9 @@ function operationRiskSeverity(type, row) {
 function operationRiskItems(body) {
   const direct = pickList(body);
   if (Array.isArray(direct) && direct.length) return direct;
-  const root = body?.result ?? body?.data ?? body;
+  const result = body?.result ?? body?.data;
+  if (result === null || result === undefined) return [];
+  const root = result ?? body;
   if (!root || typeof root !== "object") return [];
   const out = [];
   const seen = new Set();
@@ -2039,6 +2041,9 @@ function parseOperationRisk(db, ctx, evt, body) {
   const stat_date = normalizeStatDate(firstDefined(body?.result || body?.data || {}, ["statDate", "date", "dataDate", "updateTime"]), evt);
   const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
   const mall_id = eventMallId(ctx, evt);
+  // querySiteTargetPrice 的每条站点记录不含 productId，从请求体 __request 提取
+  const requestProductId = /querySiteTargetPrice/i.test(String(evt.url_path || ""))
+    ? toNullableString(body?.__request?.productId) : null;
   items.forEach((row, index) => {
     if (!row || typeof row !== "object") return;
     const order_id = toNullableString(firstDeepDefined(row, [
@@ -2046,7 +2051,7 @@ function parseOperationRisk(db, ctx, evt, body) {
       "parentOrderSn", "orderSn", "returnPackageSn", "packageSn", "waybillNo", "trackingNumber",
       "qcSubBillId", "qcBillId", "appealId", "punishId", "id",
     ], 2));
-    const product_id = toNullableString(firstDeepDefined(row, ["productId", "productSpuId", "spuId"], 2));
+    const product_id = toNullableString(firstDeepDefined(row, ["productId", "productSpuId", "spuId"], 2)) || requestProductId;
     const skc_id = toNullableString(firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 2));
     const goods_id = toNullableString(firstDeepDefined(row, ["goodsId", "goods_id"], 2));
     upsert.run({
@@ -2432,14 +2437,14 @@ function parseEnrollRecord(db, ctx, evt, body) {
       id, tenant_id, mall_id, site, stat_date, row_key,
       enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
       product_id, skc_id, sku_id, sku_ext_code, goods_id,
-      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time,
-      raw_json, source_event_id
+      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time, session_start_time,
+      sites_json, raw_json, source_event_id
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
       @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
       @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
-      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time,
-      @raw_json, @source_event_id
+      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time, @session_start_time,
+      @sites_json, @raw_json, @source_event_id
     )
     ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
       enroll_status        = COALESCE(excluded.enroll_status, enroll_status),
@@ -2457,6 +2462,8 @@ function parseEnrollRecord(db, ctx, evt, body) {
       activity_stock       = COALESCE(excluded.activity_stock, activity_stock),
       sold_status          = COALESCE(excluded.sold_status, sold_status),
       session_end_time     = COALESCE(excluded.session_end_time, session_end_time),
+      session_start_time   = COALESCE(excluded.session_start_time, session_start_time),
+      sites_json           = COALESCE(excluded.sites_json, sites_json),
       source_event_id      = COALESCE(excluded.source_event_id, source_event_id),
       last_updated_at      = datetime('now')
   `);
@@ -2470,12 +2477,14 @@ function parseEnrollRecord(db, ctx, evt, body) {
       enroll_time: toNullableString(firstDefined(rec, ["enrollTime"])),
       activity_type: toNullableInteger(firstDefined(rec, ["activityType"])),
       activity_thematic_id: toNullableString(firstDefined(rec, ["activityThematicId", "activityId", "themeId"]), 100),
-      activity_thematic_name: toNullableString(firstDefined(rec, ["activityThematicName", "activityName"]), 500),
+      activity_thematic_name: toNullableString(firstDefined(rec, ["activityThematicName", "activityName", "activityTypeName"]), 500),
       product_id: toNullableString(firstDefined(rec, ["productId", "productSpuId", "spuId"]), 100),
       goods_id: toNullableString(firstDefined(rec, ["goodsId", "goods_id"]), 100),
       activity_stock: toNullableInteger(firstDefined(rec, ["activityStock", "remainingActivityStock"])),
       sold_status: toNullableInteger(firstDefined(rec, ["soldStatus"])),
       session_end_time: toNullableString(firstDefined(rec, ["sessionEndTime", "endTime"])),
+      session_start_time: toNullableString(firstDefined(rec, ["sessionStartTime", "startTime"])),
+      sites_json: Array.isArray(rec.sites) && rec.sites.length ? JSON.stringify(rec.sites.map(s => ({ id: s.siteId, name: s.siteName }))) : null,
     };
     const skcList = Array.isArray(rec.skcList) ? rec.skcList : [];
     const rows = [];
@@ -2825,6 +2834,70 @@ function extractComplianceProps(item) {
   return out;
 }
 
+// ---------- SKU 站点绑定异常（queryFullyOtherMessage） ----------
+
+function parseTemuSkuSiteException(db, ctx, evt, body) {
+  const result = body?.result;
+  if (!result || typeof result !== "object") return;
+  const list = result.goodsSkuBindSiteFailInfoVOList;
+  if (!Array.isArray(list) || !list.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_sku_site_exception_snapshot (
+      id, tenant_id, mall_id, sku_id, goods_id, skc_id, site_name,
+      check_code, exception_reason, exception_time, sku_spec,
+      raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @sku_id, @goods_id, @skc_id, @site_name,
+      @check_code, @exception_reason, @exception_time, @sku_spec,
+      @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, sku_id, site_name) DO UPDATE SET
+      goods_id         = COALESCE(excluded.goods_id, goods_id),
+      skc_id           = COALESCE(excluded.skc_id, skc_id),
+      check_code       = COALESCE(excluded.check_code, check_code),
+      exception_reason = COALESCE(excluded.exception_reason, exception_reason),
+      exception_time   = COALESCE(excluded.exception_time, exception_time),
+      sku_spec         = COALESCE(excluded.sku_spec, sku_spec),
+      raw_json         = COALESCE(excluded.raw_json, raw_json),
+      source_event_id  = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json     = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at  = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const tenant_id = ctx?.tenant_id || "";
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const skuId = toNullableString(item.skuId || item.sku_id);
+    const siteName = toNullableString(item.siteName || item.site_name);
+    if (!skuId || !siteName) continue;
+    const checkList = Array.isArray(item.checkInfoList) ? item.checkInfoList : [];
+    const firstCheck = checkList[0] || {};
+    const checkCode = toNullableString(firstCheck.checkCode);
+    const exceptionReason = toNullableString(firstCheck.checkDesc || item.checkDesc);
+    let exceptionTime = null;
+    const ts = item.createTime || item.gmtCreate || item.timestamp;
+    if (ts) {
+      try { exceptionTime = new Date(typeof ts === "string" ? ts : Number(ts)).toISOString(); } catch { /* */ }
+    }
+    const id = crypto.randomUUID();
+    upsert.run({
+      id, tenant_id, mall_id,
+      sku_id: skuId,
+      goods_id: toNullableString(item.goodsId || item.goods_id),
+      skc_id: toNullableString(item.skcId || item.skc_id || item.productSkcId),
+      site_name: siteName,
+      check_code: checkCode,
+      exception_reason: exceptionReason,
+      exception_time: exceptionTime,
+      sku_spec: toNullableString(item.skuSpecString || item.specString || item.spec),
+      raw_json: JSON.stringify(item),
+      source_event_id: evt.id || null,
+      sources_json,
+    });
+  }
+}
+
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
@@ -2849,6 +2922,7 @@ const PARSERS = [
   { match: /coupon\/couponDailyList/, fn: parseCouponDaily, name: "couponDaily" },
   { match: /dailyMallGoods\/consultVisit/, fn: parseDailyMallGoods, name: "dailyMallGoods" },
   { match: /goodsInfo\/guvPv|goodsInfo\/noGoods/, fn: parseGoodsInfoGuvPv, name: "goodsInfoGuvPv" },
+  { match: /\/api\/kiana\/mms\/robin\/queryFullyOtherMessage/, fn: parseTemuSkuSiteException, name: "temuSkuSiteException" },
 ];
 
 export function dispatchParsers(db, ctx, items) {

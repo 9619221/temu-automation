@@ -8,7 +8,7 @@ import useSWR, { type SWRConfiguration, mutate as globalMutate } from "swr";
 import type {
   SkuRow, RiskRow, ActivityRow, ActProductRow, ShopHealthRow, StockOrderRow, TrendRow,
   AdMallRow, ProductPanelRow, FirstShipRow, GoodsCreatedRow, QcRow, QualityRow, QualityShopRow,
-  ReviewRow, HpfRow, LifecycleRow,
+  ReviewRow, HpfRow, HpfDetail, LifecycleRow, SiteExceptionRow,
 } from "../types/opsWorkbench";
 
 // 首次拉满即停,不自动重验(对齐原 loaded 标记语义);刷新统一走 mutate()。
@@ -53,7 +53,33 @@ export const useFirstShipToday = makeRowsHook<FirstShipRow>("firstShipToday", "f
 export const useGoodsCreatedToday = makeRowsHook<GoodsCreatedRow>("goodsCreatedToday", "goodsCreatedToday");
 export const useOpenapiQc = makeRowsHook<QcRow>("openapiQc", "openapiQc");
 export const useHighPriceFlow = makeRowsHook<HpfRow>("highPriceFlow", "highPriceFlow");
+export async function fetchHpfDetail(mallId: string, productId: string): Promise<HpfDetail | null> {
+  const api = reportsApi();
+  const fn = (api as any)?.highPriceFlowDetail;
+  if (!fn) return null;
+  const resp = await fn({ mallId, productId });
+  if (resp?.ok && resp.data) return resp.data as HpfDetail;
+  return null;
+}
 export const useReviews = makeRowsHook<ReviewRow>("reviews", "reviews");
+export function useSiteExceptions(enabled = true) {
+  type SkuInfoEntry = { ext?: string; spec?: string };
+  type GoodsInfoEntry = { title?: string; thumb?: string; skcId?: string };
+  type D = { rows: SiteExceptionRow[]; skuInfo: Record<string, SkuInfoEntry>; goodsInfo: Record<string, GoodsInfoEntry> };
+  const { data, isLoading, mutate: reload } = useSWR<D>(
+    enabled ? "ops:siteExceptions" : null,
+    async () => {
+      const api = reportsApi();
+      const fn = api?.siteExceptions as undefined | ((arg: { includeTest: boolean }) => Promise<any>);
+      if (!fn) return { rows: [], skuInfo: {}, goodsInfo: {} };
+      const resp = await fn({ includeTest: false });
+      if (resp?.ok && resp.data) return { rows: (resp.data.rows || []) as SiteExceptionRow[], skuInfo: resp.data.skuInfo || {}, goodsInfo: resp.data.goodsInfo || {} };
+      return { rows: [], skuInfo: {}, goodsInfo: {} };
+    },
+    SWR_OPTS,
+  );
+  return { rows: data?.rows ?? [], skuInfo: data?.skuInfo ?? {}, goodsInfo: data?.goodsInfo ?? {}, loading: isLoading, loaded: data !== undefined, reload: () => reload() };
+}
 
 // 活动报名:后端返回 products[](概览),前端摊平成 ActivityRow[](今日待办/最小库存/报名弹窗复用)。
 export function useActivityList(enabled = true) {

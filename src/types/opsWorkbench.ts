@@ -25,11 +25,16 @@ export interface ActivityRow {
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
   __rk?: number;
 }
+export interface ActivitySkuDetail {
+  sku_ext_code: string; spec_name: string | null; signup_price: number | null; suggested_price: number | null;
+  activity_stock: number; cost: number | null; enroll_at: string | null; enroll_id: string | null;
+}
 export interface ActivityDetail {
   activity_id: string | null; kind: string | null; title: string | null; status: string | null;
-  activity_type: number | null; sku_id: string | null;
+  activity_type: number | null; sku_id: string | null; sku_ext_code: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
-  activity_stock: number; cost: number | null; end_at: string | null;
+  activity_stock: number; cost: number | null; start_at: string | null; end_at: string | null; enroll_at: string | null; sites: string[];
+  skus: ActivitySkuDetail[];
 }
 export interface ActProductRow {
   key: string; mall_id: string; store_code: string | null; mall_name: string | null;
@@ -138,11 +143,33 @@ export interface HpfRow {
   declared_price: number | null; current_price: number | null; target_price: number | null; stock: number | null; today_sales: number | null; last7d_sales: number | null;
   __rk?: number;
 }
+export interface HpfSkuDetail {
+  sku_id: string; ext_code: string | null; spec: string;
+  current_price: number; target_price: number; discount: number | null;
+  has_competitor: boolean; competitor_name: string | null; competitor_image: string | null;
+}
+export interface HpfSite { id: number; name: string; target_price?: number | null; }
+export interface HpfDetail {
+  product_id: string; product_name: string | null; image: string | null; skc_id: string | null;
+  flow_decline_rate: number | null; flow_reduce_tag: number | null; last_seen_date: string | null;
+  site_count: number; sites: HpfSite[]; skus: HpfSkuDetail[];
+  min_target_price: number | null; max_discount: number | null;
+}
 export interface GoodsCreatedRow { mall_id: string; store_code: string | null; }
 export interface LifecycleRow { mall_id: string; skc_id: string; status: string; }
 
 export interface Diag { label: string; action: string; level: number }
 export interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
+
+export interface SiteExceptionRow {
+  mall_id: string; store_code: string | null; mall_name: string | null;
+  sku_id: string; goods_id: string | null; skc_id: string | null;
+  sku_ext_code: string | null;
+  site_name: string; check_code: string | null;
+  exception_reason: string | null; exception_time: string | null;
+  sku_spec: string | null;
+  __rk?: number;
+}
 
 export interface TodoTask {
   key: string; type: "product" | "code" | "risk" | "activity"; typeLabel: string;

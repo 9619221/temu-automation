@@ -99,11 +99,11 @@ const REVIEW_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
 // 带 mallid 头（仿评价/品质，无需 anti-content）。请求体先按 {pageNum,pageSize} 试，上线后用真实抓包校准。
 const HPF_STATE_KEY = "temu_monitor_hpf_state";
 const HPF_TARGET_LIMIT = 100;        // 一次最多取多少店
-const HPF_MAX_MALLS_PER_RUN = 8;     // 单轮最多采几个店（控时长/风控）
+const HPF_MAX_MALLS_PER_RUN = 20;    // 单轮最多采几个店
 const HPF_MAX_PAGES_PER_MALL = 6;    // 每店最多翻几页
 const HPF_PAGE_SIZE = 50;            // 每页条数
 const HPF_PAGE_DELAY_MS = 450;       // 翻页间隔（避 429）
-const HPF_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
+const HPF_RUN_INTERVAL_MS = 2 * 60 * 60 * 1000; // 每 2 小时一轮
 // 结算收入概览（income-summary）主动采集：SW 后台定时按店调 /api/merchant/front/finance/income-summary，
 // 带 mallid 头，POST 空 body，返回日度收入列表。数据 enqueue 到 cloud.capture_events（url_path 与
 // 被动 hook 一致），ERP 端 syncSettlementIncomeFromCapture 自动解析入库 erp_temu_settlement_income。
@@ -192,6 +192,14 @@ const AFTERSALES_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const AFTERSALES_PAGE_SIZE = 50;
 const AFTERSALES_MAX_PAGES = 20; // 50×20 = 1000 条/店
 const AFTERSALES_PAGE_DELAY_MS = 600;
+// SKU 站点绑定异常主动采集：在已打开的 agentseller tab 的 MAIN world 先翻页拿商品(goods_id+sku_id)，
+// 再调 queryFullyOtherMessage 获取站点异常。依赖至少一个已打开的 agentseller tab。
+const SITE_EXC_STATE_KEY = "temu_monitor_site_exc_state";
+const SITE_EXC_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
+const SITE_EXC_PAGE_SIZE = 50;
+const SITE_EXC_MAX_PAGES = 20;
+const SITE_EXC_BATCH_SIZE = 20; // 每批查询的商品数
+const SITE_EXC_DELAY_MS = 800;
 // 店铺统计主动采集（流量/DSR/活动总览/商品数据/优惠券）：SW 后台定时按店调 agentseller API，
 // 带 mallid 头（不需要 anti-content）。数据 enqueue→cloud parseMallTraffic/parseMallDsr/parseMallActivityOverview/parseGoodsDataShow/parseCouponDaily 入库。
 const SHOP_STATS_STATE_KEY = "temu_monitor_shop_stats_state";
@@ -348,6 +356,9 @@ async function ensureRuntimeDefaults() {
     patch[COLLECTOR_WINDOW_KEY] = null;
     patch[COLLECTOR_BOOT_VERSION_KEY] = COLLECTOR_BOOT_VERSION;
   }
+  // 扩展加载时清掉 HPF 间隔，让本次启动立即跑一轮
+  const hpfState = cur[HPF_STATE_KEY] || patch[HPF_STATE_KEY] || {};
+  patch[HPF_STATE_KEY] = { ...hpfState, enabled: true, last_run_at: 0 };
   if (Object.keys(patch).length) await setStorage(patch);
   await tryAutoConfigure();
   if (cur[COLLECTOR_WINDOW_KEY]) {
@@ -355,6 +366,10 @@ async function ensureRuntimeDefaults() {
   }
   await cleanupStrayCollectorTabs(null).catch((e) => console.warn("[sw] collector cleanup err", e?.message || e));
   await disableFeishuSupplierAutoImport("bootstrap").catch((e) => console.warn("[sw] feishu auto disable err", e?.message || e));
+  // 启动后延迟 10 秒触发一次 HPF 采集（等 tryAutoConfigure 完成拿到 token）
+  setTimeout(() => {
+    collectHighPriceFlowFromTargets().then((r) => console.log("[sw] hpf boot collect:", r)).catch((e) => console.warn("[sw] hpf boot err", e?.message || e));
+  }, 10000);
 }
 
 // Keep the extension on the HK cloud endpoint; old local/custom endpoints are replaced on startup.
@@ -450,6 +465,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
   collectQualityAllSites().catch((e) => console.warn("[sw] quality collect err", e?.message || e));
   collectProductsAndAfterSalesViaPage().catch((e) => console.warn("[sw] products/aftersales page-world collect err", e?.message || e));
+  collectSiteExceptionsViaPage().catch((e) => console.warn("[sw] site-exceptions collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -1448,15 +1464,154 @@ function createReviewRequestBody(page, pageSize) {
   return { page, pageSize };
 }
 
-function createHpfListRequestBody(page, pageSize) {
-  // ⚠️ 请求体待实测校准：参考 marvel-mms list 类接口常见 { pageNum, pageSize }。
-  // 上线后用一次真实抓包（运营逛高价限流页）确认字段名/是否要 site 等，再改这里。
-  return { pageNum: page, pageSize };
+function createHpfListRequestBody(page, pageSize, flowReduceStatus = 1) {
+  // 字段名参考咕噜噜抓包校准：page（非 pageNum）、flowReduceStatus（1=已限流 2=即将限流）、pageSource=1
+  return { page, pageSize, flowReduceStatus, pageSource: 1 };
 }
 
-// 高价限流主动采集：按 cloud /v1/review-targets 给的活跃店列表（通用活跃店表），SW 后台逐店翻页
-// fetch high/price/flow/reduce/queryFullHighPriceFlowReduceList（带 mallid 头 + cookie，无需 anti-content）。
-// 响应 enqueue→flush→cloud parser(classifyOperationRisk→high_price_flow) 落 temu_operation_risk_snapshot。
+// 高价限流主动采集（咕噜噜模式）：按 cloud /v1/review-targets 活跃店列表，SW 后台逐店翻页采集。
+// 1) queryFullHighPriceFlowReduceList：flowReduceStatus=1(已限流) + 2(即将限流)，两轮翻页
+// 2) querySiteTargetPrice：从列表结果提取 productId+productSkuId，逐个查各站点目标价
+// 响应全部 enqueue→flush→cloud parser(classifyOperationRisk→high_price_flow) 落 temu_operation_risk_snapshot。
+const HPF_LIST_URL = "https://agentseller.temu.com/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/queryFullHighPriceFlowReduceList";
+const HPF_SITE_PRICE_URL = "https://agentseller.temu.com/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/full/querySiteTargetPrice";
+const HPF_SITE_PRICE_DELAY_MS = 500;
+const HPF_MAX_SITE_PRICE_PER_MALL = 30;
+
+function extractHpfListItems(body) {
+  const result = body?.result || {};
+  return Array.isArray(result.list) ? result.list
+    : Array.isArray(result.pageItems) ? result.pageItems
+    : Array.isArray(result.dataList) ? result.dataList
+    : Array.isArray(result.items) ? result.items : [];
+}
+
+async function fetchHpfListPages(mallId, site, flowReduceStatus, stats) {
+  const products = [];
+  let total = null;
+  for (let page = 1; page <= HPF_MAX_PAGES_PER_MALL; page++) {
+    const requestBody = JSON.stringify(createHpfListRequestBody(page, HPF_PAGE_SIZE, flowReduceStatus));
+    stats.callCount++;
+    let pageItemsLen = 0;
+    try {
+      const resp = await fetch(HPF_LIST_URL, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", mallid: mallId },
+        body: requestBody,
+      });
+      const text = await resp.text();
+      const body = safeParseJson(text);
+      if (resp.ok && body && typeof body === "object" && body.success) {
+        await enqueue({
+          kind: "fetch-active-hpf",
+          url: HPF_LIST_URL,
+          method: "POST",
+          status: resp.status,
+          ts: Date.now(),
+          site,
+          page: "background/high-price-flow",
+          mall_id: mallId,
+          body,
+          bodyText: text.length > 200000 ? null : text,
+          requestBodyText: requestBody,
+          bodySize: text.length,
+          activeSource: "high_price_flow_background",
+        });
+        await bumpStats({ captured_count_delta: 1 });
+        stats.enqueuedCount++;
+        const list = extractHpfListItems(body);
+        for (const item of list) {
+          if (item && typeof item === "object") products.push(item);
+        }
+        const result = body.result || {};
+        if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
+        pageItemsLen = list.length;
+      } else {
+        stats.errorCount++;
+      }
+    } catch {
+      stats.errorCount++;
+    }
+    await new Promise((resolve) => setTimeout(resolve, HPF_PAGE_DELAY_MS));
+    if (pageItemsLen < HPF_PAGE_SIZE) break;
+    if (total != null && page * HPF_PAGE_SIZE >= total) break;
+  }
+  return products;
+}
+
+function extractFirstSkuId(item) {
+  const skcList = Array.isArray(item.productSkcList) ? item.productSkcList
+    : Array.isArray(item.skcInfoList) ? item.skcInfoList : [];
+  for (const skc of skcList) {
+    const skuList = Array.isArray(skc?.productSkuList) ? skc.productSkuList
+      : Array.isArray(skc?.skuInfoList) ? skc.skuInfoList : [];
+    for (const sku of skuList) {
+      const id = sku?.productSkuId ?? sku?.skuId;
+      if (id) return String(id);
+    }
+  }
+  return "";
+}
+
+async function fetchSiteTargetPrices(mallId, site, products, stats) {
+  const seen = new Set();
+  let count = 0;
+  for (const item of products) {
+    if (count >= HPF_MAX_SITE_PRICE_PER_MALL) break;
+    const productId = String(item.productId ?? item.productSpuId ?? item.spuId ?? "").trim();
+    const skuId = extractFirstSkuId(item);
+    if (!productId) continue;
+    const dedup = productId;
+    if (seen.has(dedup)) continue;
+    seen.add(dedup);
+    count++;
+    const requestBody = JSON.stringify({ productId, productSkuId: skuId || undefined });
+    stats.callCount++;
+    try {
+      const resp = await fetch(HPF_SITE_PRICE_URL, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", mallid: mallId },
+        body: requestBody,
+      });
+      const text = await resp.text();
+      const body = safeParseJson(text);
+      if (resp.ok && body && typeof body === "object" && body.success) {
+        const siteArr = body.result?.productSkuSiteTargetPriceList ?? (Array.isArray(body.result) ? body.result : null);
+        if (Array.isArray(siteArr)) {
+          for (const s of siteArr) { s.productId = productId; }
+        }
+        await enqueue({
+          kind: "fetch-active-hpf-site-price",
+          url: HPF_SITE_PRICE_URL,
+          method: "POST",
+          status: resp.status,
+          ts: Date.now(),
+          site,
+          page: "background/high-price-flow/site-target-price",
+          mall_id: mallId,
+          body,
+          bodyText: text.length > 200000 ? null : text,
+          requestBodyText: requestBody,
+          bodySize: text.length,
+          activeSource: "high_price_flow_site_price_background",
+        });
+        await bumpStats({ captured_count_delta: 1 });
+        stats.enqueuedCount++;
+        stats.sitePriceCount++;
+      } else {
+        stats.errorCount++;
+      }
+    } catch {
+      stats.errorCount++;
+    }
+    await new Promise((resolve) => setTimeout(resolve, HPF_SITE_PRICE_DELAY_MS));
+  }
+}
+
 async function collectHighPriceFlowFromTargets() {
   const cfg = await getStorage(["cloud_endpoint", "auth_token", HPF_STATE_KEY]);
   if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
@@ -1479,67 +1634,20 @@ async function collectHighPriceFlowFromTargets() {
     return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
   }
 
+  const stats = { callCount: 0, enqueuedCount: 0, errorCount: 0, sitePriceCount: 0 };
   let mallCount = 0;
-  let callCount = 0;
-  let enqueuedCount = 0;
-  let errorCount = 0;
   for (const target of targets) {
     if (mallCount >= HPF_MAX_MALLS_PER_RUN) break;
     const mallId = String(target?.mall_id || target?.mallId || "").trim();
     if (!mallId) continue;
     mallCount++;
-    // 高价限流是 agentseller「高价管理」页接口，被动抓包实测 host=agentseller.temu.com、路径含 /us/。
-    const url = "https://agentseller.temu.com/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/queryFullHighPriceFlowReduceList";
-    let total = null;
-    for (let page = 1; page <= HPF_MAX_PAGES_PER_MALL; page++) {
-      const requestBody = JSON.stringify(createHpfListRequestBody(page, HPF_PAGE_SIZE));
-      callCount++;
-      let pageItemsLen = 0;
-      try {
-        const resp = await fetch(url, {
-          method: "POST",
-          credentials: "include",
-          cache: "no-store",
-          headers: { "Content-Type": "application/json", mallid: mallId },
-          body: requestBody,
-        });
-        const text = await resp.text();
-        const body = safeParseJson(text);
-        if (resp.ok && body && typeof body === "object" && body.success) {
-          await enqueue({
-            kind: "fetch-active-hpf",
-            url,
-            method: "POST",
-            status: resp.status,
-            ts: Date.now(),
-            site: target?.site || "agentseller",
-            page: "background/high-price-flow",
-            mall_id: mallId,
-            body,
-            bodyText: text.length > 200000 ? null : text,
-            requestBodyText: requestBody,
-            bodySize: text.length,
-            activeSource: "high_price_flow_background",
-          });
-          await bumpStats({ captured_count_delta: 1 });
-          enqueuedCount++;
-          const result = body.result || {};
-          const list = Array.isArray(result.list) ? result.list
-            : Array.isArray(result.pageItems) ? result.pageItems
-            : Array.isArray(result.dataList) ? result.dataList
-            : Array.isArray(result.items) ? result.items : [];
-          if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
-          pageItemsLen = list.length;
-        } else {
-          errorCount++;
-        }
-      } catch {
-        errorCount++;
-      }
-      await new Promise((resolve) => setTimeout(resolve, HPF_PAGE_DELAY_MS));
-      if (pageItemsLen < HPF_PAGE_SIZE) break; // 不足一页 = 最后一页
-      if (total != null && page * HPF_PAGE_SIZE >= total) break; // 已覆盖全部
-    }
+    const site = target?.site || "agentseller";
+    // 两轮翻页：flowReduceStatus=1(已限流) + 2(即将限流)
+    const limitedProducts = await fetchHpfListPages(mallId, site, 1, stats);
+    const pendingProducts = await fetchHpfListPages(mallId, site, 2, stats);
+    // 合并去重，逐个查各站点目标价
+    const allProducts = [...limitedProducts, ...pendingProducts];
+    await fetchSiteTargetPrices(mallId, site, allProducts, stats);
   }
 
   await setStorage({
@@ -1547,15 +1655,16 @@ async function collectHighPriceFlowFromTargets() {
       ...state,
       last_run_at: now,
       last_success_at: Date.now(),
-      last_call_count: callCount,
+      last_call_count: stats.callCount,
       last_mall_count: mallCount,
-      last_enqueued_count: enqueuedCount,
-      last_error_count: errorCount,
+      last_enqueued_count: stats.enqueuedCount,
+      last_error_count: stats.errorCount,
+      last_site_price_count: stats.sitePriceCount,
       last_target_count: targets.length,
     },
   });
-  if (enqueuedCount > 0) await flush();
-  return { ok: true, callCount, enqueuedCount, errorCount, mallCount, targetCount: targets.length };
+  if (stats.enqueuedCount > 0) await flush();
+  return { ok: true, ...stats, mallCount, targetCount: targets.length };
 }
 
 // 评价主动采集：按 cloud /v1/review-targets 给的店列表，SW 后台逐店翻页 fetch review/pageQuery
@@ -2194,7 +2303,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY,
       COMPLIANCE_STATE_KEY, COMPLIANCE_PROP_STATE_KEY, PRICE_STATE_KEY,
       INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY,
-      SHOP_STATS_STATE_KEY, FLOW_STATE_KEY, QUALITY_STATE_KEY, PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY,
+      SHOP_STATS_STATE_KEY, FLOW_STATE_KEY, QUALITY_STATE_KEY, PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY, SITE_EXC_STATE_KEY,
     ];
     Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY, COLLECTOR_STATE_KEY, ...taskKeys])])
       .then(([depth, cfg]) => {
@@ -2213,6 +2322,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           quality: cfg[QUALITY_STATE_KEY] || {},
           products: cfg[PRODUCTS_STATE_KEY] || {},
           aftersales: cfg[AFTERSALES_STATE_KEY] || {},
+          site_exceptions: cfg[SITE_EXC_STATE_KEY] || {},
         };
         sendResponse({
           queueDepth: depth,
@@ -2238,6 +2348,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { last_success_at: 0 } })
       .then(() => collectCompliancePropertyFromMalls())
       .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_SITE_EXCEPTIONS") {
+    setStorage({ [SITE_EXC_STATE_KEY]: { last_success_at: 0 } })
+      .then(() => collectSiteExceptionsViaPage())
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_HPF") {
+    setStorage({ [HPF_STATE_KEY]: { enabled: true, last_run_at: 0 } })
+      .then(() => collectHighPriceFlowFromTargets())
+      .then((r) => sendResponse({ ok: true, ...r }))
       .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
     return true;
   }
@@ -2804,6 +2930,139 @@ async function collectProductsAndAfterSalesViaPage() {
   return { ok: true, productPages, afterSalesPages, malls: byOrigin.size };
 }
 
+// ---------- SKU 站点绑定异常主动采集 ----------
+async function collectSiteExceptionsViaPage() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", SITE_EXC_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[SITE_EXC_STATE_KEY] || {};
+  if (state.last_success_at && now - Number(state.last_success_at) < SITE_EXC_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({
+      url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+    });
+  } catch { return { ok: false, reason: "tabs_query_failed" }; }
+  if (!tabs.length) return { ok: false, reason: "no_agentseller_tab" };
+
+  const byOrigin = new Map();
+  for (const tab of tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))) {
+    let origin = "";
+    try { origin = new URL(tab.url).origin; } catch { continue; }
+    if (byOrigin.has(origin)) continue;
+    let mallId = "";
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || ""),
+      });
+      mallId = String(res?.result || "").trim();
+    } catch { continue; }
+    if (mallId) byOrigin.set(origin, { mallId, tabId: tab.id, origin });
+  }
+  if (!byOrigin.size) return { ok: false, reason: "no_mallid" };
+
+  let enqueuedCount = 0;
+  for (const { mallId, tabId } of byOrigin.values()) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [mallId, SITE_EXC_PAGE_SIZE, SITE_EXC_MAX_PAGES, SITE_EXC_BATCH_SIZE, SITE_EXC_DELAY_MS],
+        func: async (mid, pageSize, maxPages, batchSize, delay) => {
+          const s = (ms) => new Promise((r) => setTimeout(r, ms));
+          // 第一步：翻页采集所有 goods_id + sku_id 对
+          const pairs = [];
+          for (let page = 1; page <= maxPages; page++) {
+            let n = 0;
+            try {
+              const r = await fetch("/visage-agent-seller/product/skc/pageQuery", {
+                method: "POST", credentials: "include", cache: "no-store",
+                headers: { "Content-Type": "application/json", mallid: mid },
+                body: JSON.stringify({ page, pageSize }),
+              });
+              const j = await r.json();
+              const items = (j && j.result && (j.result.pageItems || j.result.list)) || [];
+              n = items.length;
+              for (const item of items) {
+                const goodsId = item.productId || item.goodsId || item.goods_id;
+                const skcId = item.productSkcId || item.skcId || item.skc_id || "";
+                const title = item.productName || item.title || item.goodsName || "";
+                const thumb = item.thumbUrl || item.imageUrl || item.thumb_url || "";
+                const skuList = [];
+                const skuDetails = {};
+                const skus = item.skuList || item.skuInfoList || item.productSkuSummaries || item.productSkuSummaryVOList || [];
+                for (const sku of skus) {
+                  const skuId = sku.productSkuId || sku.skuId || sku.sku_id;
+                  if (skuId) {
+                    skuList.push(String(skuId));
+                    skuDetails[String(skuId)] = {
+                      ext: String(sku.extCode || sku.ext_code || sku.skuExtCode || ""),
+                      spec: String(sku.specName || sku.spec || sku.colorSpec || ""),
+                    };
+                  }
+                }
+                if (goodsId && skuList.length) {
+                  pairs.push({ goodsId: String(goodsId), skuIdList: skuList, skuDetails, skcId: String(skcId), title: String(title), thumb: String(thumb) });
+                }
+              }
+            } catch { break; }
+            await s(delay);
+            if (n < pageSize) break;
+          }
+          if (!pairs.length) return { queried: 0, skuGoodsMap: {}, goodsInfo: {}, skuInfo: {} };
+          const skuGoodsMap = {};
+          const goodsInfo = {};
+          const skuInfo = {};
+          for (const p of pairs) {
+            for (const skuId of p.skuIdList) skuGoodsMap[skuId] = p.goodsId;
+            if (p.goodsId) goodsInfo[p.goodsId] = { skcId: p.skcId, title: p.title, thumb: p.thumb };
+            if (p.skuDetails) Object.assign(skuInfo, p.skuDetails);
+          }
+          // 第二步：分批调 queryFullyOtherMessage
+          let queried = 0;
+          for (let i = 0; i < pairs.length; i += batchSize) {
+            const batch = pairs.slice(i, i + batchSize);
+            try {
+              await fetch("/api/kiana/mms/robin/queryFullyOtherMessage", {
+                method: "POST", credentials: "include", cache: "no-store",
+                headers: { "Content-Type": "application/json", mallid: mid },
+                body: JSON.stringify({ goodsIdSkuIdPairList: batch }),
+              });
+              queried++;
+            } catch { /* 继续下一批 */ }
+            await s(delay);
+          }
+          return { queried, skuGoodsMap, goodsInfo, skuInfo };
+        },
+      });
+      const r = result?.result || {};
+      const q = typeof r === "number" ? r : (r.queried || 0);
+      enqueuedCount += q;
+      if (r.skuGoodsMap && Object.keys(r.skuGoodsMap).length) {
+        await enqueue({
+          mall_id: mallId, kind: "mapping", method: "POST",
+          url: "/_internal/sku-goods-mapping",
+          url_path: "/_internal/sku-goods-mapping",
+          body_json: JSON.stringify({ skuGoodsMap: r.skuGoodsMap, goodsInfo: r.goodsInfo || {}, skuInfo: r.skuInfo || {} }),
+        });
+      }
+    } catch (e) { console.warn("[sw] site-exceptions page-world err", e?.message || e); }
+  }
+
+  await setStorage({
+    [SITE_EXC_STATE_KEY]: {
+      ...state, last_run_at: now,
+      ...(enqueuedCount > 0 ? { last_success_at: now } : {}),
+      last_batches: enqueuedCount, last_malls: byOrigin.size,
+    },
+  });
+  return { ok: true, enqueuedCount, malls: byOrigin.size };
+}
+
 // ---------- 店铺统计主动采集（流量/DSR/活动总览/商品数据/优惠券） ----------
 async function collectShopStatsFromTargets() {
   const cfg = await getStorage(["cloud_endpoint", "auth_token", SHOP_STATS_STATE_KEY]);
@@ -2939,3 +3198,6 @@ async function collectShopStatsFromTargets() {
   if (enqueuedCount > 0) await flush();
   return { ok: true, malls: slice.length, enqueuedCount, errorCount };
 }
+
+// 调试入口：在 Service Worker 控制台可直接调用
+self._dbg = { collectSiteExceptionsViaPage, collectProductsAndAfterSalesViaPage, collectShopStatsFromTargets, flush };

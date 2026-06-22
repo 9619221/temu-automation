@@ -513,6 +513,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       qualityPanel: (options) => ipcRenderer.invoke("erp:reports:quality-panel", options || {}),
       reviews: (options) => ipcRenderer.invoke("erp:reports:reviews", options || {}),
       highPriceFlow: (options) => ipcRenderer.invoke("erp:reports:high-price-flow", options || {}),
+      highPriceFlowDetail: (options) => ipcRenderer.invoke("erp:reports:high-price-flow-detail", options || {}),
       qcFlawImages: (options) => ipcRenderer.invoke("erp:reports:qc-flaw-images", options || {}),
       productTrend: (options) => ipcRenderer.invoke("erp:reports:product-trend", options || {}),
       purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
@@ -520,6 +521,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       settlement: (options) => ipcRenderer.invoke("erp:reports:settlement", options || {}),
       pipelineOverview: (options) => ipcRenderer.invoke("erp:reports:pipeline-overview", options || {}),
       productRiskTags: (options) => ipcRenderer.invoke("erp:reports:product-risk-tags", options || {}),
+      siteExceptions: (options) => ipcRenderer.invoke("erp:reports:site-exceptions", options || {}),
     },
     opTask: {
       list: () => ipcRenderer.invoke("erp:op-task:list"),

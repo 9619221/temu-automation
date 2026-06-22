@@ -85,6 +85,7 @@ function parsePurchaseOrder(item, costMap) {
     is_first: item.isFirst === true ? 1 : (item.isFirst === false ? 0 : null),
     expect_arrival_at: tsToStr(di.expectLatestArrivalTimeOrDefault),
     urgency_type: num(item.urgencyType),
+    label_codes: null,
     // —— ship_order 补接字段(主行先初始 null,发货单按 WB 合并时填) ——
     express_company: null, express_delivery_sn: null, driver_name: null, plate_number: null,
     deliver_package_num: null, receive_package_num: null, sub_warehouse_name: null, receive_address_json: null,
@@ -140,7 +141,7 @@ function refreshConsignAll(db) {
       (mall_id, so_id, original_po_sn, delivery_order_sn, product_id, product_skc_id, product_name,
        sku_ext_codes, spec_names, demand_qty, delivered_qty, received_qty, amount_cents, cost_coverage,
        sku_count, temu_status, ship_status, order_time, deliver_time, latest_ship_at,
-       receive_warehouse_name, supplier_name, items_json,
+       receive_warehouse_name, supplier_name, items_json, label_codes,
        express_company, express_delivery_sn, driver_name, plate_number, deliver_package_num, receive_package_num,
        sub_warehouse_name, receive_address_json, is_print_box_mark, delivery_method, express_batch_sn,
        predict_package_weight, ship_create_time, inbound_time, category, today_can_deliver, is_first,
@@ -149,7 +150,7 @@ function refreshConsignAll(db) {
       (@mall_id, @so_id, @original_po_sn, @delivery_order_sn, @product_id, @product_skc_id, @product_name,
        @sku_ext_codes, @spec_names, @demand_qty, @delivered_qty, @received_qty, @amount_cents, @cost_coverage,
        @sku_count, @temu_status, @ship_status, @order_time, @deliver_time, @latest_ship_at,
-       @receive_warehouse_name, @supplier_name, @items_json,
+       @receive_warehouse_name, @supplier_name, @items_json, @label_codes,
        @express_company, @express_delivery_sn, @driver_name, @plate_number, @deliver_package_num, @receive_package_num,
        @sub_warehouse_name, @receive_address_json, @is_print_box_mark, @delivery_method, @express_batch_sn,
        @predict_package_weight, @ship_create_time, @inbound_time, @category, @today_can_deliver, @is_first,
@@ -216,7 +217,7 @@ async function refreshConsignAllChunked(db, batchSize = 500) {
       (mall_id, so_id, original_po_sn, delivery_order_sn, product_id, product_skc_id, product_name,
        sku_ext_codes, spec_names, demand_qty, delivered_qty, received_qty, amount_cents, cost_coverage,
        sku_count, temu_status, ship_status, order_time, deliver_time, latest_ship_at,
-       receive_warehouse_name, supplier_name, items_json,
+       receive_warehouse_name, supplier_name, items_json, label_codes,
        express_company, express_delivery_sn, driver_name, plate_number, deliver_package_num, receive_package_num,
        sub_warehouse_name, receive_address_json, is_print_box_mark, delivery_method, express_batch_sn,
        predict_package_weight, ship_create_time, inbound_time, category, today_can_deliver, is_first,
@@ -225,7 +226,7 @@ async function refreshConsignAllChunked(db, batchSize = 500) {
       (@mall_id, @so_id, @original_po_sn, @delivery_order_sn, @product_id, @product_skc_id, @product_name,
        @sku_ext_codes, @spec_names, @demand_qty, @delivered_qty, @received_qty, @amount_cents, @cost_coverage,
        @sku_count, @temu_status, @ship_status, @order_time, @deliver_time, @latest_ship_at,
-       @receive_warehouse_name, @supplier_name, @items_json,
+       @receive_warehouse_name, @supplier_name, @items_json, @label_codes,
        @express_company, @express_delivery_sn, @driver_name, @plate_number, @deliver_package_num, @receive_package_num,
        @sub_warehouse_name, @receive_address_json, @is_print_box_mark, @delivery_method, @express_batch_sn,
        @predict_package_weight, @ship_create_time, @inbound_time, @category, @today_can_deliver, @is_first,
@@ -237,7 +238,39 @@ async function refreshConsignAllChunked(db, batchSize = 500) {
     tx();
     await new Promise((r) => setImmediate(r));
   }
+  try { await backfillLabelCodes(db); } catch { /* labelCode 回填失败不阻塞 */ }
   return { purchaseOrders: poRows.length, shipMerged, rows: rows.length };
 }
 
-module.exports = { refreshConsignAll, refreshConsignAllChunked, parsePurchaseOrder, buildCostMap, PO_STATUS, SHIP_STATUS };
+async function backfillLabelCodes(db) {
+  const { queryGoodsLabelCodes } = require("./temuOpenApiShipping.cjs");
+  const rows = db.prepare(
+    "SELECT DISTINCT mall_id, product_skc_id FROM erp_temu_openapi_consign WHERE product_skc_id IS NOT NULL"
+  ).all();
+  const byMall = new Map();
+  for (const r of rows) {
+    if (!byMall.has(r.mall_id)) byMall.set(r.mall_id, new Set());
+    byMall.get(r.mall_id).add(r.product_skc_id);
+  }
+  const upd = db.prepare(
+    "UPDATE erp_temu_openapi_consign SET label_codes = @lc WHERE mall_id = @mall_id AND product_skc_id = @skc_id"
+  );
+  let filled = 0;
+  for (const [mallId, skcSet] of byMall) {
+    try {
+      const map = await queryGoodsLabelCodes({ db, mallId, skcIds: [...skcSet] });
+      const tx = db.transaction(() => {
+        for (const [skcId, lc] of Object.entries(map)) {
+          upd.run({ lc: String(lc), mall_id: mallId, skc_id: skcId });
+          filled++;
+        }
+      });
+      tx();
+    } catch {
+      // 单店 API 失败不阻塞其他店
+    }
+  }
+  return filled;
+}
+
+module.exports = { refreshConsignAll, refreshConsignAllChunked, backfillLabelCodes, parsePurchaseOrder, buildCostMap, PO_STATUS, SHIP_STATUS };
