@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Col, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, DatePicker, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { CloudSyncOutlined, EyeOutlined, ReloadOutlined, SearchOutlined, SwapOutlined } from "@ant-design/icons";
+import { CloudSyncOutlined, DownloadOutlined, EyeOutlined, ReloadOutlined, SearchOutlined, SwapOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
 import StatCard from "./StatCard";
 
@@ -110,6 +110,7 @@ export default function OtherInoutSection() {
   const [, setLoadedAt] = useState<string | null>(null);
   const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
+  const [dateRange, setDateRange] = useState<[any, any] | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   // 单行展开（accordion）：一次只看一单，跟原 Drawer 行为一致
@@ -153,6 +154,8 @@ export default function OtherInoutSection() {
         page,
         limit: pageSize,
         offset,
+        dateFrom: dateRange?.[0]?.format?.("YYYY-MM-DD") || undefined,
+        dateTo: dateRange?.[1]?.format?.("YYYY-MM-DD 23:59:59") || undefined,
       });
       if (id !== requestIdRef.current) return;
       setRows(Array.isArray(result?.rows) ? result.rows : []);
@@ -169,7 +172,7 @@ export default function OtherInoutSection() {
     } finally {
       if (id === requestIdRef.current) setLoading(false);
     }
-  }, [query, page, pageSize]);
+  }, [query, page, pageSize, dateRange]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -195,6 +198,47 @@ export default function OtherInoutSection() {
 
   const totalQty = useMemo(() => rows.reduce((s, r) => s + Number(r.totalQty || 0), 0), [rows]);
   const totalAmount = useMemo(() => rows.reduce((s, r) => s + Number(r.totalAmount || 0), 0), [rows]);
+
+  const [exporting, setExporting] = useState(false);
+  const exportExcel = useCallback(async () => {
+    let exportRows: OtherInoutRow[] = rows;
+    if (dateRange?.[0] && dateRange?.[1]) {
+      if (!erp?.otherInout?.list) { message.error("ERP 接口未就绪"); return; }
+      setExporting(true);
+      try {
+        const all = await erp.otherInout.list({
+          dateFrom: dateRange[0].format("YYYY-MM-DD"),
+          dateTo: dateRange[1].format("YYYY-MM-DD 23:59:59"),
+          search: query || undefined,
+          limit: 100000,
+        });
+        exportRows = Array.isArray(all) ? all : [];
+      } catch (e: any) {
+        message.error(e?.message || "导出数据获取失败");
+        setExporting(false);
+        return;
+      }
+      setExporting(false);
+    }
+    if (!exportRows.length) { message.warning("暂无数据可导出"); return; }
+    const XLSX = await import("xlsx");
+    const header = ["出入库单号", "业务时间", "类型", "状态", "仓库", "店铺", "总数量", "总金额", "制单人", "原因", "标签", "备注"];
+    const data = exportRows.map(r => [
+      String(r.ioId ?? ""), r.ioDate ?? "", r.type ?? "", r.status ?? "",
+      [r.warehouse, r.wmsCoName].filter(Boolean).join(" / "), r.storeName ?? "",
+      r.totalQty ?? "", r.totalAmount ?? "", r.creatorName ?? "",
+      r.reason ?? "", r.labels ?? "", r.remark ?? "",
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
+    ws["!cols"] = [{ wch: 14 }, { wch: 20 }, { wch: 12 }, { wch: 8 }, { wch: 18 }, { wch: 16 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 16 }, { wch: 12 }, { wch: 20 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "其他出入库");
+    const fromStr = dateRange?.[0]?.format?.("YYYYMMDD") || "";
+    const toStr = dateRange?.[1]?.format?.("YYYYMMDD") || "";
+    const dateSuffix = fromStr && toStr ? `${fromStr}-${toStr}` : new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `其他出入库_${dateSuffix}.xlsx`);
+    message.success(`已导出 ${exportRows.length} 条`);
+  }, [rows, dateRange, query]);
 
   const columns: ColumnsType<OtherInoutRow> = [
     {
@@ -464,17 +508,8 @@ export default function OtherInoutSection() {
       </Row>
 
       <section className="app-panel">
-        <div className="app-panel__title" style={{ justifyContent: "flex-end" }}>
-          <div>
-            <Space>
-              <Button type="primary" icon={<SwapOutlined />} onClick={openXfer}>新建换货</Button>
-              <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>刷新</Button>
-            </Space>
-          </div>
-        </div>
-
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div className="material-filter-bar material-filter-bar--search">
+          <div className="material-filter-bar material-filter-bar--search" style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
             <Input.Search
               allowClear
               prefix={<SearchOutlined />}
@@ -489,6 +524,20 @@ export default function OtherInoutSection() {
               onSearch={(value) => { setQuery(value.trim()); setPage(1); }}
               style={{ maxWidth: 520 }}
             />
+            <DatePicker.RangePicker
+              allowClear
+              placeholder={["开始日期", "结束日期"]}
+              value={dateRange}
+              onChange={(dates) => { setDateRange(dates as [any, any] | null); setPage(1); }}
+              style={{ width: 260 }}
+            />
+            <div style={{ marginLeft: "auto" }}>
+              <Space>
+                <Button type="primary" icon={<SwapOutlined />} onClick={openXfer}>新建换货</Button>
+                <Button icon={<DownloadOutlined />} loading={exporting} onClick={exportExcel}>导出</Button>
+                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>刷新</Button>
+              </Space>
+            </div>
           </div>
 
           <Table<OtherInoutRow>

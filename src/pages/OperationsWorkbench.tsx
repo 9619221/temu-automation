@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { Alert, Button, Card, Empty, Image, InputNumber, Modal, Popover, Progress, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
-import { EditOutlined, EyeOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Empty, Image, Modal, Popover, Progress, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, TODO_TYPE_TAG, TODO_LEVEL_TEXT, TREND_COLORS, processTarget, diagnose, fmtNum, fmtMoney, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
+import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, diagnose, fmtNum, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -14,8 +14,9 @@ import PipelineTab from "../components/PipelineTab";
 import OpsCommonFilters from "../components/ops/OpsCommonFilters";
 import ReviewTab from "../components/ops/ReviewTab";
 import SiteExceptionTab from "../components/ops/SiteExceptionTab";
-import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, fetchHpfDetail, useActivityList, useQualityPanel, useAdReport, useLifecycle, reloadAllOpsReports } from "../hooks/useOpsReports";
-import type { HpfDetail } from "../types/opsWorkbench";
+import { useSkuSales, useRiskList, useStockOrders, useSalesTrend, useProductPanel, useFirstShipToday, useGoodsCreatedToday, useOpenapiQc, useHighPriceFlow, fetchHpfDetail, useActivityList, useQualityPanel, useLifecycle, useFlowAnalysis, fetchFlowTrend, reloadAllOpsReports } from "../hooks/useOpsReports";
+import type { FlowTrendPoint } from "../hooks/useOpsReports";
+import type { HpfDetail, FlowAnalysisRow } from "../types/opsWorkbench";
 import { useStoreScope } from "../hooks/useStoreScope";
 import { useOpsWorkbenchStore } from "../stores/opsWorkbenchStore";
 
@@ -85,13 +86,6 @@ interface StockOrderRow {
   __rk?: number;
 }
 interface TrendRow { mall_id: string; store_code: string | null; mall_name: string | null; stat_date: string; sales: number; }
-// 官方店铺维度广告/流量(ad_report_mall)：原始指标值 rate×100(%)、金额=分、roas=×1000
-interface AdMallRow {
-  mall_id: string; store: string;
-  imprCnt: number | null; clkCnt: number | null; ctr: number | null; cartCnt: number | null;
-  cvr: number | null; orderPayCnt: number | null; orderPayAmt: number | null;
-  spend: number | null; roas: number | null; acos: number | null;
-}
 interface StoreMatrixRow {
   store_code: string; mall_id: string; mall_name: string | null; owner: string | null;
   sales: number; sale_7d: number; lack: number; soldout: number;
@@ -154,13 +148,6 @@ interface HpfRow {
 interface Diag { label: string; action: string; level: number }
 interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
 
-// 今日待办:跨「商品/风险/活动」维度汇成的统一任务项;key 为稳定标识,供后续闭环(标记已处理)复用
-interface TodoTask {
-  key: string; type: "product" | "code" | "risk" | "activity"; typeLabel: string;
-  level: number; store: string; mall_id: string;
-  object: string; sub: string | null; metric: string; action: string;
-  status?: "done" | "ignored" | null; __rk?: number;
-}
 
 // ========== 纯静态 column 定义(不引用组件 state/回调,避免每次渲染重建) ==========
 const storeColStatic = { title: "店号", dataIndex: "store_code", width: 88, fixed: "left" as const, render: (v: string | null) => <Typography.Text strong>{formatStoreNo(v)}</Typography.Text>, sorter: (a: any, b: any) => (a.store_code || "").localeCompare(b.store_code || "") };
@@ -321,7 +308,6 @@ export default function OperationsWorkbench() {
   const ownerFilter = useOpsWorkbenchStore((s) => s.ownerFilter);
   const setOwner = useOpsWorkbenchStore((s) => s.setOwnerFilter);
   // 合并 Tab 内的子段切换
-  const [storeSeg, setStoreSeg] = useSessionState<string>(owViewKey("storeSeg"), "ad");
   const [prodSeg, setProdSeg] = useSessionState<string>(owViewKey("prodSeg"), "panel");
 
   const goProduct = useCallback((seg: string) => { setProdSeg(seg); setActiveTab("product"); }, []);
@@ -329,9 +315,8 @@ export default function OperationsWorkbench() {
   const { rows: skuRows, loading: skuLoading, reload: loadSku }: { rows: SkuRow[]; loading: boolean; reload: () => void } = useSkuSales();
   const { rows: riskRows, loading: riskLoading }: { rows: RiskRow[]; loading: boolean } = useRiskList(activeTab === "risk" || activeTab === "todo" || activeTab === "pipeline");
   const { products: actProducts, rows: actRows, loading: actLoading }: { products: ActProductRow[]; rows: ActivityRow[]; loading: boolean } = useActivityList(activeTab === "activity" || activeTab === "todo");
-  const { rows: adRows, loading: adLoading }: { rows: AdMallRow[]; loading: boolean } = useAdReport(activeTab === "store");
   const { rows: stockRows, loading: stockLoading, loaded: stockLoaded }: { rows: StockOrderRow[]; loading: boolean; loaded: boolean } = useStockOrders(activeTab === "stock");
-  const { rows: trendRows, loading: trendLoading }: { rows: TrendRow[]; loading: boolean } = useSalesTrend(!OFFICIAL_SOURCE && activeTab === "store");
+  const { rows: trendRows, loading: trendLoading }: { rows: TrendRow[]; loading: boolean } = useSalesTrend(!OFFICIAL_SOURCE && activeTab === "overview");
   const { rows: panelRows, loading: panelLoading }: { rows: ProductPanelRow[]; loading: boolean } = useProductPanel(activeTab === "product" || activeTab === "pipeline");
   const { rows: firstShipRows }: { rows: FirstShipRow[] } = useFirstShipToday(activeTab === "overview");
   const { rows: goodsCreatedRows }: { rows: Array<{ mall_id: string; store_code: string | null }> } = useGoodsCreatedToday(activeTab === "overview");
@@ -339,12 +324,18 @@ export default function OperationsWorkbench() {
   const { rows: qualityRows, shops: qualityShops, loading: qualityLoading }: { rows: QualityRow[]; shops: QualityShopRow[]; loading: boolean } = useQualityPanel(activeTab === "quality" || activeTab === "pipeline");
   const { rows: hpfRows, loading: hpfLoading }: { rows: HpfRow[]; loading: boolean } = useHighPriceFlow(activeTab === "hpf" || activeTab === "pipeline");
   const { rows: lifecycleRows, loading: lifecycleLoading }: { rows: Array<{ mall_id: string; skc_id: string; status: string }>; loading: boolean } = useLifecycle(activeTab === "overview" || activeTab === "product");
+  const [flowDateFilter, setFlowDateFilter] = useSessionState(owViewKey("flowDate"), "");
+  const { rows: flowRows, availableDates: flowDates, loading: flowLoading } = useFlowAnalysis(activeTab === "flux", flowDateFilter);
+  useEffect(() => { if (!flowDateFilter && flowDates.length > 0) setFlowDateFilter(flowDates[0]); }, [flowDates, flowDateFilter, setFlowDateFilter]);
   // 字典共享:店铺健康全局只拉一次,派生 owner 映射/过滤
   const { shopRows, shopLoading, ownerOptions, inScope }: { shopRows: ShopHealthRow[]; shopLoading: boolean; ownerOptions: string[]; inScope: (code: string | null | undefined) => boolean } = useStoreScope();
   // 保留:销量趋势弹窗 / 疵点照片预览(非 report,组件局部 UI 态)
   const [trendOf, setTrendOf] = useState<{ productId: string; title: string } | null>(null);
   const [trendModalRows, setTrendModalRows] = useState<Array<{ date: string; qty: number; revenue: number }>>([]);
   const [trendModalLoading, setTrendModalLoading] = useState(false);
+  const [flowTrendOf, setFlowTrendOf] = useState<{ mallId: string; productId: string; goodsId: string; site: string; title: string } | null>(null);
+  const [flowTrendRows, setFlowTrendRows] = useState<Record<string, any>[]>([]);
+  const [flowTrendLoading, setFlowTrendLoading] = useState(false);
   const [flawPreviewVisible, setFlawPreviewVisible] = useState(false);
   const [flawPreviewImages, setFlawPreviewImages] = useState<string[]>([]);
   const [hpfDetailOpen, setHpfDetailOpen] = useState(false);
@@ -372,12 +363,7 @@ export default function OperationsWorkbench() {
   const [onsaleDaysFilter, setOnsaleDaysFilter] = useSessionState(owViewKey("onsaleDays"), "all"); // 加入站点天数筛选
   const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
   const [kindFilter, setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
-  const [todoType, setTodoType] = useSessionState(owViewKey("todoType"), "all");
-  const [todoStatus, setTodoStatus] = useSessionState(owViewKey("todoStatus"), "open"); // 默认只看待处理
-  const [batchPrice, setBatchPrice] = useState<number | null>(null); // 活动报名:批量填申报价
-  const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
-  const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
-  const [enrollBusy, setEnrollBusy] = useState(false);
+  const [hpfStatusFilter, setHpfStatusFilter] = useSessionState(owViewKey("hpfStatus"), "all");
   const [, startJumpTransition] = useTransition();
   const jumpWorkbench = useCallback((tab: string, query: string, before?: () => void) => {
     before?.();
@@ -411,195 +397,10 @@ export default function OperationsWorkbench() {
 
     jumpWorkbench("risk", nameQuery || codeQuery || productQuery);
   }, [jumpWorkbench, setProdSeg]);
-  const [enrollModalSku, setEnrollModalSku] = useState<{ mall_id: string; store_code: string | null; sku_ext_code: string; sku_ext_codes?: string[]; product_name: string | null } | null>(null);
-  const [actDetailRow, setActDetailRow] = useState<ActProductRow | null>(null);
-  const [addStockOpen, setAddStockOpen] = useState<string | null>(null);
-  const [addStockVal, setAddStockVal] = useState<number | null>(null);
-  // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
-  const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
-    try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
-  });
-  const markTask = useCallback((key: string, status: "done" | "ignored" | null) => {
-    setTodoState((prev) => {
-      const next = { ...prev };
-      if (status === null) delete next[key]; else next[key] = status;
-      try { localStorage.setItem("ow_todo_state", JSON.stringify(next)); } catch { /* */ }
-      return next;
-    });
-    // 写后端(跨设备/跨用户共享);后端不可用时静默,localStorage 已兜底
-    try { window.electronAPI?.erp?.opTask?.set?.({ taskKey: key, status }); } catch { /* */ }
-  }, []);
+  const [actStatusFilter, setActStatusFilter] = useState<string>("进行中");
   const navigate = useNavigate();
-  // 待办「去处理」:备货跳应用内采购单页,其余跳 Temu 卖家后台对应页(openExternal 已存在)
-  const goProcess = useCallback((t: TodoTask) => {
-    const tgt = processTarget(t);
-    if (tgt.route) { navigate(tgt.route); return; }
-    if (tgt.ext) {
-      const open = window.electronAPI?.app?.openExternal;
-      if (open) open(tgt.ext); else window.open(tgt.ext, "_blank");
-    }
-  }, [navigate]);
 
-  // 活动报名决策表:每行(店×活动×SKU)的「建议申报价/活动库存」草稿,默认申报价=活动参考价,落 localStorage(不提交)
-  const [enrollDraft, setEnrollDraft] = useState<Record<string, { price?: number; stock?: number }>>(() => {
-    try { return JSON.parse(localStorage.getItem("ow_enroll_draft") || "{}"); } catch { return {}; }
-  });
-  const enrollKey = useCallback((r: ActivityRow) => `${r.mall_id}|${r.activity_id || r.kind || ""}|${r.sku_ext_code || r.skc_id || ""}`, []);
-  const persistDraft = useCallback((next: Record<string, { price?: number; stock?: number }>) => {
-    setEnrollDraft(next);
-    try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch { /* */ }
-  }, []);
-  const setDraft = useCallback((key: string, patch: { price?: number | null; stock?: number | null }) => {
-    setEnrollDraft((prev) => {
-      const cur = { ...(prev[key] || {}) };
-      if ("price" in patch) { if (patch.price == null) delete cur.price; else cur.price = patch.price; }
-      if ("stock" in patch) { if (patch.stock == null) delete cur.stock; else cur.stock = patch.stock; }
-      const next = { ...prev, [key]: cur };
-      try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch { /* */ }
-      return next;
-    });
-  }, []);
-  // 生效申报价/库存:草稿优先,否则默认参考价(无则原申报价)/快照库存
-  const effPrice = useCallback((r: ActivityRow): number | null => {
-    const d = enrollDraft[enrollKey(r)]?.price;
-    return d != null ? d : (r.suggested_price != null ? r.suggested_price : r.signup_price);
-  }, [enrollDraft, enrollKey]);
-  // 每货号「活动最小库存」:该商品所有可报活动里最小的正 activity_stock(避免过量承诺)
-  const skuMinStock = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of actRows) {
-      const s = Number(r.activity_stock);
-      if (!r.sku_ext_code || !Number.isFinite(s) || s <= 0) continue;
-      const cur = m.get(r.sku_ext_code);
-      if (cur == null || s < cur) m.set(r.sku_ext_code, s);
-    }
-    return m;
-  }, [actRows]);
-  const effStock = useCallback((r: ActivityRow): number => {
-    const d = enrollDraft[enrollKey(r)]?.stock;
-    if (d != null) return d;
-    if (r.sku_ext_code && skuMinStock.has(r.sku_ext_code)) return skuMinStock.get(r.sku_ext_code)!; // 默认取活动最小值
-    return r.activity_stock || 0;
-  }, [enrollDraft, enrollKey, skuMinStock]);
 
-  // 提交报名:勾选行→按活动分组→worker live match 解析权威 ID(dryRun 预演)→二次确认→真提交
-  const submitEnroll = useCallback(async () => {
-    const rows = selActRows;
-    if (!rows.length) { message.warning("请先勾选要报名的商品行"); return; }
-    const api = window.electronAPI?.automation?.yunduEnrollPriced;
-    if (!api) { message.error("当前桌面端不支持(请重启/更新应用)"); return; }
-    const noId = rows.filter((r) => !r.activity_id);
-    if (noId.length) { message.error(`有 ${noId.length} 行缺活动ID(快照未透出),无法提交;请刷新数据或换有ID的活动`); return; }
-    // 按活动(thematicId+type)分组
-    const groups = new Map<string, { thId: string; type: number | null; rows: ActivityRow[] }>();
-    for (const r of rows) {
-      const k = `${r.activity_id}|${r.activity_type ?? ""}`;
-      if (!groups.has(k)) groups.set(k, { thId: r.activity_id!, type: r.activity_type, rows: [] });
-      groups.get(k)!.rows.push(r);
-    }
-    const lossRows = rows.filter((r) => { const p = effPrice(r); return p != null && r.cost != null && p < r.cost; });
-    const noPrice = rows.filter((r) => effPrice(r) == null);
-    if (noPrice.length) { message.error(`有 ${noPrice.length} 行没有申报价,先填价再提交`); return; }
-    setEnrollBusy(true);
-    try {
-      // 1) 逐组 dryRun 预演,拿权威解析 + 未匹配
-      const previews: Array<{ thId: string; type: number | null; n: number; resp: any }> = [];
-      for (const g of groups.values()) {
-        const items = g.rows.map((r) => ({ extCode: r.sku_ext_code || "", activityPriceYuan: effPrice(r)!, activityStock: effStock(r) }));
-        const resp = await api({ activityType: g.type ?? undefined, activityThematicId: Number(g.thId), items, dryRun: true });
-        previews.push({ thId: g.thId, type: g.type, n: g.rows.length, resp });
-      }
-      const totalResolved = previews.reduce((a, p) => a + (p.resp?.resolved?.length || 0), 0);
-      const allMissing = previews.flatMap((p) => p.resp?.missing || []);
-      // 2) 二次确认
-      Modal.confirm({
-        title: "确认提交活动报名",
-        width: 560,
-        content: (
-          <div style={{ fontSize: 13 }}>
-            <p>共 <b>{rows.length}</b> 行 / {groups.size} 个活动;live 解析成功 <b style={{ color: "#3f8600" }}>{totalResolved}</b> 个 SKU。</p>
-            {allMissing.length > 0 && <p style={{ color: "#d46b08" }}>⚠️ {allMissing.length} 个货号在活动里没匹配到(将跳过):{allMissing.slice(0, 8).join(", ")}{allMissing.length > 8 ? "…" : ""}</p>}
-            {lossRows.length > 0 && <p style={{ color: "#cf1322", fontWeight: 600 }}>🔴 {lossRows.length} 行申报价低于成本(亏本):{lossRows.slice(0, 5).map((r) => r.sku_ext_code).join(", ")}{lossRows.length > 5 ? "…" : ""}</p>}
-            <p style={{ color: "#888" }}>申报价将按你填的值(元×100=分)真实提交到 Temu,确认后不可撤销。</p>
-          </div>
-        ),
-        okText: lossRows.length > 0 ? "仍然提交(含亏本)" : "确认提交",
-        okButtonProps: { danger: lossRows.length > 0 },
-        cancelText: "取消",
-        onOk: async () => {
-          let ok = 0, fail = 0;
-          for (const g of groups.values()) {
-            const items = g.rows.map((r) => ({ extCode: r.sku_ext_code || "", activityPriceYuan: effPrice(r)!, activityStock: effStock(r) }));
-            try {
-              const resp = await api({ activityType: g.type ?? undefined, activityThematicId: Number(g.thId), items, dryRun: false });
-              if (resp?.ok) ok += resp.submittedProducts || 0; else fail += 1;
-            } catch { fail += 1; }
-          }
-          if (fail === 0) { message.success(`已提交 ${ok} 个商品报名`); setSelActRows([]); }
-          else message.warning(`提交完成:成功组若干、失败 ${fail} 组,详见各活动报名记录`);
-        },
-      });
-    } catch (e: any) {
-      message.error("预演失败:" + (e?.message || String(e)));
-    } finally { setEnrollBusy(false); }
-  }, [selActRows, effPrice, effStock]);
-
-  // 多店·扩展路:把勾选行按(店×活动)拼成任务下发云端,各店登录态的浏览器扩展自动报名(免逐店切登)
-  const submitViaExtension = useCallback(async () => {
-    const rows = selActRows;
-    if (!rows.length) { message.warning("请先勾选要报名的商品行"); return; }
-    const api = window.electronAPI?.erp?.enroll?.create;
-    if (!api) { message.error("当前桌面端不支持(请重启/更新应用)"); return; }
-    const bad = rows.filter((r) => !r.product_id || !r.skc_id || !r.sku_id || !r.activity_id);
-    if (bad.length) { message.error(`有 ${bad.length} 行缺 ID(快照未透出 product/skc/sku/activity),走扩展路需完整 ID`); return; }
-    const noPrice = rows.filter((r) => effPrice(r) == null);
-    if (noPrice.length) { message.error(`有 ${noPrice.length} 行没填申报价`); return; }
-    // 分组:mall → (activity_id,type) → product → skc → sku
-    const groups = new Map<string, { mall_id: string; activity_type: number | null; activity_thematic_id: string; prod: Map<string, { productId: number; activityStock: number; skc: Map<string, Map<string, number>> }> }>();
-    for (const r of rows) {
-      const k = `${r.mall_id}|${r.activity_id}|${r.activity_type ?? ""}`;
-      if (!groups.has(k)) groups.set(k, { mall_id: r.mall_id, activity_type: r.activity_type, activity_thematic_id: r.activity_id!, prod: new Map() });
-      const g = groups.get(k)!;
-      if (!g.prod.has(r.product_id!)) g.prod.set(r.product_id!, { productId: Number(r.product_id), activityStock: effStock(r), skc: new Map() });
-      const pe = g.prod.get(r.product_id!)!;
-      pe.activityStock = effStock(r);
-      if (!pe.skc.has(r.skc_id!)) pe.skc.set(r.skc_id!, new Map());
-      pe.skc.get(r.skc_id!)!.set(r.sku_id!, Math.round(effPrice(r)! * 100));
-    }
-    const tasks = [...groups.values()].map((g) => ({
-      mall_id: g.mall_id, site: "agentseller", activity_type: g.activity_type, activity_thematic_id: g.activity_thematic_id,
-      product_list: [...g.prod.values()].map((pe) => ({
-        productId: pe.productId, activityStock: pe.activityStock,
-        skcList: [...pe.skc.entries()].map(([skcId, skuMap]) => ({ skcId: Number(skcId), skuList: [...skuMap.entries()].map(([skuId, activityPrice]) => ({ skuId: Number(skuId), activityPrice })) })),
-      })),
-    }));
-    const lossRows = rows.filter((r) => { const p = effPrice(r); return p != null && r.cost != null && p < r.cost; });
-    Modal.confirm({
-      title: "下发报名任务(多店·扩展执行)",
-      width: 560,
-      content: (
-        <div style={{ fontSize: 13 }}>
-          <p>共 <b>{rows.length}</b> 行 → <b>{tasks.length}</b> 个(店×活动)任务,下发到云端,由各店<b>登录态的浏览器扩展</b>自动报名(免逐店切登)。</p>
-          {lossRows.length > 0 && <p style={{ color: "#cf1322", fontWeight: 600 }}>🔴 {lossRows.length} 行申报价低于成本(亏本)</p>}
-          <p style={{ color: "#888" }}>需对应店铺的 Chrome 开着(装了扩展)才会执行;结果稍后在「报名记录」或刷新可见。</p>
-        </div>
-      ),
-      okText: lossRows.length > 0 ? "仍然下发(含亏本)" : "下发任务",
-      okButtonProps: { danger: lossRows.length > 0 },
-      cancelText: "取消",
-      onOk: async () => {
-        setEnrollBusy(true);
-        try {
-          const resp = await api({ tasks });
-          const out = resp?.data?.rows || [];
-          const ok = out.filter((x: { ok: boolean }) => x.ok).length;
-          if (ok) { message.success(`已下发 ${ok}/${out.length} 个报名任务,等扩展执行`); setSelActRows([]); }
-          else message.error("下发失败:" + (out[0]?.error || resp?.error || "未知"));
-        } catch (e: any) { message.error("下发失败:" + (e?.message || String(e))); }
-        finally { setEnrollBusy(false); }
-      },
-    });
-  }, [selActRows, effPrice, effStock]);
 
   // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
   const openFlawImages = useCallback(async (mallId: string, qcBillId: string) => {
@@ -626,25 +427,6 @@ export default function OperationsWorkbench() {
     })();
     return () => { alive = false; };
   }, [trendOf]);
-  // 挂载时从后端加载待办状态;本地有、后端没有的首次推上去(localStorage → 后端迁移);后端不可用则保持本地
-  useEffect(() => {
-    const api = window.electronAPI?.erp?.opTask;
-    if (!api?.list) return;
-    (async () => {
-      try {
-        const resp = await api.list();
-        if (!resp?.ok || !resp.data?.rows) return;
-        const backend: Record<string, "done" | "ignored"> = {};
-        for (const r of resp.data.rows) backend[r.task_key] = r.status;
-        let local: Record<string, "done" | "ignored"> = {};
-        try { local = JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { /* */ }
-        for (const k of Object.keys(local)) if (!(k in backend)) api.set?.({ taskKey: k, status: local[k] });
-        const merged = { ...local, ...backend };
-        setTodoState(merged);
-        try { localStorage.setItem("ow_todo_state", JSON.stringify(merged)); } catch { /* */ }
-      } catch { /* 后端不可用,保持 localStorage */ }
-    })();
-  }, []);
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
     return { ...r, _issues: issues, _level: issues.length ? Math.max(...issues.map((i) => i.level)) : 0 };
@@ -683,73 +465,6 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b._level - a._level || b.last7d - a.last7d);
   }, [activeTab, diagnosed, storeFilter, diagFilter, search, inScope]);
-
-  // 今日待办:把商品诊断 issues + 中高风险 + 可报活动汇成统一任务流(仅「我的店」范围)
-  const todoTasks = useMemo<TodoTask[]>(() => {
-    if (activeTab !== "todo") return [];
-    const out: TodoTask[] = [];
-    for (const r of diagnosed) {
-      if (!inScope(r.store_code || r.mall_id)) continue;
-      const store = r.store_code || r.mall_id;
-      for (const it of r._issues) {
-        const isCode = it.label === "缺货号";
-        out.push({
-          key: `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}|${it.label}`,
-          type: isCode ? "code" : "product", typeLabel: it.label, level: it.level,
-          store, mall_id: r.mall_id,
-          object: r.title || r.sku_ext_code || "—", sub: r.sku_ext_code || r.skc_id || null,
-          metric: (r.stock || 0) <= 0 ? "已断货" : (r.sale_days != null ? `可售${r.sale_days}天` : `库存${fmtNum(r.stock)}`),
-          action: it.action,
-        });
-      }
-    }
-    if (!HIDE_RISK) for (const r of riskRows) {
-      if (!inScope(r.store_code || r.mall_id) || r.severity === "low") continue; // 待办只收中高风险
-      out.push({
-        key: `risk|${r.mall_id}|${r.skc_id}|${r.risk_type}|${r.title}`,
-        type: "risk", typeLabel: RISK_TYPE_LABEL[r.risk_type || ""] || r.risk_type || "风险",
-        level: SEV_RANK[r.severity || ""] || 1, store: r.store_code || r.mall_id, mall_id: r.mall_id,
-        object: r.title || r.risk_type || "—", sub: r.skc_id || null,
-        metric: (SEV_TEXT[r.severity || ""] || "") + "风险" + (r.quantity ? ` ·${fmtNum(r.quantity)}` : ""),
-        action: "去卖家后台处理违规 / 申诉",
-      });
-    }
-    if (!HIDE_ACTIVITY) for (const r of actRows) {
-      if (!inScope(r.store_code || r.mall_id)) continue;
-      const gp = (r.signup_price != null && r.cost != null) ? r.signup_price - r.cost : null;
-      out.push({
-        key: `act|${r.mall_id}|${r.skc_id}|${r.sku_ext_code}|${r.title}`,
-        type: "activity", typeLabel: KIND_LABEL[r.kind || ""] || "活动", level: 1,
-        store: r.store_code || r.mall_id, mall_id: r.mall_id,
-        object: r.title || r.sku_ext_code || "(未命名活动)", sub: r.sku_ext_code || null,
-        metric: gp != null ? (gp < 0 ? `亏${fmtMoney(gp)}` : `毛利${fmtMoney(gp)}`) : (r.signup_price != null ? `报名${fmtMoney(r.signup_price)}` : "—"),
-        action: gp != null && gp < 0 ? "亏本慎报 / 调价后再报" : "可报名冲量",
-      });
-    }
-    return out;
-  }, [activeTab, diagnosed, riskRows, actRows, inScope]);
-  const todoCount = useMemo(() => {
-    if (activeTab !== "todo") return { product: 0, code: 0, risk: 0, activity: 0, urgent: 0, done: 0 };
-    const c = { product: 0, code: 0, risk: 0, activity: 0, urgent: 0, done: 0 };
-    for (const t of todoTasks) {
-      const st = todoState[t.key];
-      if (st === "done") { c.done++; continue; }
-      if (st === "ignored") continue;
-      c[t.type]++; if (t.level >= 3) c.urgent++;
-    }
-    return c;
-  }, [activeTab, todoTasks, todoState]);
-  const todoView = useMemo(() => {
-    if (activeTab !== "todo") return [] as (TodoTask & { __rk: number })[];
-    let v = todoTasks.map((t) => ({ ...t, status: todoState[t.key] || null }));
-    if (storeFilter !== "all") v = v.filter((t) => t.store === storeFilter);
-    if (todoType !== "all") v = v.filter((t) => t.type === todoType);
-    if (todoStatus === "open") v = v.filter((t) => !t.status);
-    else if (todoStatus !== "all") v = v.filter((t) => t.status === todoStatus);
-    const q = search.trim().toLowerCase();
-    if (q) v = v.filter((t) => t.object.toLowerCase().includes(q) || (t.sub || "").toLowerCase().includes(q));
-    return [...v].sort((a, b) => b.level - a.level).map((t, i) => ({ ...t, __rk: i }));
-  }, [activeTab, todoTasks, storeFilter, todoType, todoStatus, search, todoState]);
 
   // 库存补货：需补货 SKU（售罄/即将断货/有建议备货），紧急度排序
   const restockView = useMemo(() => {
@@ -792,69 +507,52 @@ export default function OperationsWorkbench() {
     return v; // 后端已按 店→可报活动数 排序
   }, [actProducts, storeFilter, kindFilter, search, inScope]);
 
-
+  type ActFlatRow = { key: string; store_code: string | null; mall_id: string; mall_name: string | null; product_name: string | null; sku_ext_code: string; thumb: string | null } & ActivityDetail;
+  const actFlatView = useMemo(() => {
+    if (activeTab !== "activity") return [] as ActFlatRow[];
+    const rows: ActFlatRow[] = [];
+    for (const p of actProducts) {
+      if (!inScope(p.store_code || p.mall_id)) continue;
+      if (storeFilter !== "all" && p.store_code !== storeFilter) continue;
+      for (const a of p.activities) {
+        if (a.status === "已结束") continue;
+        rows.push({ ...a, key: `${p.key}|${a.activity_id || a.title || rows.length}`, store_code: p.store_code, mall_id: p.mall_id, mall_name: p.mall_name, product_name: p.product_name, sku_ext_code: p.sku_ext_code, thumb: p.thumb });
+      }
+    }
+    return rows;
+  }, [activeTab, actProducts, storeFilter, inScope]);
+  const actStatusCounts = useMemo(() => {
+    const c: Record<string, number> = { "全部": 0 };
+    const kw = search.trim().toLowerCase();
+    for (const r of actFlatView) {
+      if (kw && ![r.product_name, r.sku_ext_code, r.title].some(x => (x || "").toLowerCase().includes(kw))) continue;
+      c["全部"]++;
+      const s = r.status || "未知";
+      c[s] = (c[s] || 0) + 1;
+    }
+    return c;
+  }, [actFlatView, search]);
+  const actFiltered = useMemo(() => {
+    let v = actFlatView;
+    if (actStatusFilter !== "全部") v = v.filter(r => r.status === actStatusFilter);
+    const kw = search.trim().toLowerCase();
+    if (kw) v = v.filter(r => [r.product_name, r.sku_ext_code, r.title].some(x => (x || "").toLowerCase().includes(kw)));
+    const sorted = [...v].sort((a, b) => (a.store_code || a.mall_id).localeCompare(b.store_code || b.mall_id) || a.sku_ext_code.localeCompare(b.sku_ext_code));
+    const out = sorted.map(r => ({ ...r, _prodSpan: 1 }));
+    let i = 0;
+    while (i < out.length) {
+      const gk = `${out[i].store_code || out[i].mall_id}|${out[i].sku_ext_code}`;
+      let j = i + 1;
+      while (j < out.length && `${out[j].store_code || out[j].mall_id}|${out[j].sku_ext_code}` === gk) j++;
+      out[i]._prodSpan = j - i;
+      for (let k = i + 1; k < j; k++) out[k]._prodSpan = 0;
+      i = j;
+    }
+    return out;
+  }, [actFlatView, actStatusFilter, search]);
 
 
   // 活动概览顶部汇总(我的店范围):优先用 temu_shop_stats 官方统计,全 0 时 fallback 到 actProductView 前端聚合
-  const actSummary = useMemo(() => {
-    if (activeTab !== "activity") return { enrollable: 0, enrolled: 0, ongoing: 0, total: 0, onSale: 0, fromOfficial: false };
-    let enrollable = 0, enrolled = 0, ongoing = 0, total = 0, onSale = 0;
-    for (const r of shopRows) {
-      if (!inScope(r.store_code || r.mall_id)) continue;
-      enrollable += r.enrollable_activity_count || 0;
-      enrolled += r.enrolled_activity_count || 0;
-      ongoing += r.ongoing_activity_count || 0;
-      total += r.total_activity_count || 0;
-      onSale += r.on_sale || 0;
-    }
-    if (enrollable + enrolled + ongoing + total > 0) return { enrollable, enrolled, ongoing, total, onSale, fromOfficial: true };
-    // fallback: 从 actProductView 前端聚合
-    let fbEnrollable = 0, fbEnrolled = 0;
-    const seen = new Set<string>();
-    for (const p of actProductView) {
-      if (!inScope(p.store_code || p.mall_id)) continue;
-      for (const a of p.activities) {
-        const ak = `${p.mall_id}|${a.activity_id || a.title || ""}`;
-        if (!seen.has(ak)) { seen.add(ak); fbEnrollable++; }
-      }
-      fbEnrolled += p.enrolled_count;
-    }
-    return { enrollable: fbEnrollable, enrolled: fbEnrolled, ongoing: 0, total: fbEnrollable + fbEnrolled, onSale, fromOfficial: false };
-  }, [activeTab, shopRows, actProductView, inScope]);
-  // 活动概览:按店拆分的统计行(官方数据可用时才显示)
-  type ActStoreRow = { key: string; store_code: string | null; mall_name: string | null; enrollable: number; enrolled: number; ongoing: number; total: number; on_sale: number };
-  const actByStoreRows = useMemo<ActStoreRow[]>(() => {
-    if (activeTab !== "activity" || !actSummary.fromOfficial) return [];
-    const rows: ActStoreRow[] = [];
-    for (const r of shopRows) {
-      if (!inScope(r.store_code || r.mall_id)) continue;
-      if ((r.enrollable_activity_count || 0) === 0 && (r.enrolled_activity_count || 0) === 0 && (r.ongoing_activity_count || 0) === 0 && (r.total_activity_count || 0) === 0) continue;
-      rows.push({ key: r.store_code || r.mall_id, store_code: r.store_code, mall_name: r.mall_name, enrollable: r.enrollable_activity_count || 0, enrolled: r.enrolled_activity_count || 0, ongoing: r.ongoing_activity_count || 0, total: r.total_activity_count || 0, on_sale: r.on_sale || 0 });
-    }
-    return rows.sort((a, b) => b.enrollable - a.enrollable);
-  }, [activeTab, shopRows, inScope, actSummary.fromOfficial]);
-
-  const modalActRows = useMemo(() => {
-    if (!enrollModalSku) return [];
-    const codes = enrollModalSku.sku_ext_codes ?? [enrollModalSku.sku_ext_code];
-    const set = new Set(codes);
-    return actRows.filter((r) => r.mall_id === enrollModalSku.mall_id && set.has(r.sku_ext_code || ""));
-  }, [enrollModalSku, actRows]);
-
-  const modalActGrouped = useMemo(() => {
-    const rows = modalActRows.filter((r) => r.activity_id).map((r) => ({ ...r, _actSpan: 1 }));
-    rows.sort((a, b) => (a.activity_id || "").localeCompare(b.activity_id || ""));
-    let i = 0;
-    while (i < rows.length) {
-      const aid = rows[i].activity_id;
-      let j = i + 1;
-      while (j < rows.length && rows[j].activity_id === aid) j++;
-      rows[i]._actSpan = j - i;
-      for (let k = i + 1; k < j; k++) rows[k]._actSpan = 0;
-      i = j;
-    }
-    return rows;
-  }, [modalActRows]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
@@ -965,23 +663,6 @@ export default function OperationsWorkbench() {
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [panelBase, slowFilter, onsaleDaysFilter]);
   // 官方流量(店铺维度)：用 shopRows 把 mall_id 映射成店名/store_code，沿用 owner/store 过滤
-  const mallInfoMap = useMemo(() => {
-    const m = new Map<string, { name: string; code: string | null }>();
-    for (const s of shopRows) m.set(s.mall_id, { name: s.mall_name || s.store_code || s.mall_id, code: s.store_code });
-    return m;
-  }, [shopRows]);
-  const adView = useMemo(() => {
-    if (activeTab !== "store") return [] as (AdMallRow & { __rk: number; store_code: string | null })[];
-    let v = adRows.map((r) => { const info = mallInfoMap.get(r.mall_id); return { ...r, store: info?.name || r.mall_id, store_code: info?.code || null }; });
-    v = v.filter((r) => inScope(r.store_code || r.mall_id));
-    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
-    return v.sort((a, b) => (b.spend || 0) - (a.spend || 0)).map((r, i) => ({ ...r, __rk: i }));
-  }, [activeTab, adRows, mallInfoMap, storeFilter, inScope]);
-  const adAgg = useMemo(() => {
-    if (activeTab !== "store") return { impr: 0, clk: 0, spend: 0, amt: 0, ord: 0 };
-    const sum = (k: keyof AdMallRow) => adView.reduce((s, r) => s + (Number(r[k]) || 0), 0);
-    return { impr: sum("imprCnt"), clk: sum("clkCnt"), spend: sum("spend"), amt: sum("orderPayAmt"), ord: sum("orderPayCnt") };
-  }, [activeTab, adView]);
   const stockView = useMemo(() => {
     if (activeTab !== "stock" && activeTab !== "overview") return [] as (StockOrderRow & { __rk: number })[];
     let v = stockRows.filter((r) => inScope(r.store_code || r.mall_id));
@@ -990,82 +671,9 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.product_name || "").toLowerCase().includes(q) || (r.order_no || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [activeTab, stockRows, storeFilter, search, inScope]);
-  const trendChart = useMemo(() => {
-    if (activeTab !== "store") return { data: [] as Record<string, number | string>[], stores: [] as string[] };
-    const scoped = trendRows.filter((r) => inScope(r.store_code || r.mall_id));
-    const dates = [...new Set(scoped.map((r) => r.stat_date))].sort();
-    const totals = new Map<string, number>();
-    for (const r of scoped) { const k = r.store_code || r.mall_id; totals.set(k, (totals.get(k) || 0) + r.sales); }
-    let stores: string[];
-    if (storeFilter !== "all") stores = [storeFilter];
-    else stores = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map((e) => e[0]);
-    const byDate = new Map<string, Record<string, number | string>>();
-    for (const d of dates) byDate.set(d, { date: d });
-    for (const r of scoped) {
-      const k = r.store_code || r.mall_id;
-      if (!stores.includes(k)) continue;
-      const row = byDate.get(r.stat_date);
-      if (row) row[k] = r.sales;
-    }
-    return { data: dates.map((d) => byDate.get(d)!), stores };
-  }, [activeTab, trendRows, storeFilter, inScope]);
-
   // column 定义:纯静态的已移到组件外部(storeColStatic / diagColumnsStatic / restockColumnsStatic 等)
   // 以下仅保留引用组件 state/回调的 column 定义,用 useMemo 包裹
 
-  const todoColumns = useMemo<ColumnsType<TodoTask>>(() => [
-    { title: "紧急度", dataIndex: "level", width: 76, fixed: "left" as const, render: (v: number) => <Tag color={TAG_COLOR[v]}>{TODO_LEVEL_TEXT[v] || "—"}</Tag>, sorter: (a, b) => a.level - b.level, defaultSortOrder: "descend" },
-    { title: "类型", key: "type", width: 90, render: (_, t) => { const tg = TODO_TYPE_TAG[t.type]; return <Tag color={tg?.c}>{tg?.t}·{t.typeLabel}</Tag>; }, filters: [{ text: "运营", value: "product" }, { text: "缺货号", value: "code" }, { text: "风险", value: "risk" }, { text: "活动", value: "activity" }], onFilter: (val, t) => t.type === val },
-    { title: "店号", dataIndex: "store", width: 88, render: (v: string, t) => <Typography.Text strong>{formatStoreNo(v === t.mall_id ? null : v, t.mall_id)}</Typography.Text>, sorter: (a, b) => a.store.localeCompare(b.store) },
-    { title: "对象 · 商品 / SKU", key: "obj", width: 320, render: (_, t) => (
-      <div>
-        <Tooltip title={t.object}><div style={{ fontSize: 12, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.object}</div></Tooltip>
-        {t.sub ? <div style={{ color: "#999", fontSize: 11 }}>{t.sub}</div> : null}
-      </div>
-    ) },
-    { title: "关键指标", dataIndex: "metric", width: 120, render: (v: string) => <span style={{ fontSize: 12 }}>{v}</span> },
-    { title: "建议动作", dataIndex: "action", width: 280, render: (v: string, t) => <span style={{ fontSize: 12, color: LEVEL_COLOR[t.level] }}>{v}</span> },
-    { title: "处理", key: "ops", width: 200, fixed: "right" as const, render: (_, t) => (
-      t.status ? (
-        <span style={{ fontSize: 12 }}><Tag color={t.status === "done" ? "green" : "default"}>{t.status === "done" ? "已处理" : "已忽略"}</Tag><a onClick={() => markTask(t.key, null)}>恢复</a></span>
-      ) : (
-        <span style={{ fontSize: 12 }}>
-          <a style={{ color: "#1677ff" }} onClick={() => goProcess(t)}>{processTarget(t).label}</a>
-          <a style={{ marginLeft: 10, color: "#3f8600" }} onClick={() => markTask(t.key, "done")}>完成</a>
-          <a style={{ marginLeft: 10, color: "#999" }} onClick={() => markTask(t.key, "ignored")}>忽略</a>
-        </span>
-      )
-    ) },
-  ], [markTask, goProcess]);
-
-  const actColumns = useMemo<ColumnsType<ActivityRow & { _actSpan?: number }>>(() => [
-    { title: "活动", key: "act", width: 210, onCell: (r) => ({ rowSpan: r._actSpan ?? 1 }), render: (_, r) => (
-      <div>
-        <Tag color={r.kind === "bidding" ? "purple" : r.kind === "coupon" ? "cyan" : "blue"}>{(r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "活动"}</Tag>
-        {r.title ? <span style={{ fontSize: 12 }}>{r.title}</span> : (r.activity_id ? <span style={{ fontSize: 11, color: "#aaa" }}>ID {r.activity_id}</span> : null)}
-      </div>
-    ) },
-    { title: "截止", dataIndex: "end_at", width: 100, onCell: (r: ActivityRow & { _actSpan?: number }) => ({ rowSpan: r._actSpan ?? 1 }), render: (v: string | null) => { if (!v) return "—"; const n = Number(v); return Number.isFinite(n) && n > 1e11 ? new Date(n).toLocaleDateString("zh-CN") : String(v); } },
-    { title: "货号 / 规格", key: "skuspec", width: 160, render: (_, r) => (
-      <div>
-        <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code || "—"}</Typography.Text>
-        {r.color_spec ? <div style={{ fontSize: 11, color: "#888" }}>{r.color_spec}</div> : null}
-      </div>
-    ) },
-    { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
-    { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },
-    { title: "真实成本", dataIndex: "cost", width: 85, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
-    { title: "建议申报价", key: "bid", width: 116, align: "right", render: (_, r) => {
-      const v = effPrice(r); const loss = v != null && r.cost != null && v < r.cost;
-      return <InputNumber size="small" min={0} step={0.1} precision={2} value={v ?? undefined} status={loss ? "error" : undefined} style={{ width: 100 }} prefix="¥" onChange={(val) => setDraft(enrollKey(r), { price: val == null ? null : Number(val) })} />;
-    } },
-    { title: "真实利润 / 率", key: "realmargin", width: 120, align: "right", render: (_, r) => {
-      const p = effPrice(r); if (p == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>;
-      const gp = p - r.cost; const rate = p > 0 ? gp / p : 0; const color = gp < 0 ? "#cf1322" : "#3f8600";
-      return <span style={{ color, fontWeight: 600 }}>{gp < 0 ? "亏 " : ""}{fmtMoney(gp)}<span style={{ fontSize: 11, marginLeft: 4 }}>{(rate * 100).toFixed(1)}%</span></span>;
-    }, sorter: (a, b) => ((effPrice(a) ?? 0) - (a.cost ?? 0)) - ((effPrice(b) ?? 0) - (b.cost ?? 0)) },
-    { title: "活动库存", key: "astock", width: 96, align: "right", render: (_, r) => <InputNumber size="small" min={0} precision={0} value={effStock(r)} style={{ width: 80 }} onChange={(val) => setDraft(enrollKey(r), { stock: val == null ? null : Number(val) })} /> },
-  ], [effPrice, effStock, setDraft, enrollKey]);
 
   // stockColumns / storeMatrixColumns / riskColumns / restockColumns / diagColumns / qualityColumns 已移到组件外部(纯静态)
 
@@ -1166,6 +774,7 @@ export default function OperationsWorkbench() {
     { title: "建议调价", key: "advise_price", width: 150, align: "right", render: (_, r) => { const cur = r.current_price != null ? r.current_price : r.declared_price; if (r.target_price == null) return cur != null ? <span style={{ fontSize: 12, color: "#888" }}>¥{cur.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; const cut = cur && cur > 0 ? Math.round((1 - r.target_price / cur) * 100) : null; return <div style={{ fontSize: 12 }}>{cur != null ? <div style={{ color: "#999", textDecoration: "line-through", fontSize: 11 }}>¥{cur.toFixed(2)}</div> : null}<div style={{ color: "#cf1322", fontWeight: 700 }}>¥{r.target_price.toFixed(2)}{cut != null ? <span style={{ fontWeight: 400, fontSize: 11 }}> (-{cut}%)</span> : null}</div></div>; } },
     { title: "可用库存", dataIndex: "stock", width: 90, align: "right", sorter: (a, b) => (a.stock || 0) - (b.stock || 0), render: (v: number | null) => v == null ? "—" : <span style={{ color: v <= 0 ? "#cf1322" : undefined, fontWeight: v <= 0 ? 700 : undefined }}>{fmtNum(v)}</span> },
     { title: "7天销量", dataIndex: "last7d_sales", width: 85, align: "right", sorter: (a, b) => (a.last7d_sales || 0) - (b.last7d_sales || 0), render: (v: number | null) => v == null ? "—" : fmtNum(v) },
+    { title: "状态", key: "frs", width: 90, filters: [{ text: "已限流", value: 1 }, { text: "即将限流", value: 2 }], onFilter: (v, r) => (r.flow_reduce_status ?? 1) === v, render: (_, r) => r.flow_reduce_status === 2 ? <Tag color="orange">即将限流</Tag> : <Tag color="red">已限流</Tag> },
     { title: "最近限流日", dataIndex: "last_seen_date", width: 100, render: (v: string | null) => v || "—" },
   ], [setTrendOf, openHpfDetail]);
 
@@ -1219,21 +828,88 @@ export default function OperationsWorkbench() {
     if (activeTab !== "hpf") return [] as (HpfRow & { __rk: number })[];
     const kw = search.trim().toLowerCase();
     return hpfRows.filter((r) => {
+      if (!r.store_code) return false;
       if (!inScope(r.store_code || r.mall_id)) return false;
       if (storeFilter !== "all" && r.store_code !== storeFilter) return false;
+      if (hpfStatusFilter !== "all") {
+        const st = Number(hpfStatusFilter);
+        if (r.flow_reduce_status != null && r.flow_reduce_status !== st) return false;
+        if (r.flow_reduce_status == null && st !== 1) return false;
+      }
       if (!kw) return true;
       return [r.title, r.product_id, r.skc_id, r.sku_codes, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
     }).map((r, i) => ({ ...r, __rk: i }));
-  }, [activeTab, hpfRows, search, storeFilter, inScope]);
+  }, [activeTab, hpfRows, search, storeFilter, hpfStatusFilter, inScope]);
   const hpfAgg = useMemo(() => {
-    if (activeTab !== "hpf") return { total: 0, avg: null as number | null, severe: 0, shops: 0 };
-    let sum = 0, cnt = 0, severe = 0; const shops = new Set<string>();
+    if (activeTab !== "hpf") return { total: 0, avg: null as number | null, severe: 0, shops: 0, limited: 0, pending: 0 };
+    let sum = 0, cnt = 0, severe = 0, limited = 0, pending = 0; const shops = new Set<string>();
     for (const r of hpfView) {
       if (r.decline_rate != null) { sum += r.decline_rate; cnt += 1; if (r.decline_rate >= 50) severe += 1; }
       shops.add(r.store_code || r.mall_id);
     }
-    return { total: hpfView.length, avg: cnt ? Number((sum / cnt).toFixed(1)) : null, severe, shops: shops.size };
-  }, [activeTab, hpfView]);
+    for (const r of hpfRows) {
+      if (!r.store_code || !inScope(r.store_code || r.mall_id)) continue;
+      if (r.flow_reduce_status === 2) pending++; else limited++;
+    }
+    return { total: hpfView.length, avg: cnt ? Number((sum / cnt).toFixed(1)) : null, severe, shops: shops.size, limited, pending };
+  }, [activeTab, hpfView, hpfRows, inScope]);
+
+  const [flowSiteFilter, setFlowSiteFilter] = useSessionState(owViewKey("flowSite"), "all");
+  const flowView = useMemo(() => {
+    if (activeTab !== "flux") return [] as FlowAnalysisRow[];
+    const kw = search.trim().toLowerCase();
+    return flowRows.filter((r) => {
+      if (!r.mall_id) return false;
+      if (!inScope(r.store_code || r.mall_id)) return false;
+      if (storeFilter !== "all" && r.store_code !== storeFilter) return false;
+      if (flowSiteFilter !== "all" && r.site !== flowSiteFilter) return false;
+      if (!kw) return true;
+      return [r.title, r.product_id, r.goods_id, r.category_name, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
+    });
+  }, [activeTab, flowRows, search, storeFilter, flowSiteFilter, inScope]);
+
+  const fmtRate = (v: number | null) => v == null ? "—" : `${(v * 100).toFixed(1)}%`;
+  const fmtN = (v: number | null) => v == null ? "—" : v.toLocaleString();
+  const flowColumns: ColumnsType<FlowAnalysisRow> = [
+    { title: "店铺", dataIndex: "store_code", key: "store", width: 90, render: (v, r) => formatStoreNo(r.store_code, r.mall_name) || r.mall_id },
+    { title: "区域", dataIndex: "site", key: "site", width: 60, align: "center" as const, render: (v: string | null) => { const m: Record<string, string> = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" }; return v ? <Tag color={v === "agentseller-us" ? "blue" : v === "agentseller-eu" ? "purple" : "green"}>{m[v] || v}</Tag> : <span style={{ color: "#bbb" }}>—</span>; } },
+    { title: "商品", dataIndex: "title", key: "title", width: 240, ellipsis: true, render: (v, r) => (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} onClick={() => {
+        setFlowTrendOf({ mallId: r.mall_id, productId: r.product_id, goodsId: r.goods_id || "", site: r.site || "", title: v || r.product_id });
+        setFlowTrendLoading(true);
+        const sites = ["agentseller", "agentseller-us", "agentseller-eu"] as const;
+        const suf = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" } as const;
+        Promise.all(sites.map(s => fetchFlowTrend(r.mall_id, r.product_id, r.goods_id || "", s))).then(([g, u, e]) => {
+          const dm = new Map<string, Record<string, any>>();
+          [[g, "全球"], [u, "美区"], [e, "欧区"]].forEach(([data, label]) => {
+            (data as FlowTrendPoint[]).forEach(p => {
+              if (!dm.has(p.date)) dm.set(p.date, { date: p.date });
+              const row = dm.get(p.date)!;
+              row[`expose_${label}`] = p.expose;
+              row[`ctr_${label}`] = p.ctr != null ? +(p.ctr * 100).toFixed(1) : null;
+              row[`cvr_${label}`] = p.click_pay_rate != null ? +(p.click_pay_rate * 100).toFixed(1) : null;
+            });
+          });
+          setFlowTrendRows([...dm.values()].sort((a, b) => a.date.localeCompare(b.date)));
+        }).finally(() => setFlowTrendLoading(false));
+      }}>
+        {r.thumb_url && <img src={r.thumb_url} style={{ width: 28, height: 28, borderRadius: 4, objectFit: "cover", flexShrink: 0 }} />}
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#1677ff" }}>{v || r.product_id}</span>
+      </div>
+    ) },
+    { title: "曝光", dataIndex: "expose", key: "expose", width: 80, align: "right", sorter: (a, b) => (a.expose ?? 0) - (b.expose ?? 0), defaultSortOrder: "descend" as const, render: fmtN },
+    { title: "点击", dataIndex: "click", key: "click", width: 80, align: "right", sorter: (a, b) => (a.click ?? 0) - (b.click ?? 0), render: fmtN },
+    { title: "CTR", dataIndex: "ctr", key: "ctr", width: 75, align: "right", sorter: (a, b) => (a.ctr ?? 0) - (b.ctr ?? 0), render: fmtRate },
+    { title: "详情访客", dataIndex: "detail_visitor", key: "detail_visitor", width: 90, align: "right", sorter: (a, b) => (a.detail_visitor ?? 0) - (b.detail_visitor ?? 0), render: fmtN },
+    { title: "加购", dataIndex: "add_cart", key: "add_cart", width: 70, align: "right", sorter: (a, b) => (a.add_cart ?? 0) - (b.add_cart ?? 0), render: fmtN },
+    { title: "买家", dataIndex: "buyer", key: "buyer", width: 70, align: "right", sorter: (a, b) => (a.buyer ?? 0) - (b.buyer ?? 0), render: fmtN },
+    { title: "支付件数", dataIndex: "pay_goods", key: "pay_goods", width: 90, align: "right", sorter: (a, b) => (a.pay_goods ?? 0) - (b.pay_goods ?? 0), render: fmtN },
+    { title: "点击支付率", dataIndex: "click_pay_rate", key: "click_pay_rate", width: 100, align: "right", sorter: (a, b) => (a.click_pay_rate ?? 0) - (b.click_pay_rate ?? 0), render: (v) => <span style={{ color: v != null && v > 0 ? (v >= 0.03 ? "#3f8600" : v >= 0.01 ? "#d4b106" : "#cf1322") : undefined }}>{fmtRate(v)}</span> },
+    { title: "搜索曝光", dataIndex: "search_expose", key: "search_expose", width: 90, align: "right", render: fmtN },
+    { title: "推荐曝光", dataIndex: "recommend_expose", key: "recommend_expose", width: 90, align: "right", render: fmtN },
+    { title: "增长状态", dataIndex: "grow", key: "grow", width: 90, render: (v, r) => v ? <Tag color={v === "待增长" ? "orange" : v === "增长中" ? "green" : v === "下降" ? "red" : "default"}>{v}{r.grow_text ? ` ${r.grow_text}` : ""}</Tag> : "—" },
+    { title: "日期", dataIndex: "stat_date", key: "stat_date", width: 100 },
+  ];
 
   const tabItems = useMemo(() => [
     {
@@ -1306,100 +982,6 @@ export default function OperationsWorkbench() {
     {
       key: "pipeline", label: "商品全景",
       children: <PipelineTab reloadSignal={pipelineReloadSignal} isStoreInScope={isPipelineStoreInScope} onRiskTagClick={goPipelineRiskTag} />,
-    },
-    {
-      key: "todo", label: "今日待办",
-      children: (
-        <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-            <Statistic title="待处理" value={todoCount.product + todoCount.code + todoCount.risk + todoCount.activity} valueStyle={{ color: "#d46b08" }} />
-            <Statistic title="急" value={todoCount.urgent} valueStyle={{ color: todoCount.urgent > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="运营/补货" value={todoCount.product} valueStyle={{ color: todoCount.product > 0 ? "#d46b08" : undefined }} />
-            <Statistic title="风险" value={todoCount.risk} valueStyle={{ color: todoCount.risk > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="已处理" value={todoCount.done} valueStyle={{ color: "#3f8600" }} />
-          </div>
-          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>把「商品诊断 / 中高风险 / 可报活动」里要动手的事汇成一条清单,按紧急度降序;「完成 / 忽略」后从待处理列表消失(记在本机,可切「已处理 / 已忽略」回看或恢复)。顶部切「我的店」只看自己负责的店。</div>
-          {commonFilters(
-            <>
-              <Select size="small" style={{ width: 120 }} value={todoStatus} onChange={setTodoStatus} options={[{ value: "open", label: "待处理" }, { value: "done", label: "已处理" }, { value: "ignored", label: "已忽略" }, { value: "all", label: "全部" }]} />
-              <Select size="small" style={{ width: 130 }} value={todoType} onChange={setTodoType} options={[{ value: "all", label: "全部类型" }, { value: "product", label: "运营/补货" }, { value: "code", label: "缺货号" }, { value: "risk", label: "风险" }, { value: "activity", label: "活动" }]} />
-            </>,
-          )}
-          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => t.key} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项` }} scroll={{ x: 1256 }} loading={skuLoading || riskLoading || actLoading} />
-        </div>
-      ),
-    },
-    {
-      key: "store", label: "店铺",
-      children: (
-        <div>
-          {!OFFICIAL_SOURCE && (
-          <div style={{ padding: "12px 16px 0" }}>
-            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "销量趋势", value: "trend" }, { label: "流量投放", value: "ad" }]} />
-          </div>
-          )}
-          {storeSeg === "ad" ? (
-            <div>
-              <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-                <Statistic title="曝光合计" value={adAgg.impr} />
-                <Statistic title="点击合计" value={adAgg.clk} />
-                <Statistic title="花费合计(¥)" value={(adAgg.spend / 100).toFixed(2)} />
-                <Statistic title="申报价销售额(¥)" value={(adAgg.amt / 100).toFixed(2)} />
-                <Statistic title="子订单合计" value={adAgg.ord} />
-              </div>
-              <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>官方店铺维度广告/流量(近7天，bg.glo.searchrec.ad.reports.mall)。率为全店口径，金额单位元，ROAS=销售额/花费。空白店表示该店无投放或未签广告协议。</div>
-              {commonFilters()}
-              <Table<AdMallRow & { __rk: number; store_code: string | null }>
-                dataSource={adView}
-                rowKey={(r) => String(r.__rk)}
-                size="small"
-                loading={adLoading}
-                scroll={{ x: 1100 }}
-                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }}
-                columns={[
-                  { title: "店号", dataIndex: "store_code", key: "store_code", fixed: "left", width: 88, render: (v: string | null, r) => formatStoreNo(v, r.mall_id) },
-                  { title: "店铺", dataIndex: "store", key: "store", fixed: "left", width: 160, ellipsis: true, render: (v: string) => formatMallName(v, v) },
-                  { title: "曝光", dataIndex: "imprCnt", key: "imprCnt", width: 90, align: "right", sorter: (a, b) => (a.imprCnt || 0) - (b.imprCnt || 0), render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
-                  { title: "点击", dataIndex: "clkCnt", key: "clkCnt", width: 80, align: "right", sorter: (a, b) => (a.clkCnt || 0) - (b.clkCnt || 0), render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
-                  { title: "点击率", dataIndex: "ctr", key: "ctr", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
-                  { title: "加购", dataIndex: "cartCnt", key: "cartCnt", width: 80, align: "right", render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
-                  { title: "转化率", dataIndex: "cvr", key: "cvr", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
-                  { title: "子订单", dataIndex: "orderPayCnt", key: "orderPayCnt", width: 80, align: "right", render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
-                  { title: "申报价销售额", dataIndex: "orderPayAmt", key: "orderPayAmt", width: 120, align: "right", sorter: (a, b) => (a.orderPayAmt || 0) - (b.orderPayAmt || 0), render: (v) => v == null ? "—" : "¥" + (v / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
-                  { title: "花费", dataIndex: "spend", key: "spend", width: 100, align: "right", sorter: (a, b) => (a.spend || 0) - (b.spend || 0), render: (v) => v == null ? "—" : "¥" + (v / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
-                  { title: "ROAS", dataIndex: "roas", key: "roas", width: 80, align: "right", sorter: (a, b) => (a.roas || 0) - (b.roas || 0), render: (v) => v == null ? "—" : (v / 1000).toFixed(2) },
-                  { title: "费比", dataIndex: "acos", key: "acos", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
-                ]}
-              />
-            </div>
-          ) : (
-            <div>
-              <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>各店近 30 天每日销量走势(已排除预测值)。全部店时显示销量 Top 8;选具体店看单店曲线。</div>
-              {commonFilters()}
-              <div style={{ padding: "8px 16px 16px", height: 440 }}>
-                {trendLoading ? (
-                  <div style={{ textAlign: "center", color: "#999", paddingTop: 170 }}>加载中…</div>
-                ) : trendChart.data.length === 0 ? (
-                  <Empty description="暂无趋势数据" style={{ paddingTop: 140 }} />
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={trendChart.data} margin={{ top: 10, right: 24, bottom: 4, left: -12 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-                      <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={20} />
-                      <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                      <RTooltip />
-                      <Legend wrapperStyle={{ fontSize: 12 }} />
-                      {trendChart.stores.map((s, i) => (
-                        <Line key={s} type="monotone" dataKey={s} name={s} stroke={TREND_COLORS[i % TREND_COLORS.length]} dot={false} strokeWidth={2} connectNulls />
-                      ))}
-                    </LineChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      ),
     },
     {
       key: "product", label: "商品",
@@ -1514,8 +1096,14 @@ export default function OperationsWorkbench() {
           <div style={{ padding: "0 16px 4px" }}>
             <Alert type="info" showIcon message="数据来自扩展抓包采集(近14天),按流量下降率降序。有目标价数据时显示建议调价。" banner style={{ fontSize: 12, borderRadius: 6 }} />
           </div>
-          {commonFilters()}
-          <Table<HpfRow> dataSource={hpfView} columns={hpfColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个被限流商品` }} scroll={{ x: 1050 }} loading={hpfLoading} onRow={(r) => ({ style: { ...(r.decline_rate != null && r.decline_rate >= 50 ? { background: "#fff8f8" } : {}), cursor: "pointer" }, onClick: () => openHpfDetail(r.mall_id, String(r.product_id)) })} />
+          {commonFilters(
+            <Segmented size="small" value={hpfStatusFilter} onChange={(v) => setHpfStatusFilter(String(v))} options={[
+              { label: `全部 (${hpfAgg.limited + hpfAgg.pending})`, value: "all" },
+              { label: `已限流 (${hpfAgg.limited})`, value: "1" },
+              { label: `即将限流 (${hpfAgg.pending})`, value: "2" },
+            ]} />,
+          )}
+          <Table<HpfRow> dataSource={hpfView} columns={hpfColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1140 }} loading={hpfLoading} onRow={(r) => ({ style: { ...(r.decline_rate != null && r.decline_rate >= 50 ? { background: "#fff8f8" } : {}), cursor: "pointer" }, onClick: () => openHpfDetail(r.mall_id, String(r.product_id)) })} />
         </div>
       ),
     },
@@ -1551,158 +1139,145 @@ export default function OperationsWorkbench() {
       ),
     },
     {
-      key: "activity", label: "活动报名",
+      key: "activity", label: "活动",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-            <Statistic title="可报名活动" value={actSummary.enrollable} valueStyle={{ color: actSummary.enrollable > 0 ? "#3f8600" : undefined }} />
-            <Statistic title="已报名" value={actSummary.enrolled} valueStyle={{ color: actSummary.enrolled > 0 ? "#1677ff" : "#bbb" }} />
-            <Statistic title="进行中" value={actSummary.ongoing} valueStyle={{ color: actSummary.ongoing > 0 ? "#d46b08" : "#bbb" }} />
-            <Statistic title="活动总数" value={actSummary.total} />
-            <Statistic title="在售商品" value={actSummary.onSale} valueStyle={{ color: "#8c8c8c" }} />
+          <div style={{ padding: "12px 16px 0", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <Segmented size="small" value={actStatusFilter} onChange={(v) => setActStatusFilter(String(v))}
+              options={[
+                { label: `全部 (${actStatusCounts["全部"] || 0})`, value: "全部" },
+                ...["进行中", "未开始", "已报名"].filter(s => actStatusCounts[s]).map(s => ({ label: `${s} (${actStatusCounts[s]})`, value: s })),
+              ]}
+            />
           </div>
-          {actByStoreRows.length > 0 && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <Table<ActStoreRow> dataSource={actByStoreRows} rowKey="key" size="small" pagination={false}
-                columns={[
-                  { title: "店铺", key: "store", width: 120, render: (_, r) => formatStoreNo(r.store_code === r.key ? null : r.store_code, r.key) },
-                  { title: "可报名", dataIndex: "enrollable", width: 90, align: "right", sorter: (a, b) => a.enrollable - b.enrollable, defaultSortOrder: "descend", render: (v: number) => <span style={{ color: v > 0 ? "#3f8600" : "#bbb", fontWeight: v > 0 ? 600 : 400 }}>{fmtNum(v)}</span> },
-                  { title: "已报名", dataIndex: "enrolled", width: 90, align: "right", sorter: (a, b) => a.enrolled - b.enrolled, render: (v: number) => <span style={{ color: v > 0 ? "#1677ff" : "#bbb" }}>{fmtNum(v)}</span> },
-                  { title: "进行中", dataIndex: "ongoing", width: 90, align: "right", sorter: (a, b) => a.ongoing - b.ongoing, render: (v: number) => <span style={{ color: v > 0 ? "#d46b08" : "#bbb" }}>{fmtNum(v)}</span> },
-                  { title: "活动总数", dataIndex: "total", width: 90, align: "right", sorter: (a, b) => a.total - b.total },
-                  { title: "在售", dataIndex: "on_sale", width: 80, align: "right", render: (v: number) => <span style={{ color: "#8c8c8c" }}>{fmtNum(v)}</span> },
-                ]}
-              />
-            </div>
-          )}
-          {commonFilters(
-            <>
-              <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />
-            </>,
-          )}
+          {commonFilters()}
           {actLoading ? <div style={{ textAlign: "center", padding: 60 }}><Spin /></div> : (
-            actProductView.length === 0 ? <Empty description="暂无活动数据" style={{ padding: 40 }} /> : (
-              <Table<ActProductRow> dataSource={actProductView} rowKey="key" size="small"
-                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }}
-                scroll={{ x: 960 }}
-                onRow={(r) => ({ onClick: () => r.activities.length > 0 && setActDetailRow(r), style: r.activities.length > 0 ? { cursor: "pointer" } : undefined })}
+            actFiltered.length === 0 ? <Empty description="暂无活动数据" style={{ padding: 40 }} /> : (
+              <Table<ActFlatRow & { _prodSpan: number }> dataSource={actFiltered} rowKey="key" size="small"
+                onRow={(r) => r._prodSpan > 0 ? { style: { borderTop: "2px solid #e6e6e6" } } : {}}
+                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个活动` }}
+                scroll={{ x: 1400 }}
                 columns={[
-                  { title: "店铺", key: "store", width: 78, fixed: "left", render: (_, r) => formatStoreNo(r.store_code, r.mall_id) },
-                  { title: "商品", key: "prod", width: 340, fixed: "left", render: (_, r) => (
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      {r.thumb ? <div style={{ flexShrink: 0, width: 56, height: 56 }}><Image src={r.thumb} width={56} height={56} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 56, height: 56, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
+                  { title: "店铺", key: "store", width: 78, fixed: "left" as const, render: (_, r) => r._prodSpan > 0 ? formatStoreNo(r.store_code, r.mall_id) : null },
+                  { title: "商品", key: "prod", width: 280, fixed: "left" as const, render: (_, r) => r._prodSpan > 0 ? (
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {r.thumb ? <Image src={r.thumb} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
                       <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: 12, color: "#555", lineHeight: "18px", wordBreak: "break-word" }}>{r.product_name || "—"}</div>
-                        <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code}{(r.sku_ext_codes?.length ?? 0) > 1 && <Tooltip title={r.sku_ext_codes!.join(", ")}><span style={{ fontSize: 10, color: "#1677ff", marginLeft: 4 }}>(+{r.sku_ext_codes!.length - 1})</span></Tooltip>}</Typography.Text>
+                        <div style={{ fontSize: 12, color: "#555", lineHeight: "18px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.product_name || "—"}</div>
+                        <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text>
                       </div>
                     </div>
-                  ) },
-                  { title: "活动类型", key: "kinds", width: 120, filters: [{ text: "活动", value: "activity" }, { text: "竞价", value: "bidding" }, { text: "优惠券", value: "coupon" }], onFilter: (v, r) => r.kinds.includes(v as string), render: (_, r) => r.kinds.length ? r.kinds.map((k) => <Tag key={k} style={{ margin: "0 2px 2px 0", fontSize: 11 }}>{KIND_LABEL[k] || k}</Tag>) : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "可报", dataIndex: "act_count", width: 70, align: "right", sorter: (a, b) => a.act_count - b.act_count, defaultSortOrder: "descend", render: (v: number) => <span style={{ color: v > 0 ? "#3f8600" : "#bbb", fontWeight: v > 0 ? 600 : 400 }}>{v}</span> },
-                  { title: "已报", dataIndex: "enrolled_count", width: 70, align: "right", sorter: (a, b) => a.enrolled_count - b.enrolled_count, render: (v: number) => v > 0 ? <Tag color="blue" style={{ margin: 0 }}>{v}</Tag> : <span style={{ color: "#bbb" }}>0</span> },
-                  { title: "最优利润", key: "profit", width: 110, align: "right", sorter: (a, b) => (a.best_profit ?? -Infinity) - (b.best_profit ?? -Infinity), render: (_, r) => r.best_profit != null && r.best_margin != null ? <span style={{ color: r.best_profit < 0 ? "#cf1322" : "#3f8600", fontWeight: 600 }}>{fmtMoney(r.best_profit)} <span style={{ fontSize: 11, fontWeight: 400 }}>{(r.best_margin * 100).toFixed(1)}%</span></span> : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "", key: "action", width: 72, align: "center", render: (_, r) => <Button size="small" type="primary" disabled={r.act_count === 0} onClick={(e) => { e.stopPropagation(); setSelActRows([]); setEnrollModalSku({ mall_id: r.mall_id, store_code: r.store_code, sku_ext_code: r.sku_ext_code, sku_ext_codes: r.sku_ext_codes, product_name: r.product_name }); }}>报名</Button> },
+                  ) : null },
+                  { title: "活动名称", key: "title", width: 220, ellipsis: true, render: (_, r) => r.title || <span style={{ color: "#bbb" }}>(未命名)</span> },
+                  { title: "类型", key: "type", width: 80, filters: [{ text: "活动", value: "activity" }, { text: "竞价", value: "bidding" }, { text: "优惠券", value: "coupon" }], onFilter: (v, r) => (r.kind || "") === v, render: (_, r) => {
+                    const label = (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "活动";
+                    return <Tag color={r.kind === "bidding" ? "purple" : r.kind === "coupon" ? "cyan" : "blue"} style={{ margin: 0 }}>{label}</Tag>;
+                  } },
+                  { title: "站点", key: "sites", width: 120, render: (_, r) => r.sites?.length ? r.sites.slice(0, 2).join(", ") + (r.sites.length > 2 ? ` +${r.sites.length - 2}` : "") : <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "报名价", key: "price", width: 90, align: "right" as const, render: (_, r) => r.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{r.signup_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "利润", key: "profit", width: 90, align: "right" as const, sorter: (a, b) => ((a.signup_price ?? 0) - (a.cost ?? 0)) - ((b.signup_price ?? 0) - (b.cost ?? 0)), render: (_, r) => {
+                    if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>;
+                    const p = r.signup_price - r.cost;
+                    return <span style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 600 }}>¥{p.toFixed(2)}</span>;
+                  } },
+                  { title: "活动库存", dataIndex: "activity_stock", width: 90, align: "right" as const, sorter: (a, b) => a.activity_stock - b.activity_stock, render: (v: number) => v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span> },
+                  { title: "报名时间", key: "enroll_at", width: 140, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "状态", key: "status", width: 80, render: (_, r) => {
+                    const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
+                    return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : "default"} style={{ margin: 0 }}>{s}</Tag>;
+                  } },
                 ]}
               />
             )
           )}
-          <Modal open={!!actDetailRow} onCancel={() => setActDetailRow(null)} footer={null} width={1520}
-            title={actDetailRow ? <div><span style={{ fontWeight: 600 }}>{actDetailRow.sku_ext_code}</span> <span style={{ color: "#888", fontWeight: 400 }}>{actDetailRow.product_name || ""}</span></div> : ""}>
-            {actDetailRow && (
-              <Table<ActivityDetail & { _key: string }> dataSource={actDetailRow.activities.map((a, i) => ({ ...a, _key: `${actDetailRow.key}|${a.activity_id || i}` }))} rowKey="_key" size="middle" pagination={false}
-                scroll={{ y: 520 }}
-                columns={[
-                  { title: "活动名称", key: "title", width: 240, render: (_, r) => (
-                    <div style={{ fontWeight: 600 }}>{r.title || (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || <span style={{ color: "#bbb" }}>(未命名)</span>}</div>
-                  ) },
-                  { title: "SKU / 规格", key: "skus", width: 240, render: (_, r) => {
-                    const skus = r.skus || [];
-                    if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
-                    return (<div style={{ fontSize: 12, lineHeight: "22px" }}>
-                      {skus.map((s, i) => (
-                        <div key={i} style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
-                          <span style={{ fontWeight: 500 }}>{s.sku_ext_code}{s.spec_name ? <span style={{ color: "#888", fontWeight: 400 }}> · {s.spec_name}</span> : ""}</span>
-                        </div>
-                      ))}
-                    </div>);
-                  } },
-                  { title: "站点", key: "sites", width: 240, render: (_, r) => {
-                    const s = r.sites || []; if (!s.length) return <span style={{ color: "#bbb" }}>—</span>;
-                    const dateRange = r.start_at && r.end_at ? `${r.start_at}~${r.end_at}` : r.end_at ? `~${r.end_at}` : "";
-                    const stLabel = r.status || "";
-                    const fmt = (name: string) => { let t = name; if (dateRange) t += `-${dateRange}`; if (stLabel) t += `,${stLabel}`; return t; };
-                    const show = s.slice(0, 3);
-                    const rest = s.length - 3;
-                    return (<div style={{ fontSize: 12, lineHeight: "20px" }}>
-                      {show.map((n, i) => <div key={i}>{fmt(n)}</div>)}
-                      {rest > 0 && <Popover trigger="click" title={`全部站点 (${s.length})`} content={<div style={{ maxHeight: 300, overflow: "auto", fontSize: 13, lineHeight: "24px" }}>{s.map((n, i) => <div key={i}>{fmt(n)}</div>)}</div>}><a style={{ fontSize: 12 }}>更多 (+{rest})</a></Popover>}
-                    </div>);
-                  } },
-                  { title: "活动类型", key: "atype", width: 100, render: (_, r) => r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type] ? ACTIVITY_TYPE_LABEL[r.activity_type] : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "申报价", key: "suggested", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) return r.suggested_price != null ? `¥${r.suggested_price.toFixed(2)}` : <span style={{ color: "#bbb" }}>—</span>; return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => <div key={i}>{s.suggested_price != null ? `¥${s.suggested_price.toFixed(2)}` : "—"}</div>)}</div>); } },
-                  { title: "报名价", key: "price", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) return r.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{r.signup_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => <div key={i}>{s.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{s.signup_price.toFixed(2)}</span> : "—"}</div>)}</div>); } },
-                  { title: "利润", key: "profit", width: 90, align: "right" as const, render: (_, r) => { const skus = r.skus || []; if (skus.length <= 1) { if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>; const p = r.signup_price - r.cost; return <span style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 500 }}>¥{p.toFixed(2)}</span>; } return (<div style={{ fontSize: 12, lineHeight: "22px" }}>{skus.map((s, i) => { if (s.signup_price == null || s.cost == null) return <div key={i}>—</div>; const p = s.signup_price - s.cost; return <div key={i} style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 500 }}>¥{p.toFixed(2)}</div>; })}</div>); } },
-                  { title: "活动库存", key: "stock", width: 90, align: "right" as const, render: (_, r) => {
-                    const skus = r.skus || [];
-                    const renderOne = (s: ActivitySkuDetail, key: string) => {
-                      const isOpen = addStockOpen === key;
-                      const curStock = s.activity_stock > 0 ? s.activity_stock : 0;
-                      const afterStock = addStockVal != null && addStockVal > 0 ? curStock + addStockVal : null;
-                      return (
-                        <div key={key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                          <span style={{ minWidth: 30, textAlign: "right" }}>{curStock > 0 ? fmtNum(curStock) : "—"}</span>
-                          {r.status !== "已结束" && (
-                            <Popover
-                              open={isOpen}
-                              onOpenChange={(open) => { if (!open) { setAddStockOpen(null); setAddStockVal(null); } }}
-                              trigger="click"
-                              placement="left"
-                              content={
-                                <div style={{ width: 220 }} onClick={(e) => e.stopPropagation()}>
-                                  <div style={{ marginBottom: 12, fontSize: 14 }}>当前活动库存：<b>{fmtNum(curStock)}</b></div>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                                    <span style={{ flexShrink: 0 }}>增加</span>
-                                    <InputNumber size="small" min={1} max={99999} placeholder="请输入" style={{ flex: 1 }}
-                                      value={addStockVal} autoFocus
-                                      onChange={(n) => setAddStockVal(n as number | null)} />
-                                  </div>
-                                  <div style={{ marginBottom: 12, fontSize: 13, color: "#888" }}>改后活动库存：{afterStock != null ? <b style={{ color: "#1677ff" }}>{fmtNum(afterStock)}</b> : "—"}</div>
-                                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                                    <Button size="small" onClick={() => { setAddStockOpen(null); setAddStockVal(null); }}>取消</Button>
-                                    <Button size="small" type="primary" disabled={!addStockVal || addStockVal <= 0}
-                                      onClick={() => { message.info(`追加库存功能开发中：${s.sku_ext_code} +${addStockVal}`); setAddStockOpen(null); setAddStockVal(null); }}>
-                                      确认
-                                    </Button>
-                                  </div>
-                                </div>
-                              }
-                            >
-                              <EditOutlined style={{ fontSize: 13, color: "#1677ff", cursor: "pointer" }}
-                                onClick={(e) => { e.stopPropagation(); setAddStockOpen(key); setAddStockVal(null); }} />
-                            </Popover>
-                          )}
-                        </div>
-                      );
-                    };
-                    if (skus.length <= 1) {
-                      const s0 = skus[0];
-                      if (!s0) return <span style={{ color: "#bbb" }}>—</span>;
-                      return renderOne(s0, `${r.activity_id}|${s0.sku_ext_code}`);
-                    }
-                    return (<div style={{ fontSize: 12, lineHeight: "28px" }}>{skus.map((s, i) => renderOne(s, `${r.activity_id}|${s.sku_ext_code}`))}</div>);
-                  } },
-                  { title: "报名时间", key: "enroll_at", width: 160, render: (_, r) => r.enroll_at ? r.enroll_at : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "状态", key: "status", width: 80, render: (_, r) => { const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>; const color = s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "已结束" ? "default" : s === "已取消" ? "red" : "default"; return <Tag color={color} style={{ margin: 0 }}>{s}</Tag>; } },
-                ]}
-              />
-            )}
-          </Modal>
         </div>
       ),
     },
     {
       key: "site_exception", label: "站点异常",
       children: <SiteExceptionTab active={activeTab === "site_exception"} storeFilter={storeFilter} search={search} commonFilters={commonFilters} />,
+    },
+    {
+      key: "flux", label: "流量",
+      children: (
+        <div>
+          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>商品级流量明细(扩展主动采集)：曝光 → 点击 → 详情访客 → 加购 → 支付买家，完整转化漏斗。点击商品名查看趋势。数据来源: /api/seller/full/flow/analysis/goods/list。</div>
+          {commonFilters(
+            <>
+              <Select size="small" style={{ width: 110 }} value={flowSiteFilter} onChange={setFlowSiteFilter} options={[{ value: "all", label: "全部区域" }, { value: "agentseller", label: "全球" }, { value: "agentseller-us", label: "美区" }, { value: "agentseller-eu", label: "欧区" }]} />
+              <Select size="small" style={{ width: 130 }} value={flowDateFilter || (flowDates[0] || "")} onChange={setFlowDateFilter}
+                options={flowDates.map((d) => ({ value: d, label: d }))} />
+            </>,
+          )}
+          <Table<FlowAnalysisRow> dataSource={flowView} columns={flowColumns} rowKey="__rk" size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1500, y: "calc(100vh - 320px)" }} loading={flowLoading} />
+          <Modal title={flowTrendOf ? <Tooltip title={flowTrendOf.title}><span style={{ maxWidth: 500, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>流量趋势 · {flowTrendOf.title}</span></Tooltip> : "流量趋势"} open={!!flowTrendOf} onCancel={() => setFlowTrendOf(null)} footer={null} width={900}>
+            {flowTrendLoading ? <Spin /> : flowTrendRows.length === 0 ? <Empty description="暂无趋势数据" /> : (() => {
+              const REGIONS = [
+                { key: "全球", color: "#1a73e8" },
+                { key: "美区", color: "#ea4335" },
+                { key: "欧区", color: "#34a853" },
+              ];
+              const hasRegion = (suffix: string) => flowTrendRows.some(r => r[`expose_${suffix}`] != null);
+              const active = REGIONS.filter(r => hasRegion(r.key));
+              const chartProps = { margin: { top: 8, right: 12, bottom: 0, left: -4 } };
+              const xProps = { dataKey: "date" as const, tick: { fontSize: 10 }, minTickGap: 20 };
+              const gridProps = { strokeDasharray: "3 3", stroke: "#f0f0f0", vertical: false };
+              const tipStyle = { contentStyle: { borderRadius: 8, border: "none", boxShadow: "0 2px 12px rgba(0,0,0,.12)", fontSize: 12 } };
+              return (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: "#333" }}>曝光</div>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <AreaChart data={flowTrendRows} {...chartProps}>
+                      <defs>
+                        {active.map(r => (
+                          <linearGradient key={r.key} id={`grad_expose_${r.key}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={r.color} stopOpacity={0.25} />
+                            <stop offset="95%" stopColor={r.color} stopOpacity={0.02} />
+                          </linearGradient>
+                        ))}
+                      </defs>
+                      <CartesianGrid {...gridProps} />
+                      <XAxis {...xProps} />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} tickFormatter={(v: number) => v >= 10000 ? `${(v / 10000).toFixed(1)}万` : v.toLocaleString()} />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [v?.toLocaleString(), name.replace("expose_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("expose_", "")} />
+                      {active.map(r => (
+                        <Area key={r.key} type="monotone" dataKey={`expose_${r.key}`} name={`expose_${r.key}`} stroke={r.color} strokeWidth={2} fill={`url(#grad_expose_${r.key})`} dot={{ r: 2.5, fill: r.color, strokeWidth: 0 }} activeDot={{ r: 5 }} connectNulls />
+                      ))}
+                    </AreaChart>
+                  </ResponsiveContainer>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 16, marginBottom: 6, color: "#333" }}>点击率 (%)</div>
+                  <ResponsiveContainer width="100%" height={150}>
+                    <LineChart data={flowTrendRows} {...chartProps}>
+                      <CartesianGrid {...gridProps} />
+                      <XAxis {...xProps} />
+                      <YAxis tick={{ fontSize: 10 }} unit="%" />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("ctr_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("ctr_", "")} />
+                      {active.map(r => (
+                        <Line key={r.key} type="monotone" dataKey={`ctr_${r.key}`} name={`ctr_${r.key}`} stroke={r.color} strokeWidth={2} dot={{ r: 3, fill: "#fff", stroke: r.color, strokeWidth: 2 }} activeDot={{ r: 5 }} connectNulls />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 16, marginBottom: 6, color: "#333" }}>点击支付率 (%)</div>
+                  <ResponsiveContainer width="100%" height={150}>
+                    <LineChart data={flowTrendRows} {...chartProps}>
+                      <CartesianGrid {...gridProps} />
+                      <XAxis {...xProps} />
+                      <YAxis tick={{ fontSize: 10 }} unit="%" />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("cvr_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("cvr_", "")} />
+                      {active.map(r => (
+                        <Line key={r.key} type="monotone" dataKey={`cvr_${r.key}`} name={`cvr_${r.key}`} stroke={r.color} strokeWidth={2} dot={{ r: 3, fill: "#fff", stroke: r.color, strokeWidth: 2 }} activeDot={{ r: 5 }} connectNulls />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
+          </Modal>
+        </div>
+      ),
     },
   ], [
     // 总览 Tab
@@ -1711,10 +1286,7 @@ export default function OperationsWorkbench() {
     setActiveTab, goProduct, navigate, riskView,
     // 商品全景 Tab
     pipelineReloadSignal, isPipelineStoreInScope, goPipelineRiskTag,
-    // 今日待办 Tab
-    todoCount, todoView, todoStatus, setTodoStatus, todoType, setTodoType, todoColumns, commonFilters,
-    // 店铺 Tab
-    storeSeg, setStoreSeg, adAgg, adView, adLoading, trendChart,
+    commonFilters,
     // 商品 Tab
     prodSeg, setProdSeg, panelView, panelColumns, panelLoading, slowFilter, setSlowFilter, slowCount, onsaleDaysFilter, setOnsaleDaysFilter,
     diagView, diagFilter, setDiagFilter,
@@ -1727,7 +1299,11 @@ export default function OperationsWorkbench() {
     // 风险待办 Tab
     sevFilter, setSevFilter,
     // 活动报名 Tab
-    actSummary, actByStoreRows, kindFilter, setKindFilter, actLoading,
+    actFiltered, actStatusCounts, actStatusFilter, actLoading,
+    // 流量 Tab
+    flowView, flowColumns, flowLoading, flowSiteFilter, setFlowSiteFilter,
+    flowDateFilter, setFlowDateFilter, flowDates,
+    flowTrendOf, flowTrendRows, flowTrendLoading, setFlowTrendOf,
     // 公共筛选
     storeFilter, storeOptions, searchInput,
   ]);
@@ -1739,7 +1315,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { reloadAllOpsReports(); if (activeTab === "pipeline") setPipelineReloadSignal((n) => n + 1); message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { reloadAllOpsReports(); if (activeTab === "pipeline") setPipelineReloadSignal((n) => n + 1); message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >
@@ -1749,26 +1325,6 @@ export default function OperationsWorkbench() {
       <div style={{ display: "none" }}>
         <Image.PreviewGroup items={flawPreviewImages} preview={{ visible: flawPreviewVisible, onVisibleChange: (v) => setFlawPreviewVisible(v) }} />
       </div>
-      <Modal open={!!enrollModalSku} onCancel={() => { setEnrollModalSku(null); setSelActRows([]); }} width={1180} destroyOnClose
-        title={enrollModalSku ? `报名活动 · ${enrollModalSku.product_name || enrollModalSku.sku_ext_code}` : ""}
-        footer={[
-          <Button key="cancel" size="small" onClick={() => { setEnrollModalSku(null); setSelActRows([]); }}>取消</Button>,
-          <Button key="ext" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitViaExtension}>下发多店任务 ({selActRows.length})</Button>,
-          <Button key="submit" type="primary" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitEnroll}>提交报名 ({selActRows.length})</Button>,
-        ]}>
-        <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>货号 {(enrollModalSku?.sku_ext_codes ?? [enrollModalSku?.sku_ext_code]).join("、")}。按活动链接分组,每个链接下各SKU独立填价报名。勾选 →「建议申报价」默认=参考价可改 → 提交报名/下发多店。</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-          <Button size="small" onClick={() => { const next = { ...enrollDraft }; for (const r of modalActRows) { const p = r.suggested_price ?? r.signup_price; if (p == null) continue; next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: p }; } persistDraft(next); }}>按参考价填全部</Button>
-          <InputNumber size="small" min={0} step={0.1} precision={2} prefix="¥" placeholder="批量申报价" value={batchPrice ?? undefined} style={{ width: 120 }} onChange={(v) => setBatchPrice(v == null ? null : Number(v))} />
-          <Button size="small" disabled={batchPrice == null} onClick={() => { const next = { ...enrollDraft }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: batchPrice! }; } persistDraft(next); }}>填全部</Button>
-          <InputNumber size="small" min={0} precision={0} placeholder="批量库存" value={batchStock ?? undefined} style={{ width: 110 }} onChange={(v) => setBatchStock(v == null ? null : Number(v))} />
-          <Button size="small" disabled={batchStock == null} onClick={() => { const next = { ...enrollDraft }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), stock: batchStock! }; } persistDraft(next); }}>填库存</Button>
-        </div>
-        <Table dataSource={modalActGrouped} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
-          rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]) }}
-          pagination={false} scroll={{ x: 1240 }} locale={{ emptyText: "该商品暂无可报名的活动(缺活动ID,需扩展采集)" }} />
-        {modalActRows.some((r) => !r.activity_id) && <div style={{ fontSize: 12, color: "#d46b08", marginTop: 8 }}>另有 {modalActRows.filter((r) => !r.activity_id).length} 个活动缺活动ID(扩展只采到列表、没采到可报名场次),暂时报不了——用扩展逛该店活动后台采集后才会出现在上面。</div>}
-      </Modal>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
         {trendModalLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>
