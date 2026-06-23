@@ -22,27 +22,140 @@
   }
 
   // ---------- 1. 注入 page world hook ----------
-  // 不用 inline script（page CSP 通常拦），改用 chrome-extension URL + dataset 传配置：
-  // hook.js 启动时读 document.currentScript.dataset.cfgB64 拿白名单
-  function injectHook() {
+  // 用 fetch + Blob URL 注入，规避部分页面 CSP 对 chrome-extension:// src 的限制。
+  // 注入流程：fetch hook.js 内容 → 构造 Blob URL → 插 script → 轮询验证标记元素
+  // 多重挂载保障：MutationObserver + readystatechange + setInterval 兜底
+
+  const FLAG_ID = "__temu_monitor_inject_flag__";
+
+  function getHookPath() {
+    const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
+    const serviceWorkerPath = manifest && manifest.background && manifest.background.service_worker;
+    return serviceWorkerPath === "background/sw.js" ? "page/hook.js" : "web/page/hook.js";
+  }
+
+  function getFlagEl() {
+    return document.getElementById(FLAG_ID);
+  }
+
+  function isInjected() {
+    const el = getFlagEl();
+    return el && el.dataset.status === "ok";
+  }
+
+  // 注入冷却与并发控制
+  let _injectPending = false;
+  let _lastInjectAt = 0;
+  const INJECT_COOLDOWN_MS = 1500;
+
+  async function injectHook() {
+    if (_injectPending) return;
+    const now = Date.now();
+    if (now - _lastInjectAt < INJECT_COOLDOWN_MS) return;
+    _injectPending = true;
+    _lastInjectAt = now;
     try {
       const cfgB64 = btoa(unescape(encodeURIComponent(JSON.stringify(WHITELIST_PAYLOAD))));
+      const hookUrl = chrome.runtime.getURL(getHookPath());
+      let blobUrl;
+      try {
+        const resp = await fetch(hookUrl);
+        const text = await resp.text();
+        const blob = new Blob([text], { type: "application/javascript" });
+        blobUrl = URL.createObjectURL(blob);
+      } catch (fetchErr) {
+        // fetch Blob 失败则回退到直接 src 注入
+        blobUrl = null;
+      }
       const s = document.createElement("script");
-      const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
-      const serviceWorkerPath = manifest && manifest.background && manifest.background.service_worker;
-      const hookPath = serviceWorkerPath === "background/sw.js" ? "page/hook.js" : "web/page/hook.js";
-      s.src = chrome.runtime.getURL(hookPath);
       s.dataset.temuMonitor = "local";
       s.dataset.cfgB64 = cfgB64;
-      s.onload = () => s.remove();
-      s.onerror = () => s.remove();
+      if (blobUrl) {
+        s.src = blobUrl;
+        s.onload = () => { URL.revokeObjectURL(blobUrl); s.remove(); };
+        s.onerror = () => { URL.revokeObjectURL(blobUrl); s.remove(); };
+      } else {
+        s.src = hookUrl;
+        s.onload = () => s.remove();
+        s.onerror = () => s.remove();
+      }
       (document.head || document.documentElement).appendChild(s);
     } catch (e) {
       console.warn("[temu-monitor] injectHook failed:", e);
+    } finally {
+      _injectPending = false;
     }
   }
 
-  injectHook();
+  // 注入验证：轮询 20 次，100ms 间隔，检查标记元素 status
+  function verifyInjection(onFail) {
+    let tries = 0;
+    const MAX_TRIES = 20;
+    const INTERVAL_MS = 100;
+    const timer = setInterval(() => {
+      tries++;
+      if (isInjected()) {
+        clearInterval(timer);
+        return;
+      }
+      if (tries >= MAX_TRIES) {
+        clearInterval(timer);
+        if (typeof onFail === "function") onFail();
+      }
+    }, INTERVAL_MS);
+  }
+
+  // 重注入调度
+  function scheduleReInject() {
+    injectHook().then(() => verifyInjection(() => {
+      // 验证仍失败，不再重试（防无限循环）
+      console.warn("[temu-monitor] inject verification failed after retry");
+    })).catch(() => {});
+  }
+
+  // 心跳监控：每 5000ms 检查一次，超 15s 无心跳则重注入
+  const HEARTBEAT_INTERVAL_MS = 5000;
+  const HEARTBEAT_DEAD_MS = 15000;
+  setInterval(() => {
+    const el = getFlagEl();
+    if (!el || el.dataset.status !== "ok") {
+      scheduleReInject();
+      return;
+    }
+    const lastBeat = Number(el.dataset.heartbeat || 0);
+    if (lastBeat && Date.now() - lastBeat > HEARTBEAT_DEAD_MS) {
+      console.warn("[temu-monitor] heartbeat lost, re-injecting");
+      scheduleReInject();
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  // 多重挂载保障
+  // 1. 初始注入
+  injectHook().then(() => verifyInjection(scheduleReInject)).catch(() => {});
+
+  // 2. MutationObserver：DOM 大幅变化时补注（SPA 路由切换场景）
+  try {
+    let _moDebounce = 0;
+    const mo = new MutationObserver(() => {
+      if (isInjected()) return;
+      clearTimeout(_moDebounce);
+      _moDebounce = setTimeout(() => {
+        if (!isInjected()) scheduleReInject();
+      }, 500);
+    });
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: false });
+  } catch {}
+
+  // 3. readystatechange 兜底
+  document.addEventListener("readystatechange", () => {
+    if (!isInjected()) scheduleReInject();
+  });
+
+  // 4. setInterval 60s 超时兜底
+  const _guardTimer = setInterval(() => {
+    if (isInjected()) { clearInterval(_guardTimer); return; }
+    scheduleReInject();
+  }, 60000);
 
   // ---------- 2. 监听 page world 上行 CustomEvent ----------
   window.addEventListener(EVENT_NAME, (ev) => {
@@ -94,6 +207,32 @@
         try { sendResponse({ ok: false, error: "enroll_page_timeout" }); } catch {}
       }, 30000);
       return true; // async
+    }
+    if (msg.type === "ADDSTOCK_SUBMIT" && msg.task) {
+      let settled = false;
+      const reqId = "as" + Date.now() + Math.random().toString(36).slice(2, 8);
+      const resultEvent = "temu-monitor.addstock-result";
+      const onResult = (ev) => {
+        if (!ev || !ev.detail || ev.detail.reqId !== reqId) return;
+        window.removeEventListener(resultEvent, onResult);
+        if (settled) return;
+        settled = true;
+        sendResponse(ev.detail);
+      };
+      window.addEventListener(resultEvent, onResult);
+      try {
+        window.dispatchEvent(new CustomEvent("temu-monitor.addstock-request", { detail: { reqId, enroll_id: msg.task.enroll_id, add_stock: msg.task.add_stock } }));
+      } catch (e) {
+        if (!settled) { settled = true; sendResponse({ ok: false, error: String(e).slice(0, 200) }); }
+        return true;
+      }
+      setTimeout(() => {
+        window.removeEventListener(resultEvent, onResult);
+        if (settled) return;
+        settled = true;
+        try { sendResponse({ ok: false, error: "addstock_page_timeout" }); } catch {}
+      }, 30000);
+      return true;
     }
     if (msg.type !== "GET_PAGE_STATS") return;
     let settled = false;

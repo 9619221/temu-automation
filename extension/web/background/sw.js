@@ -18,6 +18,7 @@ import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 const ALARM_FLUSH = "temu-monitor.flush";
 const ALARM_COLLECT = "temu-monitor.collect";
 const ALARM_ENROLL = "temu-monitor.enroll"; // 轮询云端待报名任务
+const ALARM_ADDSTOCK = "temu-monitor.addstock"; // 轮询云端追加库存任务
 const ALARM_SALES_TREND = "temu-monitor.sales-trend";
 const ALARM_REVIEW = "temu-monitor.review";
 const ALARM_HPF = "temu-monitor.hpf";
@@ -50,7 +51,7 @@ const ACTIVITY_MATCH_RUN_INTERVAL_MS = 30 * 60 * 1000; // 整轮间隔
 const ACTIVITY_MATCH_MAX_THEMATICS = 30; // 每轮最多 match 的活动数(限速)
 const ACTIVITY_MATCH_ROWCOUNT = 10; // 实测 >10 被拒
 const ACTIVITY_MATCH_MAX_SCROLL = 10; // 每活动最多翻页
-// 已报名活动记录:同 /enroll/list 但不带 sessionStatusTag/productSkcIds(=已报名记录);按当前店翻页扫全
+// 已报名活动记录:/enroll/list 带 addSite+sessionStatus(1进行中/2未开始);按当前店翻页扫全
 const ENROLL_RECORD_STATE_KEY = "temu_monitor_enroll_record_state";
 const ENROLL_RECORD_RUN_INTERVAL_MS = 30 * 60 * 1000; // 30min/轮
 const ENROLL_RECORD_PAGE_SIZE = 50;
@@ -62,6 +63,10 @@ const ACTIVITY_MATCH_MALLS_PER_RUN = 4; // 每轮采几个店(轮换),35店约9�
 const ENROLL_RECORD_TARGETS_STATE_KEY = "temu_monitor_enroll_record_targets_state";
 const ENROLL_RECORD_TARGETS_RUN_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2h/轮
 const ENROLL_RECORD_TARGETS_MALLS_PER_RUN = 4; // 每轮 4 店,35店约9轮转完
+// 活动价格主动采集：先翻 /price-adjust/page-query 拿产品 ID 列表，再逐个 /product-adjust-query 拿活动详情
+const PRICE_ADJUST_ACT_STATE_KEY = "temu_monitor_price_adjust_activities_state";
+const PRICE_ADJUST_ACT_INTERVAL_MS = 2 * 60 * 1000; // 临时2min验证，之后改回2h
+const PRICE_ADJUST_ACT_MAX_PRODUCTS = 80; // 每轮最多查询产品数
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -163,6 +168,10 @@ const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 
 const FLOW_PAGE_SIZE = 100;
 const FLOW_MAX_PAGES = 12;
 const FLOW_PAGE_DELAY_MS = 500;
+const FLOW_BACKFILL_STATE_KEY = "temu_flow_backfill_state";
+const FLOW_BACKFILL_DAYS = 30;
+const FLOW_BACKFILL_PAGE_DELAY_MS = 600;
+const FLOW_BACKFILL_DATE_DELAY_MS = 2000;
 // 商品品质看板主动直采：对当前登录店调 goods/quality/supplyChain/qualityMetrics/pageQuery（带 mallid 头，无需 anti-content）。
 // 品质数据量小、变化慢，间隔放宽到每店每 6 小时一轮。多店覆盖靠多开（每实例一店）。
 const QUALITY_STATE_KEY = "temu_monitor_quality_state";
@@ -220,6 +229,14 @@ const SHOP_STATS_GOODS_DATA_MAX_PAGES = 10;
 const ACTIVITY_LIST_PATH = "/bg-goku-mms/api/kiana/gamblers/marketing/enroll/activity/list";
 const ACTIVITY_LIST_PAGE_SIZE = 50;
 const ACTIVITY_LIST_MAX_PAGES = 10;
+const ACTIVITY_GOODS_LIST_PATH = "/sydney/api/goodsDataShow/activityGoodsList";
+const ACTIVITY_GOODS_LIST_PAGE_SIZE = 50;
+const ACTIVITY_GOODS_LIST_MAX_PAGES = 10;
+const ALARM_ACTIVITY_GOODS_TAB = "temu-monitor.activity-goods-tab";
+const ACTIVITY_GOODS_TAB_STATE_KEY = "temu_monitor_activity_goods_tab_state";
+const ACTIVITY_GOODS_TAB_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const ACTIVITY_GOODS_TAB_LOAD_WAIT_MS = 12000;
+const ACTIVITY_GOODS_TAB_API_WAIT_MS = 8000;
 
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
@@ -252,6 +269,70 @@ const COLLECTOR_TARGETS = [
   { key: "product_select", url: "https://agentseller.temu.com/newon/product-select" },
 ];
 
+async function ensureOffscreenForAntiContent() {
+  if (await chrome.offscreen.hasDocument?.()) return;
+  await chrome.offscreen.createDocument({
+    url: "web/background/offscreen.html",
+    reasons: ["WORKERS"],
+    justification: "Generate anti-content headers for Temu API requests",
+  });
+}
+
+async function getAntiContent() {
+  await ensureOffscreenForAntiContent();
+  const resp = await chrome.runtime.sendMessage({ type: "get-anti-content" });
+  if (!resp?.ok) throw new Error(resp?.error || "anti-content generation failed");
+  return resp.value;
+}
+
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, options);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return await resp.json();
+    } catch (e) {
+      if (attempt >= maxRetries - 1) throw e;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+const SITE_REGIONS = [
+  { type: 1, name: "主站", origin: "https://agentseller.temu.com", siteTag: "agentseller" },
+  { type: 2, name: "欧区", origin: "https://agentseller-eu.temu.com", siteTag: "agentseller-eu" },
+  { type: 3, name: "美区", origin: "https://agentseller-us.temu.com", siteTag: "agentseller-us" },
+];
+
+async function loginMO(mallId, siteType) {
+  const redirectUrls = {
+    1: "https://agentseller.temu.com/main/authentication",
+    2: "https://agentseller-eu.temu.com/main/authentication",
+    3: "https://agentseller-us.temu.com/main/authentication",
+  };
+  const loginUrls = {
+    1: "https://agentseller.temu.com/api/seller/auth/loginByCode",
+    2: "https://agentseller-eu.temu.com/api/seller/auth/loginByCode",
+    3: "https://agentseller-us.temu.com/api/seller/auth/loginByCode",
+  };
+  const headers = {
+    "accept": "*/*",
+    "accept-language": "zh-CN,zh;q=0.9",
+    "cache-control": "no-cache",
+    "content-type": "application/json",
+    "mallid": mallId,
+  };
+  const codeResp = await fetchWithRetry(
+    "https://seller.kuajingmaihuo.com/bg/quiet/api/auth/obtainCode",
+    { method: "POST", headers, body: JSON.stringify({ redirectUrl: redirectUrls[siteType] }), redirect: "follow", credentials: "include" }
+  );
+  const authCode = codeResp?.result?.code;
+  if (!authCode) throw new Error(`loginMO: no auth code for siteType=${siteType}`);
+  await fetchWithRetry(loginUrls[siteType], {
+    method: "POST", headers, body: JSON.stringify({ code: authCode, confirm: true, targetMallId: mallId }), redirect: "follow", credentials: "include",
+  });
+}
+
 ensureRuntimeDefaults().catch((e) => console.warn("[sw] bootstrap skipped:", e?.message || e));
 
 // ---------- 启动期初始化 ----------
@@ -260,7 +341,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   // reload/更新扩展时清品质采集节流(last_success_at),让新版立即采一次;SW 唤醒走 onStartup 不清,保留每店 6h 节流
   try { const qs = (await getStorage([QUALITY_STATE_KEY]))[QUALITY_STATE_KEY] || {}; await setStorage({ [QUALITY_STATE_KEY]: { ...qs, last_success_at: 0 } }); } catch {}
   // 清合规属性采集节流，让更新后立即采一次制造商/欧代/土代
-  try { await setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { last_success_at: 0 } }); } catch {}
+  try { await setStorage({ [COMPLIANCE_PROP_STATE_KEY]: { last_run_at: 0, last_success_at: 0 } }); } catch {}
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -270,6 +351,7 @@ chrome.runtime.onStartup.addListener(async () => {
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
   chrome.alarms.create(ALARM_ENROLL, { periodInMinutes: 1 });
+  chrome.alarms.create(ALARM_ADDSTOCK, { periodInMinutes: 1 });
   chrome.alarms.create(ALARM_SALES_TREND, { periodInMinutes: Math.max(1, SALES_TREND_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_REVIEW, { periodInMinutes: Math.max(1, REVIEW_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_HPF, { periodInMinutes: Math.max(1, HPF_RUN_INTERVAL_MS / 60000) });
@@ -279,6 +361,7 @@ async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_PRICE, { periodInMinutes: Math.max(1, PRICE_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_COMPLIANCE, { delayInMinutes: 1, periodInMinutes: Math.max(1, COMPLIANCE_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_SHOP_STATS, { periodInMinutes: Math.max(1, SHOP_STATS_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_ACTIVITY_GOODS_TAB, { delayInMinutes: 2, periodInMinutes: Math.max(1, ACTIVITY_GOODS_TAB_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
   const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY, INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY, SHOP_STATS_STATE_KEY]);
   const patch = {};
@@ -366,9 +449,12 @@ async function ensureRuntimeDefaults() {
   }
   await cleanupStrayCollectorTabs(null).catch((e) => console.warn("[sw] collector cleanup err", e?.message || e));
   await disableFeishuSupplierAutoImport("bootstrap").catch((e) => console.warn("[sw] feishu auto disable err", e?.message || e));
-  // 启动后延迟 10 秒触发一次 HPF 采集（等 tryAutoConfigure 完成拿到 token）
+  // 启动后延迟 10 秒触发采集（等 tryAutoConfigure 完成拿到 token）
   setTimeout(() => {
     collectHighPriceFlowFromTargets().then((r) => console.log("[sw] hpf boot collect:", r)).catch((e) => console.warn("[sw] hpf boot err", e?.message || e));
+    bootEnrollSkcProbe().catch((e) => console.warn("[sw] enroll-skc boot err", e?.message || e));
+    collectPriceAdjustActivities().then((r) => console.log("[sw] price-adjust boot:", JSON.stringify(r))).catch((e) => console.warn("[sw] price-adjust boot err", e?.message || e));
+    collectActivityGoodsViaTab().then((r) => console.log("[sw] activity-goods-tab boot:", JSON.stringify(r))).catch((e) => console.warn("[sw] activity-goods-tab boot err", e?.message || e));
   }, 10000);
 }
 
@@ -402,6 +488,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === ALARM_ENROLL) {
     await pollEnrollTasks().catch((e) => console.warn("[sw] enroll poll err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_ADDSTOCK) {
+    await pollAddStockTasks().catch((e) => console.warn("[sw] addstock poll err", e?.message || e));
     return;
   }
   if (alarm.name === ALARM_SALES_TREND) {
@@ -441,6 +531,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     collectShopStatsFromTargets().catch((e) => console.warn("[sw] shop-stats collect err", e?.message || e));
     return;
   }
+  if (alarm.name === ALARM_ACTIVITY_GOODS_TAB) {
+    collectActivityGoodsViaTab().then((r) => console.log("[sw] activity-goods-tab:", JSON.stringify(r))).catch((e) => console.warn("[sw] activity-goods-tab err", e?.message || e));
+    return;
+  }
   if (alarm.name !== ALARM_FLUSH) return;
   // 未配置兜底：onInstalled 阶段 fetch 偶尔失败（network stack 没准备好），
   // 这里 30s 一次重试，配置成功后立即心跳上来
@@ -461,8 +555,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   collectActivityMatchFromTargets().catch((e) => console.warn("[sw] activity match targets collect err", e?.message || e));
   collectEnrollRecords().catch((e) => console.warn("[sw] enroll record collect err", e?.message || e));
   collectEnrollRecordsFromTargets().catch((e) => console.warn("[sw] enroll record targets collect err", e?.message || e));
+  collectPriceAdjustActivities().catch((e) => console.warn("[sw] price-adjust-activities collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
-  collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
+  collectFlowMultiregion().catch((e) => console.warn("[sw] flow multiregion collect err", e?.message || e));
   collectQualityAllSites().catch((e) => console.warn("[sw] quality collect err", e?.message || e));
   collectProductsAndAfterSalesViaPage().catch((e) => console.warn("[sw] products/aftersales page-world collect err", e?.message || e));
   collectSiteExceptionsViaPage().catch((e) => console.warn("[sw] site-exceptions collect err", e?.message || e));
@@ -640,7 +735,6 @@ async function collectActivityLibraryFromTargets() {
         pageNo: 1,
         pageSize: 50,
         productSkcIds: batch,
-        sessionStatusTag: 4,
       });
       batchCount++;
       try {
@@ -657,23 +751,26 @@ async function collectActivityLibraryFromTargets() {
         const text = await resp.text();
         const body = safeParseJson(text);
         if (resp.ok && body && typeof body === "object") {
+          const common = {
+            url, method: "POST", status: resp.status, ts: Date.now(),
+            site: target?.site || "agentseller", mall_id: mallId,
+            body, bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody, bodySize: text.length,
+          };
           await enqueue({
+            ...common,
             kind: "fetch-active-activity-library",
-            url,
-            method: "POST",
-            status: resp.status,
-            ts: Date.now(),
-            site: target?.site || "agentseller",
             page: "background/activity-library",
-            mall_id: mallId,
-            body,
-            bodyText: text.length > 200000 ? null : text,
-            requestBodyText: requestBody,
-            bodySize: text.length,
             activeSource: "marketing_enroll_list_background",
             activeSkcCount: batch.length,
           });
-          await bumpStats({ captured_count_delta: 1 });
+          await enqueue({
+            ...common,
+            kind: "fetch-enroll-record",
+            page: "background/activity-library-enroll",
+            activeSource: "marketing_enroll_list_background",
+          });
+          await bumpStats({ captured_count_delta: 2 });
           enqueuedCount++;
         }
         seen[seenKey] = Date.now();
@@ -802,6 +899,79 @@ async function pollEnrollTasks() {
         body: JSON.stringify({ task_id: task.task_id, status: result.ok ? "done" : "failed", result }),
       });
     } catch { /* 下轮重试由云端 status 控制 */ }
+  }
+}
+
+// 轮询云端追加库存任务,用 executeScript 在页面 MAIN world 直接调 API(不依赖 content script)
+async function pollAddStockTasks() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token"]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return;
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return;
+  const base = cfg.cloud_endpoint.replace(/\/$/, "");
+  let tasks = [];
+  try {
+    const resp = await fetch(`${base}/api/ingest/v1/addstock-tasks?mall_id=${encodeURIComponent(cur.mallId)}`, {
+      headers: { Authorization: `Bearer ${cfg.auth_token}` },
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  } catch { return; }
+  if (!tasks.length) return;
+  const tabs = await chrome.tabs.query({
+    url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+  });
+  const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  if (!tab) return;
+  for (const task of tasks) {
+    let result = { ok: false, error: "unknown" };
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        args: [task.enroll_id, task.add_stock],
+        func: async (enrollId, addStockQty) => {
+          try {
+            const mallid = (document.cookie.match(/mallid=([^;]+)/i) || [])[1] || "";
+            if (!mallid) return { ok: false, error: "no_mallid_cookie" };
+            const antiContent = window.__temuMonitor?.lastAntiContent || "";
+            if (!antiContent) return { ok: false, error: "no_anti_content(页面需先发过请求)" };
+            let found = null;
+            for (let page = 1; page <= 20; page++) {
+              const listResp = await fetch("/api/kiana/gamblers/marketing/enroll/list", {
+                method: "POST", credentials: "include",
+                headers: { "content-type": "application/json", "mallid": mallid },
+                body: JSON.stringify({ pageNo: page, pageSize: 50 }),
+              });
+              const listBody = await listResp.json().catch(() => null);
+              if (!listResp.ok || !listBody?.result) return { ok: false, error: "enroll/list 请求失败 page=" + page, status: listResp.status, body: JSON.stringify(listBody).slice(0, 500) };
+              const enrollList = listBody.result.enrollList || listBody.result.list || [];
+              found = enrollList.find((e) => String(e.enrollId) === String(enrollId));
+              if (found) break;
+              const total = Number(listBody.result.total || 0);
+              if (page * 50 >= total) break;
+            }
+            if (!found || found.version == null) return { ok: false, error: "enroll/list 翻页未找到 enrollId=" + enrollId };
+            const stockResp = await fetch("/api/kiana/gamblers/marketing/enroll/addStock", {
+              method: "POST", credentials: "include",
+              headers: { "content-type": "application/json", "mallid": mallid, "anti-content": antiContent },
+              body: JSON.stringify({ enrollId: Number(enrollId), addStock: addStockQty, version: found.version }),
+            });
+            const stockBody = await stockResp.json().catch(() => null);
+            return { ok: stockResp.ok && stockBody?.success !== false, status: stockResp.status, result: stockBody?.result || stockBody, version: found.version };
+          } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 200) }; }
+        },
+      });
+      result = res?.result || { ok: false, error: "executeScript returned empty" };
+    } catch (e) { result = { ok: false, error: String(e?.message || e).slice(0, 200) }; }
+    try {
+      await fetch(`${base}/api/ingest/v1/addstock-tasks/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.auth_token}` },
+        body: JSON.stringify({ task_id: task.task_id, status: result.ok ? "done" : "failed", result }),
+      });
+    } catch {}
   }
 }
 
@@ -935,7 +1105,7 @@ async function collectActivityMatchFromTargets() {
   return { ok: true, malls: slice.length, enqueued };
 }
 
-// 已报名活动记录:按当前店翻页调 /enroll/list(不带 sessionStatusTag/productSkcIds=已报名),enqueue 上云。
+// 已报名活动记录:按当前店翻页调 /enroll/list(addSite=true, sessionStatus=1/2),enqueue 上云。
 // cloud parser 据 list 项的 enrollId 自动分流到 temu_activity_enroll_record(不混可报快照)。
 async function collectEnrollRecords() {
   const cfg = await getStorage(["cloud_endpoint", "auth_token", ENROLL_RECORD_STATE_KEY]);
@@ -949,36 +1119,230 @@ async function collectEnrollRecords() {
   const site = cur.origin.includes("-us") ? "agentseller-us" : cur.origin.includes("-eu") ? "agentseller-eu" : "agentseller";
   const url = `${cur.origin}${ACTIVITY_LIBRARY_ENDPOINT}`; // /enroll/list
   let enqueued = 0;
-  for (let page = 1; page <= ENROLL_RECORD_MAX_PAGES; page++) {
-    const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE });
-    let body = null, text = "";
-    try {
-      const resp = await fetch(url, {
-        method: "POST", credentials: "include", cache: "no-store",
-        headers: { "Content-Type": "application/json", mallid: cur.mallId },
-        body: reqBody,
+  const allSkcIds = new Set();
+  const passes = [
+    { addSite: true },
+    { addSite: true, sessionStatus: 1 },
+    { addSite: true, sessionStatus: 2 },
+  ];
+  for (const extra of passes) {
+    const maxPages = Object.keys(extra).length > 1 ? 15 : ENROLL_RECORD_MAX_PAGES;
+    for (let page = 1; page <= maxPages; page++) {
+      const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE, ...extra });
+      let body = null, text = "";
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: cur.mallId },
+          body: reqBody,
+        });
+        text = await resp.text();
+        body = safeParseJson(text);
+        if (!resp.ok || !body || typeof body !== "object") break;
+      } catch { break; }
+      const list = body?.result?.list || [];
+      if (!list.length) break;
+      for (const rec of list) {
+        const skcList = Array.isArray(rec?.skcList) ? rec.skcList : [];
+        for (const skc of skcList) {
+          const id = String(skc?.skcId || skc?.productSkcId || "").trim();
+          if (/^\d{5,}$/.test(id)) allSkcIds.add(id);
+        }
+      }
+      await enqueue({
+        kind: "fetch-enroll-record", url,
+        method: "POST", status: 200, ts: Date.now(), site,
+        page: "background/enroll-record", mall_id: cur.mallId,
+        body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+        activeSource: "marketing_enroll_record_background",
       });
-      text = await resp.text();
-      body = safeParseJson(text);
-      if (!resp.ok || !body || typeof body !== "object") break;
-    } catch { break; }
-    const list = body?.result?.list || [];
-    if (!list.length) break;
-    await enqueue({
-      kind: "fetch-enroll-record", url,
-      method: "POST", status: 200, ts: Date.now(), site,
-      page: "background/enroll-record", mall_id: cur.mallId,
-      body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
-      activeSource: "marketing_enroll_record_background",
-    });
-    enqueued++;
-    await bumpStats({ captured_count_delta: 1 });
-    const total = Number(body?.result?.total || 0);
-    if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
-    await new Promise((r) => setTimeout(r, 250));
+      enqueued++;
+      await bumpStats({ captured_count_delta: 1 });
+      const total = Number(body?.result?.total || 0);
+      if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  // 用收集到的 SKC ID 精准查询当前 session 的报名数据
+  if (allSkcIds.size > 0) {
+    const skcArr = [...allSkcIds];
+    for (let i = 0; i < skcArr.length; i += 20) {
+      const batch = skcArr.slice(i, i + 20);
+      const reqBody = JSON.stringify({ pageNo: 1, pageSize: 50, addSite: true, productSkcIds: batch });
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: cur.mallId },
+          body: reqBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (!resp.ok || !body || typeof body === "object" === false) continue;
+        const list = body?.result?.list || [];
+        if (!list.length) continue;
+        await enqueue({
+          kind: "fetch-enroll-record", url,
+          method: "POST", status: 200, ts: Date.now(), site,
+          page: "background/enroll-record-skc", mall_id: cur.mallId,
+          body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+          activeSource: "marketing_enroll_record_background",
+        });
+        enqueued++;
+        await bumpStats({ captured_count_delta: 1 });
+      } catch { /* continue */ }
+      await new Promise((r) => setTimeout(r, 300));
+    }
   }
   await setStorage({ [ENROLL_RECORD_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_enqueued: enqueued } });
-  return { ok: true, enqueued };
+  if (enqueued > 0) await flush();
+  return { ok: true, enqueued, skcCount: allSkcIds.size };
+}
+
+// boot 探针：在页面 MAIN world 翻页调 /enroll/list，hook.js 自动捕获（anti-content + emit）
+// 三轮：无过滤 + tag:3(进行中) + tag:4(可报名)，各翻全量页。完成后密集 flush 推云端。
+async function bootEnrollSkcProbe() {
+  const saveStatus = async (s) => { try { await setStorage({ enroll_probe_last: { ...s, ts: Date.now() } }); } catch {} };
+  const cfg = await getStorage(["cloud_endpoint", "auth_token"]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) { await saveStatus({ ok: false, reason: "not_configured" }); return { ok: false, reason: "not_configured" }; }
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"] });
+  } catch { await saveStatus({ ok: false, reason: "tabs_query_failed" }); return { ok: false, reason: "tabs_query_failed" }; }
+  if (!tabs.length) { await saveStatus({ ok: false, reason: "no_agentseller_tab" }); return { ok: false, reason: "no_agentseller_tab" }; }
+  const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  let mallId = "";
+  try {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || "") });
+    mallId = String(res?.result || "").trim();
+  } catch { await saveStatus({ ok: false, reason: "scripting_failed" }); return { ok: false, reason: "scripting_failed" }; }
+  if (!mallId) { await saveStatus({ ok: false, reason: "no_mallid" }); return { ok: false, reason: "no_mallid" }; }
+  // 重新注入 bridge（扩展刷新后旧 bridge 成孤儿，postMessage → SW 链断裂）
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/_config.generated.js", "content/bridge.js"] });
+  } catch {}
+  const hookOk = await new Promise((resolve) => {
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => !!(window.__temuMonitor || window.__temuHook) })
+      .then(([r]) => resolve(!!r?.result)).catch(() => resolve(false));
+  });
+  if (!hookOk) { await saveStatus({ ok: false, reason: "hook_not_loaded", mall: mallId }); return { ok: false, reason: "hook_not_loaded" }; }
+  let origin = "https://agentseller.temu.com";
+  try { origin = new URL(tab.url).origin; } catch {}
+  const site = origin.includes("-us") ? "agentseller-us" : origin.includes("-eu") ? "agentseller-eu" : "agentseller";
+  const endpoint = ACTIVITY_LIBRARY_ENDPOINT;
+  const url = `${origin}${endpoint}`;
+  const cloudUrl = cfg.cloud_endpoint.replace(/\/$/, "") + "/api/ingest/v1/batch";
+  const cloudHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${cfg.auth_token}` };
+  // 分轮在 MAIN world 翻页 fetch，每轮返回响应文本数组，SW 端直推云端
+  const rounds = [{ addSite: true }, { addSite: true, sessionStatus: 1 }, { addSite: true, sessionStatus: 2 }];
+  let totalFetches = 0, totalRecords = 0, totalSent = 0, errors = 0;
+  for (const extra of rounds) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        args: [mallId, endpoint, extra],
+        func: async (mid, ep, extraParams) => {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const pages = [];
+          for (let p = 1; p <= 30; p++) {
+            try {
+              const body = { pageNo: p, pageSize: 50, ...extraParams };
+              const r = await fetch(ep, {
+                method: "POST", credentials: "include", cache: "no-store",
+                headers: { "Content-Type": "application/json", mallid: mid },
+                body: JSON.stringify(body),
+              });
+              const text = await r.text();
+              if (r.status !== 200) { pages.push({ err: r.status, reqBody: JSON.stringify(body) }); break; }
+              let b; try { b = JSON.parse(text); } catch { pages.push({ err: "parse" }); break; }
+              const list = b?.result?.list || [];
+              pages.push({ reqBody: JSON.stringify(body), text: text.length > 150000 ? null : text, count: list.length, total: Number(b?.result?.total || 0) });
+              if (!list.length) break;
+              if (p * 50 >= Number(b?.result?.total || 0)) break;
+            } catch (e) { pages.push({ err: String(e?.message || e).slice(0, 100) }); break; }
+            await wait(350);
+          }
+          return pages;
+        },
+      });
+      const pages = result?.result || [];
+      for (const pg of pages) {
+        if (pg.err) { errors++; continue; }
+        totalFetches++;
+        totalRecords += (pg.count || 0);
+        if (!pg.text || pg.count === 0) continue;
+        let body; try { body = JSON.parse(pg.text); } catch { continue; }
+        const item = {
+          ts: Date.now(), kind: "fetch-enroll-record", url, method: "POST", status: 200,
+          site, page: "background/enroll-probe-v2", mall_id: mallId,
+          body, bodyText: pg.text, requestBodyText: pg.reqBody, bodySize: pg.text.length,
+          activeSource: "marketing_enroll_record_background",
+        };
+        try {
+          const cr = await fetch(cloudUrl, { method: "POST", headers: cloudHeaders, body: JSON.stringify({ items: [item] }) });
+          if (cr.ok) totalSent++;
+        } catch {}
+      }
+    } catch (e) { errors++; console.warn("[sw] enroll-probe round error:", e?.message || e); }
+  }
+  console.log(`[sw] enroll-probe: mall=${mallId} fetches=${totalFetches} records=${totalRecords} sent=${totalSent} errors=${errors}`);
+  const probeResult = { ok: true, mall: mallId, totalFetches, totalRecords, totalSent, errors, ts: Date.now() };
+  await saveStatus(probeResult);
+  return probeResult;
+}
+
+// 主动采集活动价格数据：从云端获取产品列表 → MAIN world 逐个调 product-adjust-query → 推云端。
+async function collectPriceAdjustActivities() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", PRICE_ADJUST_ACT_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[PRICE_ADJUST_ACT_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < PRICE_ADJUST_ACT_INTERVAL_MS && state.sent !== undefined) return { ok: true, skipped: "interval" };
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"] });
+  } catch { return { ok: false, reason: "tabs_query_failed" }; }
+  if (!tabs.length) return { ok: false, reason: "no_agentseller_tab" };
+  const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  let mallId = "";
+  try {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || "") });
+    mallId = String(res?.result || "").trim();
+  } catch { return { ok: false, reason: "scripting_failed" }; }
+  if (!mallId) return { ok: false, reason: "no_mallid" };
+  let origin = "https://agentseller.temu.com";
+  try { origin = new URL(tab.url).origin; } catch {}
+  const site = origin.includes("-us") ? "agentseller-us" : origin.includes("-eu") ? "agentseller-eu" : "agentseller";
+  await setStorage({ [PRICE_ADJUST_ACT_STATE_KEY]: { ...state, last_run_at: now } });
+  const productQueryEp = "/api/kiana/mms/magneto/price-adjust/product-adjust-query";
+  const testPids = [6760169344, 7818421381, 5961445136];
+  let data;
+  try {
+    const suppNum = Number(mallId);
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, world: "MAIN",
+      args: [mallId, productQueryEp, suppNum, testPids[0]],
+      func: async (mid, paEp, supplierId, testPid) => {
+        try {
+          const reqBody = { items: [{ supplierId, productId: testPid }] };
+          const r = await fetch(paEp, {
+            method: "POST", credentials: "include", cache: "no-store",
+            headers: { "Content-Type": "application/json", mallid: mid },
+            body: JSON.stringify(reqBody),
+          });
+          const text = await r.text();
+          return { ok: true, status: r.status, preview: text.slice(0, 500), sent: JSON.stringify(reqBody), pid: testPid };
+        } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 300) }; }
+      },
+    });
+    data = result?.result;
+  } catch (e) {
+    data = { ok: false, reason: "executeScript_threw", error: String(e?.message || e).slice(0, 300) };
+  }
+  const diagResult = { ts: Date.now(), mall: mallId, tab: tab.id, url: tab.url?.slice(0, 60), data };
+  console.log("[sw] PA-DIAG:", JSON.stringify(diagResult));
+  await setStorage({ _pa_diag: diagResult });
+  return diagResult;
 }
 
 // 多店版:遍历云端 targets 各店,每店翻页采全量 /enroll/list(含 signSessionList/sites/活动库存),
@@ -1014,36 +1378,44 @@ async function collectEnrollRecordsFromTargets() {
   }
   await setStorage({ [ENROLL_RECORD_TARGETS_STATE_KEY]: { ...state, last_run_at: now, cursor: (start + ENROLL_RECORD_TARGETS_MALLS_PER_RUN) % malls.length, total_malls: malls.length } });
   let enqueued = 0;
+  const passes = [
+    { addSite: true },
+    { addSite: true, sessionStatus: 1 },
+    { addSite: true, sessionStatus: 2 },
+  ];
   for (const m of slice) {
     const origin = activityLibraryOriginForSite(m.site);
     const url = `${origin}${ACTIVITY_LIBRARY_ENDPOINT}`;
-    for (let page = 1; page <= ENROLL_RECORD_MAX_PAGES; page++) {
-      const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE });
-      let body = null, text = "";
-      try {
-        const resp = await fetch(url, {
-          method: "POST", credentials: "include", cache: "no-store",
-          headers: { "Content-Type": "application/json", mallid: m.mallId },
-          body: reqBody,
+    for (const extra of passes) {
+      const maxPages = Object.keys(extra).length > 1 ? 15 : ENROLL_RECORD_MAX_PAGES;
+      for (let page = 1; page <= maxPages; page++) {
+        const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE, ...extra });
+        let body = null, text = "";
+        try {
+          const resp = await fetch(url, {
+            method: "POST", credentials: "include", cache: "no-store",
+            headers: { "Content-Type": "application/json", mallid: m.mallId },
+            body: reqBody,
+          });
+          text = await resp.text();
+          body = safeParseJson(text);
+          if (!resp.ok || !body || typeof body !== "object") break;
+        } catch { break; }
+        const list = body?.result?.list || [];
+        if (!list.length) break;
+        await enqueue({
+          kind: "fetch-enroll-record", url,
+          method: "POST", status: 200, ts: Date.now(), site: m.site,
+          page: "background/enroll-record-targets", mall_id: m.mallId,
+          body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+          activeSource: "marketing_enroll_record_targets",
         });
-        text = await resp.text();
-        body = safeParseJson(text);
-        if (!resp.ok || !body || typeof body !== "object") break;
-      } catch { break; }
-      const list = body?.result?.list || [];
-      if (!list.length) break;
-      await enqueue({
-        kind: "fetch-enroll-record", url,
-        method: "POST", status: 200, ts: Date.now(), site: m.site,
-        page: "background/enroll-record-targets", mall_id: m.mallId,
-        body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
-        activeSource: "marketing_enroll_record_targets",
-      });
-      enqueued++;
-      await bumpStats({ captured_count_delta: 1 });
-      const total = Number(body?.result?.total || 0);
-      if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
-      await new Promise((r) => setTimeout(r, 400));
+        enqueued++;
+        await bumpStats({ captured_count_delta: 1 });
+        const total = Number(body?.result?.total || 0);
+        if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
+        await new Promise((r) => setTimeout(r, 400));
+      }
     }
     await new Promise((r) => setTimeout(r, 300));
   }
@@ -1067,13 +1439,15 @@ async function collectFlowForCurrentMall() {
   const url = `${cur.origin}/api/seller/full/flow/analysis/goods/list`;
   let enqueuedCount = 0;
   for (let page = 1; page <= FLOW_MAX_PAGES; page++) {
-    const requestBody = JSON.stringify({ pageNum: page, pageSize: FLOW_PAGE_SIZE, dayDimension: 1 });
+    const requestBody = JSON.stringify({ pageNum: page, pageSize: FLOW_PAGE_SIZE, timeDimension: 1 });
+    let ac = "";
+    try { ac = await getAntiContent(); } catch {}
     try {
       const resp = await fetch(url, {
         method: "POST",
         credentials: "include",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json", mallid: cur.mallId },
+        redirect: "follow",
+        headers: { "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9", "content-type": "application/json", mallid: cur.mallId, ...(ac ? { "anti-content": ac } : {}) },
         body: requestBody,
       });
       const text = await resp.text();
@@ -1109,6 +1483,282 @@ async function collectFlowForCurrentMall() {
   if (enqueuedCount > 0) await flush();
   return { ok: true, enqueuedCount, mall: cur.mallId };
 }
+
+// 流量历史回填：遍历最近 30 天，逐天逐页采集所有登录店的流量数据，支持中断恢复
+async function backfillFlowHistory() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", FLOW_BACKFILL_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+
+  const malls = await getAllAgentSellerMalls();
+  if (!malls.length) return { ok: false, reason: "no_agentseller_tabs" };
+
+  const state = cfg[FLOW_BACKFILL_STATE_KEY] || {};
+  if (state.running) return { ok: false, reason: "already_running" };
+
+  const dates = [];
+  const now = new Date();
+  for (let i = 1; i <= FLOW_BACKFILL_DAYS; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  const resumeMallIdx = state.resume_mall_idx || 0;
+  const resumeDateIdx = state.resume_date_idx || 0;
+  const startedAt = Date.now();
+
+  await setStorage({ [FLOW_BACKFILL_STATE_KEY]: { running: true, started_at: startedAt, total_malls: malls.length, total_dates: dates.length } });
+
+  let totalEnqueued = 0;
+  let lastError = null;
+
+  for (let mi = resumeMallIdx; mi < malls.length; mi++) {
+    const mall = malls[mi];
+    const origin = mall.origin || "https://agentseller.temu.com";
+    const mallId = mall.mallId;
+    const siteTag = (origin.match(/\/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
+    const url = `${origin}/api/seller/full/flow/analysis/goods/list`;
+
+    const startDateIdx = (mi === resumeMallIdx) ? resumeDateIdx : 0;
+
+    for (let di = startDateIdx; di < dates.length; di++) {
+      const statDate = dates[di];
+      let dateEnqueued = 0;
+
+      for (let page = 1; page <= FLOW_MAX_PAGES; page++) {
+        const requestBody = JSON.stringify({ pageNum: page, pageSize: FLOW_PAGE_SIZE, timeDimension: 1, statDate });
+        let ac = "";
+        try { ac = await getAntiContent(); } catch {}
+        try {
+          const resp = await fetch(url, {
+            method: "POST",
+            credentials: "include",
+            redirect: "follow",
+            headers: { "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9", "content-type": "application/json", mallid: mallId, ...(ac ? { "anti-content": ac } : {}) },
+            body: requestBody,
+          });
+          const text = await resp.text();
+          const body = safeParseJson(text);
+          if (!resp.ok || !body || typeof body !== "object") break;
+
+          await enqueue({
+            kind: "fetch-active-flow",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: siteTag,
+            page: "background/flow-backfill",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "flow_analysis_backfill",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          dateEnqueued++;
+          totalEnqueued++;
+
+          const list = body?.result?.list || body?.result?.pageItems || [];
+          if (!Array.isArray(list) || list.length < FLOW_PAGE_SIZE) break;
+        } catch (e) {
+          lastError = String(e?.message || e).slice(0, 200);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, FLOW_BACKFILL_PAGE_DELAY_MS));
+      }
+
+      await setStorage({
+        [FLOW_BACKFILL_STATE_KEY]: {
+          running: true, started_at: startedAt,
+          resume_mall_idx: mi, resume_date_idx: di + 1,
+          total_malls: malls.length, total_dates: dates.length,
+          current_mall: mallId, current_date: statDate,
+          total_enqueued: totalEnqueued,
+        },
+      });
+
+      if (dateEnqueued > 0) await flush();
+      await new Promise((r) => setTimeout(r, FLOW_BACKFILL_DATE_DELAY_MS));
+    }
+  }
+
+  await setStorage({
+    [FLOW_BACKFILL_STATE_KEY]: {
+      running: false, finished_at: Date.now(), started_at: startedAt,
+      total_malls: malls.length, total_dates: dates.length,
+      total_enqueued: totalEnqueued, last_error: lastError,
+    },
+  });
+
+  return { ok: true, totalEnqueued, malls: malls.length, dates: dates.length, lastError };
+}
+self.backfillFlowHistory = backfillFlowHistory;
+
+const FLOW_MULTIREGION_STATE_KEY = "temu_flow_multiregion_state";
+
+async function fetchFlowForRegion(mallId, region, timeDimension, statDate) {
+  const url = `${region.origin}/api/seller/full/flow/analysis/goods/list`;
+  const RATE_LIMIT_MAX_RETRIES = 8;
+  const NORMAL_MAX_RETRIES = 3;
+  let enqueued = 0;
+  let ac = "";
+  try { ac = await getAntiContent(); } catch {}
+
+  const flowHeaders = { "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9", "content-type": "application/json", mallid: mallId };
+  const probeBody = JSON.stringify({
+    pageNum: 1, pageSize: 1,
+    timeDimension: timeDimension ? parseInt(timeDimension) : 1,
+    ...(statDate ? { statDate } : {}),
+  });
+  let probeData;
+  try {
+    const resp = await fetch(url, {
+      method: "POST", credentials: "include", redirect: "follow",
+      headers: { ...flowHeaders, ...(ac ? { "anti-content": ac } : {}) },
+      body: probeBody,
+    });
+    probeData = safeParseJson(await resp.text());
+  } catch { return 0; }
+  const total = probeData?.result?.total || 0;
+  if (total === 0 || total > 10000) return 0;
+
+  const PAGE_SIZE = FLOW_PAGE_SIZE;
+  const totalPages = Math.min(Math.ceil(total / PAGE_SIZE), FLOW_MAX_PAGES);
+  for (let page = 1; page <= totalPages; page++) {
+    try { ac = await getAntiContent(); } catch { ac = ""; }
+    const requestBody = JSON.stringify({
+      pageNum: page, pageSize: PAGE_SIZE,
+      timeDimension: timeDimension ? parseInt(timeDimension) : 1,
+      ...(statDate ? { statDate } : {}),
+    });
+    let retries = 0;
+    let success = false;
+    let maxRetries = NORMAL_MAX_RETRIES;
+    while (retries < maxRetries && !success) {
+      try {
+        if (retries > 0) { try { ac = await getAntiContent(); } catch { ac = ""; } }
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", redirect: "follow",
+          headers: { ...flowHeaders, ...(ac ? { "anti-content": ac } : {}) },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (!resp.ok || !body) { retries++; await new Promise(r => setTimeout(r, 800)); continue; }
+        const isRateLimited = body?.success === false && (Number(body?.errorCode) === 4000004 || /too many visitors/i.test(String(body?.errorMsg || "")));
+        if (isRateLimited) { maxRetries = RATE_LIMIT_MAX_RETRIES; retries++; await new Promise(r => setTimeout(r, 800)); continue; }
+        await enqueue({
+          kind: "fetch-active-flow", url, method: "POST", status: resp.status, ts: Date.now(),
+          site: region.siteTag, page: "background/flow-multiregion", mall_id: mallId,
+          body, bodyText: text.length > 200000 ? null : text,
+          requestBodyText: requestBody, bodySize: text.length,
+          activeSource: "flow_analysis_multiregion",
+        });
+        await bumpStats({ captured_count_delta: 1 });
+        enqueued++;
+        success = true;
+        const list = body?.result?.list || [];
+        if (!Array.isArray(list) || list.length < PAGE_SIZE) { page = totalPages; }
+      } catch { retries++; await new Promise(r => setTimeout(r, 800)); }
+    }
+    await new Promise(r => setTimeout(r, FLOW_PAGE_DELAY_MS));
+  }
+  return enqueued;
+}
+
+async function fetchProductFlowAllRegions(mallId, options = {}) {
+  const { timeDimension = 1, statDate = "", regions = SITE_REGIONS } = options;
+  const loginResults = await Promise.allSettled(
+    regions.map(r => loginMO(mallId, r.type))
+  );
+  console.log("[sw] loginMO results:", loginResults.map((r, i) => `${regions[i].name}: ${r.status}`).join(", "));
+
+  const fetchResults = await Promise.allSettled(
+    regions.map(r => fetchFlowForRegion(mallId, r, timeDimension, statDate))
+  );
+  let totalEnqueued = 0;
+  const regionResults = {};
+  for (let i = 0; i < regions.length; i++) {
+    const count = fetchResults[i].status === "fulfilled" ? fetchResults[i].value : 0;
+    regionResults[regions[i].name] = { login: loginResults[i].status, fetched: count, error: fetchResults[i].reason?.message };
+    totalEnqueued += count;
+  }
+  console.log("[sw] multiregion flow:", JSON.stringify(regionResults));
+  if (totalEnqueued > 0) await flush();
+  return { ok: true, totalEnqueued, regionResults };
+}
+
+async function backfillFlowMultiregion() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", FLOW_MULTIREGION_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab_or_mallid" };
+  const mallId = cur.mallId;
+
+  const state = cfg[FLOW_MULTIREGION_STATE_KEY] || {};
+  if (state.running) return { ok: false, reason: "already_running" };
+
+  const dates = [];
+  const now = new Date();
+  for (let i = 1; i <= FLOW_BACKFILL_DAYS; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  const resumeDateIdx = state.resume_date_idx || 0;
+  const startedAt = Date.now();
+  await setStorage({ [FLOW_MULTIREGION_STATE_KEY]: { running: true, started_at: startedAt, total_dates: dates.length, mall_id: mallId } });
+
+  let totalEnqueued = 0;
+  let lastError = null;
+
+  for (let di = resumeDateIdx; di < dates.length; di++) {
+    const statDate = dates[di];
+    try {
+      const result = await fetchProductFlowAllRegions(mallId, { statDate });
+      totalEnqueued += result.totalEnqueued || 0;
+    } catch (e) {
+      lastError = String(e?.message || e).slice(0, 200);
+    }
+    await setStorage({
+      [FLOW_MULTIREGION_STATE_KEY]: {
+        running: true, started_at: startedAt, resume_date_idx: di + 1,
+        total_dates: dates.length, mall_id: mallId,
+        current_date: statDate, total_enqueued: totalEnqueued,
+      },
+    });
+    await new Promise(r => setTimeout(r, FLOW_BACKFILL_DATE_DELAY_MS));
+  }
+
+  await setStorage({
+    [FLOW_MULTIREGION_STATE_KEY]: {
+      running: false, finished_at: Date.now(), started_at: startedAt,
+      total_dates: dates.length, mall_id: mallId,
+      total_enqueued: totalEnqueued, last_error: lastError,
+    },
+  });
+  return { ok: true, totalEnqueued, dates: dates.length, mallId, lastError };
+}
+
+async function collectFlowMultiregion() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", FLOW_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[FLOW_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < FLOW_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab_or_mallid" };
+  await setStorage({ [FLOW_STATE_KEY]: { ...state, last_run_at: now } });
+  return fetchProductFlowAllRegions(cur.mallId);
+}
+self.backfillFlowMultiregion = backfillFlowMultiregion;
+self.fetchProductFlowAllRegions = fetchProductFlowAllRegions;
 
 // 商品品质看板主动直采（自动切区域 + 自动绕 anti-content）：用当前登录店 mallId 按 QUALITY_SITES 各区域采。
 // 全球(method=sw):SW 直接 fetch;欧区(method=page):SW 造不出 anti-content,改在 -eu 页面 page world 发请求(页面自动带 anti-content)由 hook 抓。
@@ -2227,31 +2877,39 @@ async function collectCompliancePropertyFromMalls() {
     if (!mallId) continue;
     mallCount++;
     const siteTag = (origin.match(/\/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
-    const url = `${origin}/ms/bg-flux-ms/compliance_property/page_query`;
+    const pageUrl = `${origin}/ms/bg-flux-ms/compliance_property/page_query`;
+    const detailUrl = `${origin}/ms/bg-flux-ms/compliance_property/query_detail`;
+    const hdrs = { "Content-Type": "application/json", mallid: mallId };
     let total = null;
+    const allItems = [];
     for (let page = 1; page <= COMPLIANCE_PROP_MAX_PAGES; page++) {
-      const requestBody = JSON.stringify({ pageNo: page, pageSize: COMPLIANCE_PROP_PAGE_SIZE });
+      const requestBody = JSON.stringify({
+        page_num: page, page_size: COMPLIANCE_PROP_PAGE_SIZE, type: 2,
+        task_type_list: [1002, 4, 60, 25],
+        task_status_list: [2],
+        spu_id: "",
+      });
       callCount++;
       let listLen = 0;
       try {
-        const resp = await fetch(url, {
+        const resp = await fetch(pageUrl, {
           method: "POST", credentials: "include", cache: "no-store",
-          headers: { "Content-Type": "application/json", mallid: mallId },
-          body: requestBody,
+          headers: hdrs, body: requestBody,
         });
         const text = await resp.text();
         const body = safeParseJson(text);
         if (resp.ok && body && typeof body === "object" && body.success !== false) {
           const result = body.result || body.data || {};
-          const list = result.pageItems || result.dataList || result.list || result.items || [];
+          const list = result.pageItems || result.data || result.dataList || result.list || result.items || [];
           listLen = Array.isArray(list) ? list.length : 0;
           if (total == null) {
             const t = Number(result.total || result.totalCount || 0);
             if (Number.isFinite(t)) total = t;
           }
           if (listLen > 0) {
+            for (const it of list) allItems.push(it);
             await enqueue({
-              kind: "fetch-active-compliance-property", url, method: "POST", status: resp.status, ts: Date.now(),
+              kind: "fetch-active-compliance-property", url: pageUrl, method: "POST", status: resp.status, ts: Date.now(),
               site: siteTag, page: "background/compliance-property", mall_id: mallId,
               body, bodyText: text.length > 200000 ? null : text, requestBodyText: requestBody,
               bodySize: text.length, activeSource: "compliance_property_background",
@@ -2265,6 +2923,34 @@ async function collectCompliancePropertyFromMalls() {
       if (listLen < COMPLIANCE_PROP_PAGE_SIZE) break;
       if (total != null && page * COMPLIANCE_PROP_PAGE_SIZE >= total) break;
     }
+    const detailBatch = allItems.filter(it => it.spu_id).slice(0, 10);
+    for (const it of detailBatch) {
+      try {
+        const detReqBody = JSON.stringify({
+          spu_id: it.spu_id,
+          goods_id: it.goods_id || "",
+          wait_task_list: it.wait_task_dtolist || it.wait_task_list || [],
+        });
+        const detResp = await fetch(detailUrl, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: hdrs, body: detReqBody,
+        });
+        const detText = await detResp.text();
+        if (detResp.ok && detText.length > 10) {
+          const detBody = safeParseJson(detText);
+          await enqueue({
+            kind: "fetch-active-compliance-property", url: detailUrl, method: "POST", status: detResp.status, ts: Date.now(),
+            site: siteTag, page: "background/compliance-detail", mall_id: mallId,
+            body: detBody, bodyText: detText.length > 200000 ? null : detText, requestBodyText: detReqBody,
+            bodySize: detText.length, activeSource: "compliance_property_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+          callCount++;
+        }
+      } catch { errorCount++; }
+      await new Promise((resolve) => setTimeout(resolve, COMPLIANCE_PROP_PAGE_DELAY_MS));
+    }
   }
 
   await setStorage({
@@ -2277,6 +2963,8 @@ async function collectCompliancePropertyFromMalls() {
   if (enqueuedCount > 0) await flush();
   return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
 }
+
+self._collectCompliancePropertyFromMalls = collectCompliancePropertyFromMalls;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
@@ -2303,7 +2991,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY,
       COMPLIANCE_STATE_KEY, COMPLIANCE_PROP_STATE_KEY, PRICE_STATE_KEY,
       INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY,
-      SHOP_STATS_STATE_KEY, FLOW_STATE_KEY, QUALITY_STATE_KEY, PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY, SITE_EXC_STATE_KEY,
+      SHOP_STATS_STATE_KEY, FLOW_STATE_KEY, FLOW_BACKFILL_STATE_KEY, QUALITY_STATE_KEY, PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY, SITE_EXC_STATE_KEY,
     ];
     Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY, COLLECTOR_STATE_KEY, ...taskKeys])])
       .then(([depth, cfg]) => {
@@ -2319,6 +3007,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           fund_detail: cfg[FUND_DETAIL_STATE_KEY] || {},
           shop_stats: cfg[SHOP_STATS_STATE_KEY] || {},
           flow: cfg[FLOW_STATE_KEY] || {},
+          flow_backfill: cfg[FLOW_BACKFILL_STATE_KEY] || {},
           quality: cfg[QUALITY_STATE_KEY] || {},
           products: cfg[PRODUCTS_STATE_KEY] || {},
           aftersales: cfg[AFTERSALES_STATE_KEY] || {},
@@ -2364,6 +3053,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     setStorage({ [HPF_STATE_KEY]: { enabled: true, last_run_at: 0 } })
       .then(() => collectHighPriceFlowFromTargets())
       .then((r) => sendResponse({ ok: true, ...r }))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_FLOW_BACKFILL") {
+    backfillFlowHistory()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "RESET_FLOW_BACKFILL") {
+    setStorage({ [FLOW_BACKFILL_STATE_KEY]: {} })
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_FLOW_MULTIREGION") {
+    fetchProductFlowAllRegions(msg.mallId, { timeDimension: msg.timeDimension, statDate: msg.statDate })
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "TRIGGER_FLOW_BACKFILL_MULTIREGION") {
+    backfillFlowMultiregion()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "RESET_FLOW_MULTIREGION") {
+    setStorage({ [FLOW_MULTIREGION_STATE_KEY]: {} })
+      .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
     return true;
   }
@@ -3185,6 +3909,7 @@ async function collectShopStatsFromTargets() {
       } catch { errorCount++; break; }
       await new Promise((r) => setTimeout(r, SHOP_STATS_PAGE_DELAY_MS));
     }
+
   }
 
   await setStorage({
@@ -3199,5 +3924,67 @@ async function collectShopStatsFromTargets() {
   return { ok: true, malls: slice.length, enqueuedCount, errorCount };
 }
 
-// 调试入口：在 Service Worker 控制台可直接调用
-self._dbg = { collectSiteExceptionsViaPage, collectProductsAndAfterSalesViaPage, collectShopStatsFromTargets, flush };
+async function collectActivityGoodsViaTab() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_GOODS_TAB_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ACTIVITY_GOODS_TAB_STATE_KEY] || {};
+  if (state.last_success_at && now - Number(state.last_success_at) < ACTIVITY_GOODS_TAB_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  const tabs = await chrome.tabs.query({
+    url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+  });
+  if (!tabs.length) return { ok: false, reason: "no_agentseller_tab" };
+  const existingTab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  let mallId = "";
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: existingTab.id }, func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || "") });
+    mallId = String(r?.result || "").trim();
+  } catch {}
+  if (!mallId) return { ok: false, reason: "no_mallid" };
+  const origin = (() => { try { return new URL(existingTab.url).origin; } catch { return "https://agentseller.temu.com"; } })();
+  const baseUrl = `${origin}/sydney/api/goodsDataShow/activityGoodsList`;
+  let enqueuedCount = 0;
+  let lastError = null;
+  const pageSize = 20;
+  for (let pageNum = 1; pageNum <= 20; pageNum++) {
+    try {
+      const ac = await getAntiContent();
+      const requestBody = JSON.stringify({ pageNum, pageSize });
+      const resp = await fetch(baseUrl, {
+        method: "POST", credentials: "include",
+        headers: { "content-type": "application/json", "anti-content": ac, mallid: mallId },
+        body: requestBody,
+      });
+      const text = await resp.text();
+      if (!resp.ok) { lastError = `status_${resp.status}: ${text.slice(0, 100)}`; break; }
+      const body = safeParseJson(text);
+      if (!body || typeof body !== "object") { lastError = "invalid_json"; break; }
+      await enqueue({
+        kind: "fetch-discovery", url: baseUrl, method: "POST", status: resp.status, ts: Date.now(),
+        site: "agentseller", page: "background/activity-goods", mall_id: mallId,
+        body, bodyText: text.length > 200000 ? null : text,
+        requestBodyText: requestBody, bodySize: text.length,
+        activeSource: "activity_goods_sdk",
+      });
+      await bumpStats({ captured_count_delta: 1 });
+      enqueuedCount++;
+      const result = body.result || {};
+      const list = result.list || result.pageItems || result.dataList || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      const total = Number(result.total || 0);
+      if (total && pageNum * pageSize >= total) break;
+    } catch (e) { lastError = String(e?.message || e).slice(0, 200); break; }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  console.log("[sw] activity-goods-sdk:", JSON.stringify({ mallId, enqueuedCount, lastError }));
+  const success = enqueuedCount > 0;
+  await setStorage({
+    [ACTIVITY_GOODS_TAB_STATE_KEY]: { ...state, last_run_at: now, last_success_at: success ? Date.now() : (state.last_success_at || 0), enqueuedCount, lastError },
+  });
+  if (success) await flush();
+  return { ok: true, success, enqueuedCount, lastError };
+}
+
+self._dbg = { collectSiteExceptionsViaPage, collectProductsAndAfterSalesViaPage, collectShopStatsFromTargets, flush, bootEnrollSkcProbe, collectEnrollRecords, collectActivityGoodsViaTab, collectPriceAdjustActivities };

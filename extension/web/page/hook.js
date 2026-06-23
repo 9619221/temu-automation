@@ -394,6 +394,48 @@
   }
   window.__temuMonitorInstalled = true;
 
+  // ---------- 注入标记元素管理 ----------
+  // bridge.js 通过轮询此元素的 data-status 判断注入是否成功，
+  // 并通过 data-heartbeat 时间戳监控 hook 存活状态。
+  (function setupInjectFlag() {
+    const FLAG_ID = "__temu_monitor_inject_flag__";
+    try {
+      let el = document.getElementById(FLAG_ID);
+      if (!el) {
+        el = document.createElement("div");
+        el.id = FLAG_ID;
+        el.style.cssText = "display:none!important;position:absolute!important;visibility:hidden!important;";
+        (document.head || document.documentElement || document.body).appendChild(el);
+      }
+      // 注入 ID，用于区分多次注入实例
+      const injectId = "i" + Date.now() + Math.random().toString(36).slice(2, 7);
+      el.dataset.status = "ok";
+      el.dataset.injectId = injectId;
+      // XHR hook 状态：window.XMLHttpRequest 是否已被替换（稍后在 TrackedXHR 挂完后更新）
+      el.dataset.hookXhr = "pending";
+      el.dataset.hookFetch = "pending";
+      el.dataset.heartbeat = String(Date.now());
+
+      // 每 4000ms 更新心跳时间戳及 hook 状态
+      setInterval(() => {
+        try {
+          const flag = document.getElementById(FLAG_ID);
+          if (!flag) return;
+          flag.dataset.heartbeat = String(Date.now());
+          flag.dataset.hookXhr = (typeof window.__temuMonitorXhrHooked !== "undefined")
+            ? (window.__temuMonitorXhrHooked ? "ok" : "missing")
+            : "unknown";
+          flag.dataset.hookFetch = (typeof window.__temuMonitorFetchHooked !== "undefined")
+            ? (window.__temuMonitorFetchHooked ? "ok" : "missing")
+            : "unknown";
+        } catch {}
+      }, 4000);
+
+      // 暴露给外部（probe 脚本可读）
+      window.__temuMonitorInjectId = injectId;
+    } catch {}
+  })();
+
   const {
     URL_WHITELIST = [],
     URL_BLACKLIST = [],
@@ -950,7 +992,15 @@
   for (const k of ["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"]) {
     try { TrackedXHR[k] = OrigXHR[k]; } catch {}
   }
-  try { window.XMLHttpRequest = TrackedXHR; } catch {}
+  try {
+    window.XMLHttpRequest = TrackedXHR;
+    window.__temuMonitorXhrHooked = true;
+    // 更新标记元素的 XHR hook 状态
+    try {
+      const _f = document.getElementById("__temu_monitor_inject_flag__");
+      if (_f) _f.dataset.hookXhr = "ok";
+    } catch {}
+  } catch {}
 
   let reinstallCount = 0;
   function tryReinstall() {
@@ -1019,7 +1069,15 @@
       return resp;
     });
   }
-  try { window.fetch = TrackedFetch; } catch {}
+  try {
+    window.fetch = TrackedFetch;
+    window.__temuMonitorFetchHooked = true;
+    // 更新标记元素的 fetch hook 状态
+    try {
+      const _f = document.getElementById("__temu_monitor_inject_flag__");
+      if (_f) _f.dataset.hookFetch = "ok";
+    } catch {}
+  } catch {}
 
   // -------------------- Response.prototype 兜底 --------------------
   // Qiankun 微前端沙箱在 hook 之前缓存原始 fetch 引用，导致 TrackedFetch 被绕过。
@@ -1305,10 +1363,99 @@
     } catch (e) { ack({ ok: false, error: String((e && e.message) || e).slice(0, 200) }); }
   });
 
+  // 追加活动库存:先调 enroll/list 拿 version,再调 addStock
+  window.addEventListener("temu-monitor.addstock-request", async (ev) => {
+    const d = ev && ev.detail;
+    if (!d || !d.reqId) return;
+    const ack = (payload) => { try { window.dispatchEvent(new CustomEvent("temu-monitor.addstock-result", { detail: { reqId: d.reqId, ...payload } })); } catch {} };
+    try {
+      if (!_lastAntiContent) { ack({ ok: false, error: "no_anti_content(页面需先发过请求)" }); return; }
+      const mallid = getCookieValue(["mallid", "mallId", "mall_id"]) || "";
+      const enrollId = String(d.enroll_id || "");
+      const addStockQty = Number(d.add_stock || 0);
+      if (!enrollId || addStockQty <= 0) { ack({ ok: false, error: "enroll_id/add_stock 无效" }); return; }
+      // step 1: 调 enroll/list 拿当前 version
+      const listResp = await window.fetch("/api/kiana/gamblers/marketing/enroll/list", {
+        method: "POST", credentials: "include",
+        headers: { "content-type": "application/json", "mallid": mallid, "anti-content": _lastAntiContent },
+        body: JSON.stringify({ pageNo: 1, pageSize: 100, enrollIdList: [Number(enrollId)] }),
+      });
+      const listBody = await listResp.json().catch(() => null);
+      const enrollList = listBody?.result?.enrollList || listBody?.result?.list || [];
+      const found = enrollList.find((e) => String(e.enrollId) === enrollId);
+      if (!found || found.version == null) { ack({ ok: false, error: "enroll/list 未找到 enrollId=" + enrollId + " 或缺少 version", listResult: listBody?.result }); return; }
+      // step 2: 调 addStock
+      const stockResp = await window.fetch("/api/kiana/gamblers/marketing/enroll/addStock", {
+        method: "POST", credentials: "include",
+        headers: { "content-type": "application/json", "mallid": mallid, "anti-content": _lastAntiContent },
+        body: JSON.stringify({ enrollId: Number(enrollId), addStock: addStockQty, version: found.version }),
+      });
+      const stockBody = await stockResp.json().catch(() => null);
+      ack({ ok: stockResp.ok && stockBody?.success !== false, status: stockResp.status, result: stockBody?.result || stockBody, version: found.version });
+    } catch (e) { ack({ ok: false, error: String((e && e.message) || e).slice(0, 200) }); }
+  });
+
+  // 主动抓取合规属性:page_query→query_template→query_detail,TrackedFetch 自动捕获 → Cloud
+  (async function autoFetchComplianceProperty() {
+    if (!isTemuSellerHost()) { console.log("[合规抓取] 非卖家页面,跳过"); return; }
+    if (window.__temuComplianceFetched) { console.log("[合规抓取] 已执行过,跳过"); return; }
+    window.__temuComplianceFetched = true;
+    console.log("[合规抓取] 开始,等待 anti-content...");
+    var t0 = Date.now();
+    while (!_lastAntiContent && Date.now() - t0 < 30000) {
+      await new Promise(function(r) { setTimeout(r, 500); });
+    }
+    if (!_lastAntiContent) { console.log("[合规抓取] anti-content 超时,放弃"); return; }
+    var mid = getCookieValue(["mallid", "mallId", "mall_id"]) || "";
+    if (!mid) { console.log("[合规抓取] 无 mallId,放弃"); return; }
+    console.log("[合规抓取] mallId=" + mid + " anti-content就绪,开始请求");
+    var hdrs = { "content-type": "application/json", "mallid": mid, "anti-content": _lastAntiContent };
+    try {
+      var pageResp = await window.fetch("/ms/bg-flux-ms/compliance_property/page_query", {
+        method: "POST", credentials: "include", headers: hdrs,
+        body: JSON.stringify({
+          page_num: 1, page_size: 50, type: 2,
+          task_type_list: [1002, 4, 60, 25],
+          task_status_list: [2],
+          spu_id: ""
+        }),
+      });
+      console.log("[合规抓取] page_query 状态:" + pageResp.status);
+      var items = [];
+      try {
+        var pageBody = await pageResp.json();
+        var result = pageBody && pageBody.result || {};
+        items = result.data || result.pageItems || result.dataList || [];
+        console.log("[合规抓取] page_query 项数:" + (Array.isArray(items) ? items.length : 0) + " total:" + (result.total || 0));
+      } catch (e) { console.log("[合规抓取] page_query 解析失败:" + e.message); }
+      var batch = Array.isArray(items) ? items.slice(0, 10) : [];
+      console.log("[合规抓取] 将请求 query_detail 共" + batch.length + "个商品");
+      for (var i = 0; i < batch.length; i++) {
+        var item = batch[i];
+        if (!item.spu_id) continue;
+        try {
+          var detResp = await window.fetch("/ms/bg-flux-ms/compliance_property/query_detail", {
+            method: "POST", credentials: "include", headers: hdrs,
+            body: JSON.stringify({
+              spu_id: item.spu_id,
+              goods_id: item.goods_id || "",
+              wait_task_list: item.wait_task_dtolist || item.wait_task_list || []
+            }),
+          });
+          var detText = await detResp.clone().text();
+          console.log("[合规抓取] query_detail spu=" + item.spu_id + " 状态:" + detResp.status + " 长度:" + detText.length);
+        } catch (e) { console.log("[合规抓取] query_detail spu=" + item.spu_id + " 失败:" + e.message); }
+        await new Promise(function(r) { setTimeout(r, 500); });
+      }
+      console.log("[合规抓取] 完成");
+    } catch (e) { console.log("[合规抓取] 总体失败:" + e.message); }
+  })();
+
   window.__temuMonitor = {
     version: "0.3.3",
     site: inferMallSite(),
     healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
+    get lastAntiContent() { return _lastAntiContent; },
     stats,
     note: "XHR + fetch wrapped; v0.3.3 增白名单内请求体+anti-content/content-type 头采集(不采凭据); fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
   };

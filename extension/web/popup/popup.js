@@ -83,6 +83,15 @@ document.getElementById("collectBtn").addEventListener("click", () => {
   const b = document.getElementById("collectBtn"); b.disabled = true; b.textContent = "…";
   chrome.runtime.sendMessage({ type: "TRIGGER_COMPLIANCE_PROP" }, () => { b.disabled = false; b.textContent = "采集"; setTimeout(refresh, 1000); });
 });
+document.getElementById("flowBackfillBtn").addEventListener("click", () => {
+  const b = document.getElementById("flowBackfillBtn"); b.disabled = true; b.textContent = "…";
+  chrome.runtime.sendMessage({ type: "TRIGGER_FLOW_BACKFILL_MULTIREGION" }, (r) => {
+    b.disabled = false;
+    b.textContent = r?.ok ? `✓ ${r.totalEnqueued || 0}条` : "三区回填";
+    setTimeout(() => { b.textContent = "三区回填"; }, 3000);
+    setTimeout(refresh, 1000);
+  });
+});
 document.getElementById("optBtn").addEventListener("click", () => chrome.runtime.openOptionsPage());
 document.getElementById("reload").addEventListener("click", (e) => { e.preventDefault(); refresh(); });
 
