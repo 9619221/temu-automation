@@ -43,12 +43,18 @@
     return el && el.dataset.status === "ok";
   }
 
+  // 扩展上下文失效检查（刷新/卸载扩展后旧 content script 仍在跑）
+  function isExtensionAlive() {
+    try { return !!chrome.runtime?.id; } catch { return false; }
+  }
+
   // 注入冷却与并发控制
   let _injectPending = false;
   let _lastInjectAt = 0;
   const INJECT_COOLDOWN_MS = 1500;
 
   async function injectHook() {
+    if (!isExtensionAlive()) return;
     if (_injectPending) return;
     const now = Date.now();
     if (now - _lastInjectAt < INJECT_COOLDOWN_MS) return;
@@ -116,7 +122,8 @@
   // 心跳监控：每 5000ms 检查一次，超 15s 无心跳则重注入
   const HEARTBEAT_INTERVAL_MS = 5000;
   const HEARTBEAT_DEAD_MS = 15000;
-  setInterval(() => {
+  const _heartbeatTimer = setInterval(() => {
+    if (!isExtensionAlive()) { clearInterval(_heartbeatTimer); return; }
     const el = getFlagEl();
     if (!el || el.dataset.status !== "ok") {
       scheduleReInject();

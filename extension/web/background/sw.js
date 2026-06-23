@@ -304,6 +304,23 @@ const SITE_REGIONS = [
   { type: 3, name: "美区", origin: "https://agentseller-us.temu.com", siteTag: "agentseller-us" },
 ];
 
+async function ensureKuajingTab() {
+  const existing = await chrome.tabs.query({ url: "https://seller.kuajingmaihuo.com/*" });
+  if (existing.length) return existing[0].id;
+  const tab = await chrome.tabs.create({ url: "https://seller.kuajingmaihuo.com/", active: false });
+  await new Promise((resolve) => {
+    const onUpdate = (tabId, info) => {
+      if (tabId === tab.id && info.status === "complete") {
+        chrome.tabs.onUpdated.removeListener(onUpdate);
+        resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(onUpdate);
+    setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdate); resolve(); }, 15000);
+  });
+  return tab.id;
+}
+
 async function loginMO(mallId, siteType) {
   const redirectUrls = {
     1: "https://agentseller.temu.com/main/authentication",
@@ -322,15 +339,30 @@ async function loginMO(mallId, siteType) {
     "content-type": "application/json",
     "mallid": mallId,
   };
-  const codeResp = await fetchWithRetry(
-    "https://seller.kuajingmaihuo.com/bg/quiet/api/auth/obtainCode",
-    { method: "POST", headers, body: JSON.stringify({ redirectUrl: redirectUrls[siteType] }), redirect: "follow", credentials: "include" }
-  );
-  const authCode = codeResp?.result?.code;
-  if (!authCode) throw new Error(`loginMO: no auth code for siteType=${siteType}`);
-  await fetchWithRetry(loginUrls[siteType], {
-    method: "POST", headers, body: JSON.stringify({ code: authCode, confirm: true, targetMallId: mallId }), redirect: "follow", credentials: "include",
+  // obtainCode 必须在 kuajingmaihuo.com 页面上下文执行（SW fetch 因 cookie 分区拿不到 session）
+  const tabId = await ensureKuajingTab();
+  const injected = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (redirectUrl, mId) => {
+      try {
+        const r = await fetch("/bg/quiet/api/auth/obtainCode", {
+          method: "POST",
+          headers: { "content-type": "application/json", "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9", "cache-control": "no-cache", "mallid": mId },
+          body: JSON.stringify({ redirectUrl }),
+        });
+        return await r.json();
+      } catch (e) { return { error: e.message }; }
+    },
+    args: [redirectUrls[siteType], mallId],
   });
+  const codeResp = injected?.[0]?.result;
+  console.log("[sw] loginMO obtainCode resp (siteType=" + siteType + "):", JSON.stringify(codeResp));
+  const authCode = codeResp?.result?.code;
+  if (!authCode) throw new Error(`loginMO: no auth code for siteType=${siteType}, resp=${JSON.stringify(codeResp)}`);
+  const loginResp = await fetchWithRetry(loginUrls[siteType], {
+    method: "POST", headers, body: JSON.stringify({ code: authCode, confirm: true, targetMallId: mallId }), redirect: "follow",
+  });
+  console.log("[sw] loginMO loginByCode resp (siteType=" + siteType + "):", JSON.stringify(loginResp));
 }
 
 ensureRuntimeDefaults().catch((e) => console.warn("[sw] bootstrap skipped:", e?.message || e));
@@ -558,6 +590,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   collectPriceAdjustActivities().catch((e) => console.warn("[sw] price-adjust-activities collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowMultiregion().catch((e) => console.warn("[sw] flow multiregion collect err", e?.message || e));
+  autoBackfillFlowIfNeeded().catch((e) => console.warn("[sw] flow auto-backfill err", e?.message || e));
   collectQualityAllSites().catch((e) => console.warn("[sw] quality collect err", e?.message || e));
   collectProductsAndAfterSalesViaPage().catch((e) => console.warn("[sw] products/aftersales page-world collect err", e?.message || e));
   collectSiteExceptionsViaPage().catch((e) => console.warn("[sw] site-exceptions collect err", e?.message || e));
@@ -1673,7 +1706,7 @@ async function fetchProductFlowAllRegions(mallId, options = {}) {
   const loginResults = await Promise.allSettled(
     regions.map(r => loginMO(mallId, r.type))
   );
-  console.log("[sw] loginMO results:", loginResults.map((r, i) => `${regions[i].name}: ${r.status}`).join(", "));
+  console.log("[sw] loginMO results:", loginResults.map((r, i) => `${regions[i].name}: ${r.status}${r.reason ? " (" + r.reason.message + ")" : ""}`).join(", "));
 
   const fetchResults = await Promise.allSettled(
     regions.map(r => fetchFlowForRegion(mallId, r, timeDimension, statDate))
@@ -1759,6 +1792,18 @@ async function collectFlowMultiregion() {
 }
 self.backfillFlowMultiregion = backfillFlowMultiregion;
 self.fetchProductFlowAllRegions = fetchProductFlowAllRegions;
+
+const FLOW_AUTO_BACKFILL_KEY = "flow_auto_backfill_last";
+const FLOW_AUTO_BACKFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+async function autoBackfillFlowIfNeeded() {
+  const { [FLOW_AUTO_BACKFILL_KEY]: last } = await getStorage([FLOW_AUTO_BACKFILL_KEY]);
+  if (last && Date.now() - last < FLOW_AUTO_BACKFILL_INTERVAL_MS) return;
+  console.log("[sw] auto-backfill: starting (last:", last ? new Date(last).toISOString() : "never", ")");
+  await setStorage({ [FLOW_AUTO_BACKFILL_KEY]: Date.now() });
+  const result = await backfillFlowMultiregion();
+  console.log("[sw] auto-backfill: done", JSON.stringify(result));
+  return result;
+}
 
 // 商品品质看板主动直采（自动切区域 + 自动绕 anti-content）：用当前登录店 mallId 按 QUALITY_SITES 各区域采。
 // 全球(method=sw):SW 直接 fetch;欧区(method=page):SW 造不出 anti-content,改在 -eu 页面 page world 发请求(页面自动带 anti-content)由 hook 抓。
