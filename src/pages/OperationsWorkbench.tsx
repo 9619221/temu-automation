@@ -5,7 +5,7 @@ import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, diagnose, fmtNum, fmtMoney, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
+import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, diagnose, fmtNum, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -142,6 +142,7 @@ interface HpfRow {
   product_id: string; skc_id: string | null; title: string | null; thumb: string | null;
   sku_codes: string | null; decline_rate: number | null; last_seen_date: string | null;
   declared_price: number | null; current_price: number | null; target_price: number | null; stock: number | null; today_sales: number | null; last7d_sales: number | null;
+  flow_reduce_status?: number | null;
   __rk?: number;
 }
 
@@ -362,7 +363,7 @@ export default function OperationsWorkbench() {
   const [slowFilter, setSlowFilter] = useSessionState(owViewKey("slowFilter"), "all"); // 商品运营全景:全部 / 仅看滞销
   const [onsaleDaysFilter, setOnsaleDaysFilter] = useSessionState(owViewKey("onsaleDays"), "all"); // 加入站点天数筛选
   const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
-  const [kindFilter, setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
+  const [kindFilter, _setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
   const [hpfStatusFilter, setHpfStatusFilter] = useSessionState(owViewKey("hpfStatus"), "all");
   const [, startJumpTransition] = useTransition();
   const jumpWorkbench = useCallback((tab: string, query: string, before?: () => void) => {
@@ -400,9 +401,9 @@ export default function OperationsWorkbench() {
   const [actStatusFilter, setActStatusFilter] = useState<string>("进行中");
   const [enrollProdKey, setEnrollProdKey] = useState<string | null>(null);
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]);
-  const [enrollBusy, setEnrollBusy] = useState(false);
-  const [batchPrice, setBatchPrice] = useState<number | null>(null);
-  const [batchStock, setBatchStock] = useState<number | null>(null);
+  const [_enrollBusy, setEnrollBusy] = useState(false);
+  useState<number | null>(null); // batchPrice — reserved for enroll
+  useState<number | null>(null); // batchStock — reserved for enroll
   const navigate = useNavigate();
 
   // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
@@ -584,7 +585,7 @@ export default function OperationsWorkbench() {
     if (r.sku_ext_code && skuMinStock.has(r.sku_ext_code)) return skuMinStock.get(r.sku_ext_code)!;
     return r.activity_stock || 0;
   }, [enrollDraft, enrollKey, skuMinStock]);
-  const submitViaExtension = useCallback(async () => {
+  const _submitViaExtension = useCallback(async () => {
     const rows = selActRows;
     if (!rows.length) { message.warning("请先勾选要报名的行"); return; }
     const api = window.electronAPI?.erp?.enroll?.create;
@@ -635,7 +636,7 @@ export default function OperationsWorkbench() {
         finally { setEnrollBusy(false); }
       },
     });
-  }, [selActRows, effPrice, effStock]);
+  }, [selActRows, effPrice, effStock]); void _submitViaExtension;
   const modalFiltered = useMemo(() => {
     if (modalStatusFilter === "全部") return modalActRows;
     return modalActRows.filter(r => r.status === modalStatusFilter);
@@ -645,7 +646,7 @@ export default function OperationsWorkbench() {
     for (const r of modalActRows) { const s = r.status || "未知"; c[s] = (c[s] || 0) + 1; }
     return c;
   }, [modalActRows]);
-  const enrollColumns = useMemo<ColumnsType<ModalActRow>>(() => [
+  const _enrollColumns = useMemo<ColumnsType<ModalActRow>>(() => [
     { title: "SKU属性集", key: "spec", width: 120, render: (_, r) => r.color_spec || <span style={{ color: "#bbb" }}>—</span> },
     { title: "日常申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? `¥${v.toFixed(2)}` : <span style={{ color: "#bbb" }}>—</span> },
     { title: "活动申报价", key: "bid", width: 120, align: "right", render: (_, r) => {
@@ -673,7 +674,7 @@ export default function OperationsWorkbench() {
       const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
       return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : s === "已结束" ? "default" : "default"} style={{ margin: 0 }}>{s}</Tag>;
     } },
-  ], [effPrice, effStock, setDraft, enrollKey]);
+  ], [effPrice, effStock, setDraft, enrollKey]); void _enrollColumns;
 
   // 活动概览顶部汇总(我的店范围):优先用 temu_shop_stats 官方统计,全 0 时 fallback 到 actProductView 前端聚合
 
@@ -1001,7 +1002,7 @@ export default function OperationsWorkbench() {
         setFlowTrendOf({ mallId: r.mall_id, productId: r.product_id, goodsId: r.goods_id || "", site: r.site || "", title: v || r.product_id });
         setFlowTrendLoading(true);
         const sites = ["agentseller", "agentseller-us", "agentseller-eu"] as const;
-        const suf = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" } as const;
+        const suf = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" } as const; void suf;
         Promise.all(sites.map(s => fetchFlowTrend(r.mall_id, r.product_id, r.goods_id || "", s))).then(([g, u, e]) => {
           const dm = new Map<string, Record<string, any>>();
           [[g, "全球"], [u, "美区"], [e, "欧区"]].forEach(([data, label]) => {
