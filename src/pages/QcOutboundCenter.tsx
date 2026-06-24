@@ -898,6 +898,23 @@ export default function QcOutboundCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unifiedRows]);
 
+  const parsedAddrCache = useMemo(() => {
+    const m = new Map<string, { recv: any; send: any }>();
+    for (const row of unifiedRows) {
+      const key = row.soId || "";
+      if (!key) continue;
+      let recv: any = null;
+      let send: any = null;
+      try { const j = row.rawCloud?.receive_address_json; if (j) recv = JSON.parse(j); } catch {}
+      try {
+        const j = row.rawCloud?.send_address_json;
+        if (j) { const arr = JSON.parse(j); const list = Array.isArray(arr) ? arr : []; send = list.find((a: any) => a?.isDefault) || list[0] || null; }
+      } catch {}
+      m.set(key, { recv, send });
+    }
+    return m;
+  }, [unifiedRows]);
+
   // 保存某条明细的本地实发数量：写后端 + 乐观更新明细缓存与主表「送货数」之和。
   const handleSetItemShipQty = useCallback(async (row: ConsignDeliverUnifiedRow, item: any, nextQty: number) => {
     const oId = row.rawJst?.o_id != null ? String(row.rawJst.o_id) : "";
@@ -1845,19 +1862,15 @@ export default function QcOutboundCenter() {
       key: "receiveAddr",
       width: 240,
       render: (_value, row) => {
-        // 大仓收货地址：用服务器已缓存的 receive_address_json（免实时调 Temu）。
-        const j = row.rawCloud?.receive_address_json;
-        if (!j) return <Text type="secondary">-</Text>;
-        try {
-          const a = JSON.parse(j);
-          const line = [a.provinceName, a.cityName, a.districtName].filter(Boolean).join("");
-          return (
-            <Space direction="vertical" size={0}>
-              {(a.receiverName || a.phone) ? <Text style={{ fontSize: 12 }}>{a.receiverName || ""} {a.phone || ""}</Text> : null}
-              <Text type="secondary" style={{ fontSize: 12 }}>{line}{a.detailAddress || ""}</Text>
-            </Space>
-          );
-        } catch { return <Text type="secondary">-</Text>; }
+        const a = parsedAddrCache.get(row.soId || "")?.recv;
+        if (!a) return <Text type="secondary">-</Text>;
+        const line = [a.provinceName, a.cityName, a.districtName].filter(Boolean).join("");
+        return (
+          <Space direction="vertical" size={0}>
+            {(a.receiverName || a.phone) ? <Text style={{ fontSize: 12 }}>{a.receiverName || ""} {a.phone || ""}</Text> : null}
+            <Text type="secondary" style={{ fontSize: 12 }}>{line}{a.detailAddress || ""}</Text>
+          </Space>
+        );
       },
     },
     {
@@ -1865,17 +1878,10 @@ export default function QcOutboundCenter() {
       key: "sendAddr",
       width: 220,
       render: (_value, row) => {
-        // 本店发货地址：用服务器缓存的 send_address_json（refresh-openapi-mall-addresses 定时刷新），取默认地址。
-        const j = row.rawCloud?.send_address_json;
-        if (!j) return <Text type="secondary">-</Text>;
-        try {
-          const arr = JSON.parse(j);
-          const list = Array.isArray(arr) ? arr : [];
-          const def = list.find((a: any) => a?.isDefault) || list[0];
-          if (!def) return <Text type="secondary">-</Text>;
-          const line = [def.provinceName, def.cityName, def.districtName].filter(Boolean).join("");
-          return <Text type="secondary" style={{ fontSize: 12 }}>{line}{def.addressDetail || def.detailAddress || ""}</Text>;
-        } catch { return <Text type="secondary">-</Text>; }
+        const def = parsedAddrCache.get(row.soId || "")?.send;
+        if (!def) return <Text type="secondary">-</Text>;
+        const line = [def.provinceName, def.cityName, def.districtName].filter(Boolean).join("");
+        return <Text type="secondary" style={{ fontSize: 12 }}>{line}{def.addressDetail || def.detailAddress || ""}</Text>;
       },
     },
     {
@@ -1927,7 +1933,7 @@ export default function QcOutboundCenter() {
         onHeaderCell: buildColumnMenuHeaderProps,
       };
     });
-  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage]);
+  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage, parsedAddrCache]);
 
   if (!erp) {
     return (
@@ -2003,13 +2009,12 @@ export default function QcOutboundCenter() {
                     placeholder="搜索备货单号 / 发货单号 / 商品 / 店铺 / 物流单号 / 供应商"
                     enterButton="搜索"
                     value={stockQuery}
-                    onChange={(event) => {
-                      setStockQuery(event.target.value);
-                      setUnifiedPage(1);
-                    }}
+                    onChange={(event) => setStockQuery(event.target.value)}
                     onSearch={(value) => {
-                      setStockQuery(value.trim());
+                      const trimmed = value.trim();
+                      setStockQuery(trimmed);
                       setUnifiedPage(1);
+                      void loadUnified({ page: 1, pageSize: unifiedPageSize, search: trimmed, status: stockStatus, onlineStatus, shop: stockShop, skuCode: stockSkuCode, dateFrom: consignDateBound(stockDateRange?.[0], false), dateTo: consignDateBound(stockDateRange?.[1], true), source: unifiedSource });
                     }}
                     style={{ maxWidth: 520 }}
                   />
@@ -2115,7 +2120,7 @@ export default function QcOutboundCenter() {
                 </div>
                 <Table
                   className="erp-compact-table consign-unified-table"
-                  rowKey={(row) => row.soId || JSON.stringify(row)}
+                  rowKey={(row) => row.soId || `${row.rawCloud?.mall_id || ""}-${row.rawCloud?.sku_ext_code || ""}-${row.rawCloud?.skc_id || ""}`}
                   rowSelection={{
                     selectedRowKeys: selectedShipKeys,
                     onChange: (keys) => setSelectedShipKeys(keys as string[]),
@@ -2127,7 +2132,6 @@ export default function QcOutboundCenter() {
                   columns={cloudStockColumns}
                   dataSource={unifiedRows}
                   scroll={{ x: 2560, y: "max(300px, calc(100vh - 400px))" }}
-                  // 悬停即后台预取明细，点开时多半已缓存，避免每次展开都等一次跨区请求。
                   onRow={(row) => ({ onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); } })}
                   expandable={{
                     expandedRowRender: (row) => renderUnifiedRowItems(row),
