@@ -11338,7 +11338,7 @@ async function handleRequest(body) {
     case "yunqi_db_selection_list":
       return await yunqiHandlers.yunqiDbSelectionList(params || {});
     case "yunqi_db_selection_ids":
-      return await yunqiHandlers.yunqiDbSelectionIds();
+      return await yunqiHandlers.yunqiDbSelectionIds(params || {});
     case "yunqi_db_categories":
       return await yunqiHandlers.yunqiDbCategories();
     case "yunqi_db_export_auto_price":

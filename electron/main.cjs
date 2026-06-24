@@ -5652,13 +5652,13 @@ ipcMain.handle("yunqi-db:sync-online", async (_e, params) => __yunqiIsClient() ?
 ipcMain.handle("yunqi-db:selection-add", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-add", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_add", params || {}));
 ipcMain.handle("yunqi-db:selection-remove", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-remove", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_remove", params || {}));
 ipcMain.handle("yunqi-db:selection-update", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-update", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_update", params || {}));
-ipcMain.handle("yunqi-db:selection-list", async (_e, params) => __yunqiIsClient() ? __yunqiRemote(`/api/erp/reports/yunqi-selection-list?status=${encodeURIComponent((params && params.status) || "")}`, { method: "GET" }) : sendCmd("yunqi_db_selection_list", params || {}));
-ipcMain.handle("yunqi-db:selection-ids", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-ids", { method: "GET" }) : sendCmd("yunqi_db_selection_ids", {}));
+ipcMain.handle("yunqi-db:selection-list", async (_e, params) => __yunqiIsClient() ? __yunqiRemote(`/api/erp/reports/yunqi-selection-list?status=${encodeURIComponent((params && params.status) || "")}&accountId=${encodeURIComponent((params && params.accountId) || "")}`, { method: "GET" }) : sendCmd("yunqi_db_selection_list", params || {}));
+ipcMain.handle("yunqi-db:selection-ids", async (_e, params) => __yunqiIsClient() ? __yunqiRemote(`/api/erp/reports/yunqi-selection-ids?accountId=${encodeURIComponent((params && params.accountId) || "")}`, { method: "GET" }) : sendCmd("yunqi_db_selection_ids", params || {}));
 ipcMain.handle("yunqi-db:categories", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-categories", { method: "GET" }) : sendCmd("yunqi_db_categories", {}));
 ipcMain.handle("yunqi-db:export-auto-price", async (_e, params) => {
   const goodsIds = params?.goodsIds || [];
   if (!goodsIds.length) return { ok: false, reason: "无选中商品" };
-  const exportResult = await sendCmd("yunqi_db_export_auto_price", { goodsIds });
+  const exportResult = await sendCmd("yunqi_db_export_auto_price", { goodsIds, accountId: params?.accountId });
   if (!exportResult?.ok) return exportResult;
   try {
     const fs = require("fs");
@@ -5685,7 +5685,8 @@ ipcMain.handle("yunqi-db:export-for-listing", async (_e, params) => {
   let csvRows, resultGoodsIds;
 
   if (__yunqiIsClient()) {
-    const listResult = await __yunqiRemote("/api/erp/reports/yunqi-selection-list?status=", { method: "GET" });
+    const aid = encodeURIComponent(params?.accountId || "");
+    const listResult = await __yunqiRemote(`/api/erp/reports/yunqi-selection-list?status=&accountId=${aid}`, { method: "GET" });
     const allRows = listResult?.rows || [];
     const idSet = new Set(goodsIds.map(String));
     const matched = allRows.filter(r => idSet.has(String(r.goods_id)));
@@ -5704,7 +5705,7 @@ ipcMain.handle("yunqi-db:export-for-listing", async (_e, params) => {
     resultGoodsIds = matched.map(r => r.goods_id);
     try {
       for (const r of matched) {
-        await __yunqiRemote("/api/erp/reports/yunqi-selection-update", { method: "POST", body: { goodsId: r.goods_id, status: "listing" } });
+        await __yunqiRemote("/api/erp/reports/yunqi-selection-update", { method: "POST", body: { goodsId: r.goods_id, status: "listing", accountId: params?.accountId || "" } });
       }
     } catch (_) {}
   } else {

@@ -10,8 +10,7 @@
     "scripting",
     "tabs",
     "windows",
-    "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "offscreen"
   ],
   "host_permissions": [
     "https://erp.temu.chat/*",
@@ -62,15 +61,6 @@
       "48": "img/48.png",
       "128": "img/128.png"
     }
-  },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "ruleset_csp",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
   },
   "options_page": "options/options.html",
   "web_accessible_resources": [

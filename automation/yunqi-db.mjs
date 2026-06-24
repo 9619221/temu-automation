@@ -158,10 +158,10 @@ function initSchema(db) {
       updated_at INTEGER
     );
 
-    -- 选品池：用户从选品广场标记「想上的」商品。
-    -- 独立保留商品快照（不随 products 表重抓/清空而丢失），并承接后续「找货源 → 上架」状态流转。
+    -- 选品池：用户从选品广场标记「想上的」商品，按账号隔离。
     CREATE TABLE IF NOT EXISTS selection_pool (
-      goods_id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL DEFAULT '',
+      goods_id TEXT NOT NULL,
       sku_id TEXT,
       title_zh TEXT,
       title_en TEXT,
@@ -176,14 +176,16 @@ function initSchema(db) {
       category_zh TEXT,
       mall_name TEXT,
       mall_mode TEXT,
-      status TEXT DEFAULT 'want',          -- want想上 / sourcing找货源中 / sourced已找到货源 / listing上架中 / listed已上架 / dropped弃用
+      status TEXT DEFAULT 'want',
       note TEXT,
-      source_keyword TEXT,                 -- 从哪个抓取关键词进入选品池
+      source_keyword TEXT,
       added_at TEXT DEFAULT (datetime('now','localtime')),
-      updated_at TEXT DEFAULT (datetime('now','localtime'))
+      updated_at TEXT DEFAULT (datetime('now','localtime')),
+      PRIMARY KEY (account_id, goods_id)
     );
     CREATE INDEX IF NOT EXISTS idx_selection_status ON selection_pool(status);
     CREATE INDEX IF NOT EXISTS idx_selection_added ON selection_pool(added_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_selection_account ON selection_pool(account_id);
 
     -- 云启类目树（gettemucategorieslist 抓来），选品广场分类下拉的数据源
     CREATE TABLE IF NOT EXISTS categories (
@@ -199,6 +201,37 @@ function initSchema(db) {
   `);
   // 商品类目 ID（catId 数组，JSON 字符串）。已有库幂等加列。
   try { db.exec("ALTER TABLE products ADD COLUMN opt_ids TEXT"); } catch (e) { /* 列已存在 */ }
+
+  // 迁移：旧 selection_pool 无 account_id，重建为 (account_id, goods_id) 复合主键
+  try {
+    const cols = db.prepare("PRAGMA table_info(selection_pool)").all();
+    if (cols.length && !cols.some(c => c.name === "account_id")) {
+      db.exec(`
+        ALTER TABLE selection_pool RENAME TO _selection_pool_old;
+        CREATE TABLE selection_pool (
+          account_id TEXT NOT NULL DEFAULT '',
+          goods_id TEXT NOT NULL, sku_id TEXT, title_zh TEXT, title_en TEXT, main_image TEXT, product_url TEXT,
+          usd_price REAL DEFAULT 0, daily_sales INTEGER DEFAULT 0, weekly_sales INTEGER DEFAULT 0, monthly_sales INTEGER DEFAULT 0,
+          usd_gmv REAL DEFAULT 0, score REAL DEFAULT 0, category_zh TEXT, mall_name TEXT, mall_mode TEXT,
+          status TEXT DEFAULT 'want', note TEXT, source_keyword TEXT,
+          added_at TEXT DEFAULT (datetime('now','localtime')),
+          updated_at TEXT DEFAULT (datetime('now','localtime')),
+          PRIMARY KEY (account_id, goods_id)
+        );
+        INSERT INTO selection_pool (account_id, goods_id, sku_id, title_zh, title_en, main_image, product_url,
+          usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode,
+          status, note, source_keyword, added_at, updated_at)
+        SELECT '', goods_id, sku_id, title_zh, title_en, main_image, product_url,
+          usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode,
+          status, note, source_keyword, added_at, updated_at
+        FROM _selection_pool_old;
+        DROP TABLE _selection_pool_old;
+        CREATE INDEX IF NOT EXISTS idx_selection_status ON selection_pool(status);
+        CREATE INDEX IF NOT EXISTS idx_selection_added ON selection_pool(added_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_selection_account ON selection_pool(account_id);
+      `);
+    }
+  } catch {}
 }
 
 // ============ 核价筛选器 CRUD ============
@@ -755,17 +788,18 @@ export function addSelection(item = {}) {
   const db = getDb();
   const now = new Date().toISOString();
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const aid = String(item.accountId || item.account_id || "");
   db.prepare(`
     INSERT INTO selection_pool (
-      goods_id, sku_id, title_zh, title_en, main_image, product_url,
+      account_id, goods_id, sku_id, title_zh, title_en, main_image, product_url,
       usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score,
       category_zh, mall_name, mall_mode, status, note, source_keyword, added_at, updated_at
     ) VALUES (
-      @goods_id, @sku_id, @title_zh, @title_en, @main_image, @product_url,
+      @account_id, @goods_id, @sku_id, @title_zh, @title_en, @main_image, @product_url,
       @usd_price, @daily_sales, @weekly_sales, @monthly_sales, @usd_gmv, @score,
       @category_zh, @mall_name, @mall_mode, @status, @note, @source_keyword, @added_at, @updated_at
     )
-    ON CONFLICT(goods_id) DO UPDATE SET
+    ON CONFLICT(account_id, goods_id) DO UPDATE SET
       sku_id = excluded.sku_id, title_zh = excluded.title_zh, title_en = excluded.title_en,
       main_image = excluded.main_image, product_url = excluded.product_url,
       usd_price = excluded.usd_price, daily_sales = excluded.daily_sales,
@@ -774,6 +808,7 @@ export function addSelection(item = {}) {
       category_zh = excluded.category_zh, mall_name = excluded.mall_name, mall_mode = excluded.mall_mode,
       updated_at = excluded.updated_at
   `).run({
+    account_id: aid,
     goods_id: goodsId,
     sku_id: String(item.sku_id || ""),
     title_zh: String(item.title_zh || ""),
@@ -799,47 +834,51 @@ export function addSelection(item = {}) {
 }
 
 /** 移出选品池 */
-export function removeSelection(goodsId) {
+export function removeSelection(goodsId, accountId = "") {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
+  const aid = String(accountId || "");
   const db = getDb();
-  const r = db.prepare(`DELETE FROM selection_pool WHERE goods_id = ?`).run(id);
+  const r = db.prepare(`DELETE FROM selection_pool WHERE account_id = ? AND goods_id = ?`).run(aid, id);
   return { ok: true, removed: r.changes };
 }
 
 /** 更新选品池条目的状态 / 备注 */
-export function updateSelection(goodsId, { status, note } = {}) {
+export function updateSelection(goodsId, { status, note, accountId = "" } = {}) {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
+  const aid = String(accountId || "");
   const db = getDb();
   const sets = [];
-  const params = { goods_id: id, updated_at: new Date().toISOString() };
+  const params = { goods_id: id, account_id: aid, updated_at: new Date().toISOString() };
   if (status != null && SELECTION_STATUSES.includes(status)) { sets.push("status = @status"); params.status = status; }
   if (note != null) { sets.push("note = @note"); params.note = String(note); }
   if (sets.length === 0) return { ok: false, reason: "无可更新字段" };
   sets.push("updated_at = @updated_at");
-  const r = db.prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE goods_id = @goods_id`).run(params);
+  const r = db.prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE account_id = @account_id AND goods_id = @goods_id`).run(params);
   return { ok: true, changed: r.changes };
 }
 
 /** 列出选品池（可按状态过滤），附各状态计数 */
-export function listSelection({ status = "" } = {}) {
+export function listSelection({ status = "", accountId = "" } = {}) {
   const db = getDb();
+  const aid = String(accountId || "");
   const rows = (status && SELECTION_STATUSES.includes(status))
-    ? db.prepare(`SELECT * FROM selection_pool WHERE status = ? ORDER BY added_at DESC`).all(status)
-    : db.prepare(`SELECT * FROM selection_pool ORDER BY added_at DESC`).all();
-  const summary = { total: db.prepare(`SELECT COUNT(*) AS c FROM selection_pool`).get().c };
+    ? db.prepare(`SELECT * FROM selection_pool WHERE account_id = ? AND status = ? ORDER BY added_at DESC`).all(aid, status)
+    : db.prepare(`SELECT * FROM selection_pool WHERE account_id = ? ORDER BY added_at DESC`).all(aid);
+  const summary = { total: db.prepare(`SELECT COUNT(*) AS c FROM selection_pool WHERE account_id = ?`).get(aid).c };
   for (const s of SELECTION_STATUSES) summary[s] = 0;
-  for (const row of db.prepare(`SELECT status, COUNT(*) AS c FROM selection_pool GROUP BY status`).all()) {
+  for (const row of db.prepare(`SELECT status, COUNT(*) AS c FROM selection_pool WHERE account_id = ? GROUP BY status`).all(aid)) {
     if (row.status) summary[row.status] = row.c;
   }
   return { rows, summary };
 }
 
 /** 返回已在选品池中的 goods_id 列表（前端给商品墙打「已加入」标记用） */
-export function listSelectionIds() {
+export function listSelectionIds(accountId = "") {
+  const aid = String(accountId || "");
   const db = getDb();
-  return db.prepare(`SELECT goods_id FROM selection_pool`).all().map((r) => String(r.goods_id));
+  return db.prepare(`SELECT goods_id FROM selection_pool WHERE account_id = ?`).all(aid).map((r) => String(r.goods_id));
 }
 
 /**
@@ -847,17 +886,18 @@ export function listSelectionIds() {
  * 直接在内存中生成行数据（不写临时 CSV），由 worker 侧调用 autoPricing。
  * 同时把选品池 status 标记为 listing。
  */
-export function exportSelectionForAutoPricing(goodsIds = []) {
+export function exportSelectionForAutoPricing(goodsIds = [], accountId = "") {
   if (!goodsIds.length) return { ok: false, reason: "无选中商品" };
   const db = getDb();
+  const aid = String(accountId || "");
   const ph = goodsIds.map(() => "?").join(",");
   const rows = db.prepare(`
     SELECT sp.goods_id, sp.title_zh, sp.title_en, sp.main_image, sp.usd_price, sp.category_zh,
            p.carousel_images, p.backend_category, p.product_url
       FROM selection_pool sp
       LEFT JOIN products p ON p.goods_id = sp.goods_id
-     WHERE sp.goods_id IN (${ph}) AND sp.status IN ('want', 'sourced', 'listing')
-  `).all(...goodsIds);
+     WHERE sp.account_id = ? AND sp.goods_id IN (${ph}) AND sp.status IN ('want', 'sourced', 'listing')
+  `).all(aid, ...goodsIds);
   if (!rows.length) return { ok: false, reason: "没有可上品的商品(需 want/sourced 状态)" };
 
   const csvRows = rows.map(r => ({
@@ -873,9 +913,9 @@ export function exportSelectionForAutoPricing(goodsIds = []) {
   }));
 
   const now = new Date().toISOString();
-  const update = db.prepare("UPDATE selection_pool SET status = 'listing', updated_at = ? WHERE goods_id = ?");
-  const tx = db.transaction(() => {
-    for (const r of rows) update.run(now, r.goods_id);
+  const update = db.prepare("UPDATE selection_pool SET status = 'listing', updated_at = ? WHERE account_id = ? AND goods_id = ?");
+  const tx = makeTransaction(db, () => {
+    for (const r of rows) update.run(now, aid, r.goods_id);
   });
   tx();
 

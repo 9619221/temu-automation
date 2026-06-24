@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import {
   Alert,
@@ -550,6 +550,7 @@ export default function QcOutboundCenter() {
   // cloud-only 单官方明细缓存(按 soId);与聚水潭明细分开。
   const [cloudItemsCache, setCloudItemsCache] = useState<Record<string, any[]>>({});
   const [cloudItemsLoading, setCloudItemsLoading] = useState<Record<string, boolean>>({});
+  const prefetchedKeysRef = useRef(new Set<string>());
   // 送仓明细「本地实发数量」编辑：草稿值（按 oiId）与保存中标记。
   const [itemShipDraft, setItemShipDraft] = useState<Record<string, number | null>>({});
   const [itemShipSaving, setItemShipSaving] = useState<Record<string, boolean>>({});
@@ -661,6 +662,9 @@ export default function QcOutboundCenter() {
   }, []);
 
   useEffect(() => {
+    prefetchedKeysRef.current.clear();
+    unifiedItemsRequested.current.clear();
+    cloudItemsRequested.current.clear();
     void loadUnified({
       page: unifiedPage,
       pageSize: unifiedPageSize,
@@ -838,62 +842,65 @@ export default function QcOutboundCenter() {
     persistUnifiedColumnConfig(next);
   }, [persistUnifiedColumnConfig]);
 
+  const unifiedItemsRequested = useRef(new Set<string>());
+  const cloudItemsRequested = useRef(new Set<string>());
+
   const loadUnifiedItems = useCallback(async (row: ConsignDeliverUnifiedRow) => {
     const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
     if (!oId || !erp?.consignDeliver?.items) return;
-    if (unifiedItemsCache[oId] || unifiedItemsLoading[oId]) return;
+    if (unifiedItemsRequested.current.has(oId)) return;
+    unifiedItemsRequested.current.add(oId);
     setUnifiedItemsLoading((prev) => ({ ...prev, [oId]: true }));
     try {
       const items = await erp.consignDeliver.items({ o_id: oId });
       setUnifiedItemsCache((prev) => ({ ...prev, [oId]: Array.isArray(items) ? items : [] }));
     } catch (error: any) {
+      unifiedItemsRequested.current.delete(oId);
       message.error(error?.message || "商品明细加载失败");
     } finally {
       setUnifiedItemsLoading((prev) => ({ ...prev, [oId]: false }));
     }
-  }, [unifiedItemsCache, unifiedItemsLoading]);
+  }, [erp]);
 
-  // cloud-only 单(无聚水潭 o_id):展开取官方逐SKU明细(erp_temu_openapi_consign.items_json)。
   const loadCloudItems = useCallback(async (row: ConsignDeliverUnifiedRow) => {
     const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
-    if (oId) return; // 有聚水潭单走聚水潭明细，不取官方
+    if (oId) return;
     const key = row.soId || "";
     const mallId = row.rawCloud?.mall_id ? String(row.rawCloud.mall_id) : "";
     if (!key || !mallId || !erp?.consignDeliver?.cloudItems) return;
-    if (cloudItemsCache[key] || cloudItemsLoading[key]) return;
+    if (cloudItemsRequested.current.has(key)) return;
+    cloudItemsRequested.current.add(key);
     setCloudItemsLoading((prev) => ({ ...prev, [key]: true }));
     try {
       const items = await erp.consignDeliver.cloudItems({ mallId, soId: key });
       setCloudItemsCache((prev) => ({ ...prev, [key]: Array.isArray(items) ? items : [] }));
     } catch (error: any) {
+      cloudItemsRequested.current.delete(key);
       message.error(error?.message || "官方明细加载失败");
     } finally {
       setCloudItemsLoading((prev) => ({ ...prev, [key]: false }));
     }
-  }, [cloudItemsCache, cloudItemsLoading]);
+  }, [erp]);
 
-  // 整页明细预取：列表一加载好，就在后台「限并发」把当前页每行的商品明细提前捞回缓存。
-  // 背景：桌面端是客户端，展开某行时明细要现连主控端(跨海)取，单行常等一两秒(见「展开后加载中...」)。
-  // 这里趁列表到手先静默预取，用户展开任意一行即命中本地缓存、秒开。
-  // 复用 loadUnifiedItems/loadCloudItems(两者均自带「命中缓存/加载中即跳过」保护，不会重复请求)。
-  // 翻页或改筛选会让 unifiedRows 变化，旧预取经 cancelled 立即中断，避免堆积无用请求拖累主控端单进程。
   useEffect(() => {
     if (!unifiedRows.length) return;
     let cancelled = false;
-    const PARALLEL = 2;          // 限并发 4→2：明细点查虽快，但主控端单进程被采购工作台等重查询占满时，4 路并发会放大瞬时排队压力；2 路够预热又更克制
-    const MAX_PREFETCH = 150;    // 上限 300→150：一屏可见也就十几行，预取太多只是徒增主控端负载；其余仍靠鼠标悬停/展开兜底
+    const MAX_PREFETCH = 20;
     const targets = unifiedRows.slice(0, MAX_PREFETCH);
-    let cursor = 0;
-    const runners = Array.from({ length: Math.min(PARALLEL, targets.length) }, async () => {
-      while (cursor < targets.length && !cancelled) {
-        const row = targets[cursor++];
+    const seen = prefetchedKeysRef.current;
+    (async () => {
+      for (const row of targets) {
+        if (cancelled) break;
+        const key = row.rawJst?.o_id ? `jst:${row.rawJst.o_id}` : (row.soId ? `cloud:${row.soId}` : "");
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
         try {
-          await loadUnifiedItems(row);   // 有聚水潭 o_id 的走这条；另一条内部 guard 直接跳过
-          await loadCloudItems(row);     // cloud-only 单(无 o_id)走这条
-        } catch { /* 单行预取失败忽略,不影响其余行 */ }
+          await loadUnifiedItems(row);
+          await loadCloudItems(row);
+        } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 80));
       }
-    });
-    void Promise.all(runners);
+    })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unifiedRows]);
@@ -1935,6 +1942,42 @@ export default function QcOutboundCenter() {
     });
   }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage, parsedAddrCache]);
 
+  const getCheckboxProps = useCallback((row: ConsignDeliverUnifiedRow) => ({ disabled: !row.soId }), []);
+  const handleSelectionChange = useCallback((keys: React.Key[]) => setSelectedShipKeys(keys as string[]), []);
+  const unifiedRowSelection = useMemo(() => ({
+    selectedRowKeys: selectedShipKeys,
+    onChange: handleSelectionChange,
+    preserveSelectedRowKeys: true,
+    getCheckboxProps,
+  }), [selectedShipKeys, handleSelectionChange, getCheckboxProps]);
+
+  const handleOnRow = useCallback((row: ConsignDeliverUnifiedRow) => ({
+    onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); },
+  }), [loadUnifiedItems, loadCloudItems]);
+
+  const unifiedExpandable = useMemo(() => ({
+    expandedRowRender: (row: ConsignDeliverUnifiedRow) => renderUnifiedRowItems(row),
+    onExpand: (expanded: boolean, row: ConsignDeliverUnifiedRow) => { if (expanded) { void loadUnifiedItems(row); void loadCloudItems(row); } },
+    expandRowByClick: true,
+    showExpandColumn: false,
+  }), [renderUnifiedRowItems, loadUnifiedItems, loadCloudItems]);
+
+  const handlePaginationChange = useCallback((page: number, pageSize: number) => {
+    setUnifiedPage(page);
+    if (pageSize !== unifiedPageSize) setUnifiedPageSize(pageSize);
+  }, [unifiedPageSize]);
+  const unifiedPagination = useMemo(() => ({
+    current: unifiedPage,
+    pageSize: unifiedPageSize,
+    total: unifiedTotal,
+    showSizeChanger: true,
+    pageSizeOptions: [50, 100, 200, 500] as number[],
+    showTotal: (t: number, range: [number, number]) => `显示 ${range[0]}-${range[1]} / ${t} 条`,
+    onChange: handlePaginationChange,
+  }), [unifiedPage, unifiedPageSize, unifiedTotal, handlePaginationChange]);
+
+  const unifiedRowKey = useCallback((row: ConsignDeliverUnifiedRow) => row.soId || `${row.rawCloud?.mall_id || ""}-${row.rawCloud?.sku_ext_code || ""}-${row.rawCloud?.skc_id || ""}`, []);
+
   if (!erp) {
     return (
       <PageHeader compact eyebrow="系统" title="出库中心" subtitle="服务未就绪，请重启软件" />
@@ -2120,37 +2163,16 @@ export default function QcOutboundCenter() {
                 </div>
                 <Table
                   className="erp-compact-table consign-unified-table"
-                  rowKey={(row) => row.soId || `${row.rawCloud?.mall_id || ""}-${row.rawCloud?.sku_ext_code || ""}-${row.rawCloud?.skc_id || ""}`}
-                  rowSelection={{
-                    selectedRowKeys: selectedShipKeys,
-                    onChange: (keys) => setSelectedShipKeys(keys as string[]),
-                    preserveSelectedRowKeys: true,
-                    getCheckboxProps: (row) => ({ disabled: !row.soId }),
-                  }}
+                  rowKey={unifiedRowKey}
+                  rowSelection={unifiedRowSelection}
                   size="middle"
                   loading={unifiedLoading}
                   columns={cloudStockColumns}
                   dataSource={unifiedRows}
                   scroll={{ x: 2560, y: "max(300px, calc(100vh - 400px))" }}
-                  onRow={(row) => ({ onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); } })}
-                  expandable={{
-                    expandedRowRender: (row) => renderUnifiedRowItems(row),
-                    onExpand: (expanded, row) => { if (expanded) { void loadUnifiedItems(row); void loadCloudItems(row); } },
-                    expandRowByClick: true,
-                    showExpandColumn: false,
-                  }}
-                  pagination={{
-                    current: unifiedPage,
-                    pageSize: unifiedPageSize,
-                    total: unifiedTotal,
-                    showSizeChanger: true,
-                    pageSizeOptions: [50, 100, 200, 500],
-                    showTotal: (t, range) => `显示 ${range[0]}-${range[1]} / ${t} 条`,
-                    onChange: (page, pageSize) => {
-                      setUnifiedPage(page);
-                      if (pageSize !== unifiedPageSize) setUnifiedPageSize(pageSize);
-                    },
-                  }}
+                  onRow={handleOnRow}
+                  expandable={unifiedExpandable}
+                  pagination={unifiedPagination}
                 />
               </Space>
             ),

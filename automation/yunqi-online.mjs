@@ -2143,11 +2143,11 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
       return { results, totalImported, totalSkipped, syncedAt: new Date().toISOString(), dbRowCount: getRowCount() };
     },
     yunqiDbSelectionAdd: async (params = {}) => addSelection(params.item || params),
-    yunqiDbSelectionRemove: async (params = {}) => removeSelection(params.goodsId),
-    yunqiDbSelectionUpdate: async (params = {}) => updateSelection(params.goodsId, { status: params.status, note: params.note }),
-    yunqiDbSelectionList: async (params = {}) => listSelection({ status: params.status }),
-    yunqiDbSelectionIds: async () => listSelectionIds(),
+    yunqiDbSelectionRemove: async (params = {}) => removeSelection(params.goodsId, params.accountId),
+    yunqiDbSelectionUpdate: async (params = {}) => updateSelection(params.goodsId, { status: params.status, note: params.note, accountId: params.accountId }),
+    yunqiDbSelectionList: async (params = {}) => listSelection({ status: params.status, accountId: params.accountId }),
+    yunqiDbSelectionIds: async (params = {}) => listSelectionIds(params.accountId),
     yunqiDbCategories: async () => listCategories(),
-    yunqiDbExportAutoPrice: async (params = {}) => exportSelectionForAutoPricing(params.goodsIds || []),
+    yunqiDbExportAutoPrice: async (params = {}) => exportSelectionForAutoPricing(params.goodsIds || [], params.accountId),
   };
 }

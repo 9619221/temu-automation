@@ -11,17 +11,48 @@ function db() {
   if (_db) return _db;
   _db = new Database(YUNQI_DB);
   _db.pragma("busy_timeout = 8000");
-  // 选品池表（抓取服务只建 products；selection_pool 在这边按需建，幂等）
   _db.exec(`
     CREATE TABLE IF NOT EXISTS selection_pool (
-      goods_id TEXT PRIMARY KEY, sku_id TEXT, title_zh TEXT, title_en TEXT, main_image TEXT, product_url TEXT,
+      account_id TEXT NOT NULL DEFAULT '',
+      goods_id TEXT NOT NULL,
+      sku_id TEXT, title_zh TEXT, title_en TEXT, main_image TEXT, product_url TEXT,
       usd_price REAL DEFAULT 0, daily_sales INTEGER DEFAULT 0, weekly_sales INTEGER DEFAULT 0, monthly_sales INTEGER DEFAULT 0,
       usd_gmv REAL DEFAULT 0, score REAL DEFAULT 0, category_zh TEXT, mall_name TEXT, mall_mode TEXT,
-      status TEXT DEFAULT 'want', note TEXT, source_keyword TEXT, added_at TEXT, updated_at TEXT
+      backend_category TEXT DEFAULT '',
+      status TEXT DEFAULT 'want', note TEXT, source_keyword TEXT, added_at TEXT, updated_at TEXT,
+      PRIMARY KEY (account_id, goods_id)
     );
     CREATE INDEX IF NOT EXISTS idx_sel_status ON selection_pool(status);
+    CREATE INDEX IF NOT EXISTS idx_sel_account ON selection_pool(account_id);
   `);
-  try { _db.exec("ALTER TABLE selection_pool ADD COLUMN backend_category TEXT DEFAULT ''"); } catch {}
+  try {
+    const cols = _db.prepare("PRAGMA table_info(selection_pool)").all();
+    if (cols.length && !cols.some(c => c.name === "account_id")) {
+      _db.exec(`
+        ALTER TABLE selection_pool RENAME TO _selection_pool_old;
+        CREATE TABLE selection_pool (
+          account_id TEXT NOT NULL DEFAULT '',
+          goods_id TEXT NOT NULL,
+          sku_id TEXT, title_zh TEXT, title_en TEXT, main_image TEXT, product_url TEXT,
+          usd_price REAL DEFAULT 0, daily_sales INTEGER DEFAULT 0, weekly_sales INTEGER DEFAULT 0, monthly_sales INTEGER DEFAULT 0,
+          usd_gmv REAL DEFAULT 0, score REAL DEFAULT 0, category_zh TEXT, mall_name TEXT, mall_mode TEXT,
+          backend_category TEXT DEFAULT '',
+          status TEXT DEFAULT 'want', note TEXT, source_keyword TEXT, added_at TEXT, updated_at TEXT,
+          PRIMARY KEY (account_id, goods_id)
+        );
+        INSERT INTO selection_pool (account_id, goods_id, sku_id, title_zh, title_en, main_image, product_url,
+          usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode,
+          backend_category, status, note, source_keyword, added_at, updated_at)
+        SELECT '', goods_id, sku_id, title_zh, title_en, main_image, product_url,
+          usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode,
+          COALESCE(backend_category, ''), status, note, source_keyword, added_at, updated_at
+        FROM _selection_pool_old;
+        DROP TABLE _selection_pool_old;
+        CREATE INDEX IF NOT EXISTS idx_sel_status ON selection_pool(status);
+        CREATE INDEX IF NOT EXISTS idx_sel_account ON selection_pool(account_id);
+      `);
+    }
+  } catch {}
   return _db;
 }
 
@@ -135,19 +166,21 @@ function getInfo() {
 }
 
 // ---- 选品池 ----
-function listSelection({ status = "" } = {}) {
+function listSelection({ status = "", accountId = "" } = {}) {
   const d = db();
+  const aid = String(accountId || "");
   const rows = (status && SELECTION_STATUSES.includes(status))
-    ? d.prepare("SELECT * FROM selection_pool WHERE status = ? ORDER BY added_at DESC").all(status)
-    : d.prepare("SELECT * FROM selection_pool ORDER BY added_at DESC").all();
-  const summary = { total: d.prepare("SELECT COUNT(*) AS c FROM selection_pool").get().c };
+    ? d.prepare("SELECT * FROM selection_pool WHERE account_id = ? AND status = ? ORDER BY added_at DESC").all(aid, status)
+    : d.prepare("SELECT * FROM selection_pool WHERE account_id = ? ORDER BY added_at DESC").all(aid);
+  const summary = { total: d.prepare("SELECT COUNT(*) AS c FROM selection_pool WHERE account_id = ?").get(aid).c };
   for (const s of SELECTION_STATUSES) summary[s] = 0;
-  for (const r of d.prepare("SELECT status, COUNT(*) AS c FROM selection_pool GROUP BY status").all()) { if (r.status) summary[r.status] = r.c; }
+  for (const r of d.prepare("SELECT status, COUNT(*) AS c FROM selection_pool WHERE account_id = ? GROUP BY status").all(aid)) { if (r.status) summary[r.status] = r.c; }
   return { rows, summary };
 }
 
-function listSelectionIds() {
-  return db().prepare("SELECT goods_id FROM selection_pool").all().map((r) => String(r.goods_id));
+function listSelectionIds(accountId = "") {
+  const aid = String(accountId || "");
+  return db().prepare("SELECT goods_id FROM selection_pool WHERE account_id = ?").all(aid).map((r) => String(r.goods_id));
 }
 
 function addSelection(item = {}) {
@@ -158,16 +191,17 @@ function addSelection(item = {}) {
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const optIds = Array.isArray(item.opt_ids) ? item.opt_ids : [];
   const backCat = String(item.backend_category || "") || buildCategoryPath(optIds) || String(item.category_zh || "");
+  const aid = String(item.accountId || item.account_id || "");
   d.prepare(`
-    INSERT INTO selection_pool (goods_id, sku_id, title_zh, title_en, main_image, product_url, usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode, backend_category, status, note, source_keyword, added_at, updated_at)
-    VALUES (@goods_id,@sku_id,@title_zh,@title_en,@main_image,@product_url,@usd_price,@daily_sales,@weekly_sales,@monthly_sales,@usd_gmv,@score,@category_zh,@mall_name,@mall_mode,@backend_category,@status,@note,@source_keyword,@added_at,@updated_at)
-    ON CONFLICT(goods_id) DO UPDATE SET
+    INSERT INTO selection_pool (account_id, goods_id, sku_id, title_zh, title_en, main_image, product_url, usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode, backend_category, status, note, source_keyword, added_at, updated_at)
+    VALUES (@account_id,@goods_id,@sku_id,@title_zh,@title_en,@main_image,@product_url,@usd_price,@daily_sales,@weekly_sales,@monthly_sales,@usd_gmv,@score,@category_zh,@mall_name,@mall_mode,@backend_category,@status,@note,@source_keyword,@added_at,@updated_at)
+    ON CONFLICT(account_id, goods_id) DO UPDATE SET
       title_zh=excluded.title_zh, main_image=excluded.main_image, product_url=excluded.product_url,
       usd_price=excluded.usd_price, daily_sales=excluded.daily_sales, weekly_sales=excluded.weekly_sales,
       monthly_sales=excluded.monthly_sales, usd_gmv=excluded.usd_gmv, score=excluded.score,
       mall_name=excluded.mall_name, mall_mode=excluded.mall_mode, backend_category=excluded.backend_category, updated_at=excluded.updated_at
   `).run({
-    goods_id: goodsId, sku_id: String(item.sku_id || ""), title_zh: String(item.title_zh || ""), title_en: String(item.title_en || ""),
+    account_id: aid, goods_id: goodsId, sku_id: String(item.sku_id || ""), title_zh: String(item.title_zh || ""), title_en: String(item.title_en || ""),
     main_image: String(item.main_image || ""), product_url: String(item.product_url || `https://www.temu.com/goods.html?goods_id=${goodsId}`),
     usd_price: num(item.usd_price), daily_sales: num(item.daily_sales), weekly_sales: num(item.weekly_sales), monthly_sales: num(item.monthly_sales),
     usd_gmv: num(item.usd_gmv), score: num(item.score), category_zh: String(item.category_zh || ""), mall_name: String(item.mall_name || ""), mall_mode: String(item.mall_mode || ""),
@@ -178,23 +212,25 @@ function addSelection(item = {}) {
   return { ok: true, goodsId };
 }
 
-function removeSelection(goodsId) {
+function removeSelection(goodsId, accountId = "") {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
-  const r = db().prepare("DELETE FROM selection_pool WHERE goods_id = ?").run(id);
+  const aid = String(accountId || "");
+  const r = db().prepare("DELETE FROM selection_pool WHERE account_id = ? AND goods_id = ?").run(aid, id);
   return { ok: true, removed: r.changes };
 }
 
-function updateSelection(goodsId, { status, note } = {}) {
+function updateSelection(goodsId, { status, note, accountId = "" } = {}) {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
+  const aid = String(accountId || "");
   const sets = [];
-  const obj = { goods_id: id, updated_at: new Date().toISOString() };
+  const obj = { goods_id: id, account_id: aid, updated_at: new Date().toISOString() };
   if (status != null && SELECTION_STATUSES.includes(status)) { sets.push("status = @status"); obj.status = status; }
   if (note != null) { sets.push("note = @note"); obj.note = String(note); }
   if (!sets.length) return { ok: false, reason: "无可更新字段" };
   sets.push("updated_at = @updated_at");
-  const r = db().prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE goods_id = @goods_id`).run(obj);
+  const r = db().prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE account_id = @account_id AND goods_id = @goods_id`).run(obj);
   return { ok: true, changed: r.changes };
 }
 

@@ -836,39 +836,38 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     LIMIT @limit OFFSET @offset
   `).all({ ...rowsQ.values, limit: pageSize, offset });
 
-  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM temu_consign_unified_snapshot ${rowsQ.where}`).get(rowsQ.values);
-
   const bdQ = buildWhere(false);
-  const bdRows = db.prepare(`
-    SELECT source, COUNT(*) AS n FROM temu_consign_unified_snapshot ${bdQ.where} GROUP BY source
-  `).all(bdQ.values);
-  const sourceBreakdown = { cloud_only: 0, jst_only: 0, both: 0 };
-  for (const r of bdRows) {
-    if (r.source === "cloud") sourceBreakdown.cloud_only = Number(r.n || 0);
-    else if (r.source === "jst") sourceBreakdown.jst_only = Number(r.n || 0);
-    else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
-  }
+  const aggRow = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN source = 'cloud' THEN 1 ELSE 0 END) AS src_cloud,
+      SUM(CASE WHEN source = 'jst' THEN 1 ELSE 0 END) AS src_jst,
+      SUM(CASE WHEN source = 'both' THEN 1 ELSE 0 END) AS src_both
+    FROM temu_consign_unified_snapshot ${bdQ.where}
+  `).get(bdQ.values);
+
+  const filteredQ = buildWhere(true);
+  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM temu_consign_unified_snapshot ${filteredQ.where}`).get(filteredQ.values);
+
+  const sourceBreakdown = { cloud_only: Number(aggRow?.src_cloud || 0), jst_only: Number(aggRow?.src_jst || 0), both: Number(aggRow?.src_both || 0) };
 
   const sbValues = { company_id: companyId };
   const sbCond = ["company_id = @company_id"];
   if (search) { sbValues.search = `%${search}%`; sbCond.push("search_blob LIKE @search"); }
+  const combined = db.prepare(`
+    SELECT ${statusCol} AS status, ${hasOnlineStatus ? "online_status" : "NULL AS online_status"}, COUNT(*) AS n
+    FROM temu_consign_unified_snapshot
+    WHERE ${sbCond.join(" AND ")}
+    GROUP BY ${statusCol}${hasOnlineStatus ? ", online_status" : ""}
+  `).all(sbValues);
   const statusBreakdown = {};
-  for (const r of db.prepare(`
-    SELECT ${statusCol} AS status, COUNT(*) AS n FROM temu_consign_unified_snapshot
-    WHERE ${sbCond.join(" AND ")} GROUP BY ${statusCol}
-  `).all(sbValues)) {
-    const key = r.status == null || r.status === "" ? "(空)" : String(r.status);
-    statusBreakdown[key] = Number(r.n || 0);
-  }
-
   const onlineStatusBreakdown = {};
-  if (hasOnlineStatus) {
-    for (const r of db.prepare(`
-      SELECT online_status AS status, COUNT(*) AS n FROM temu_consign_unified_snapshot
-      WHERE ${sbCond.join(" AND ")} AND online_status IS NOT NULL AND online_status != ''
-      GROUP BY online_status
-    `).all(sbValues)) {
-      onlineStatusBreakdown[String(r.status)] = Number(r.n || 0);
+  for (const r of combined) {
+    const sKey = r.status == null || r.status === "" ? "(空)" : String(r.status);
+    statusBreakdown[sKey] = (statusBreakdown[sKey] || 0) + Number(r.n || 0);
+    if (hasOnlineStatus && r.online_status) {
+      const oKey = String(r.online_status);
+      onlineStatusBreakdown[oKey] = (onlineStatusBreakdown[oKey] || 0) + Number(r.n || 0);
     }
   }
 
@@ -6326,12 +6325,12 @@ async function handleRequest({
       return;
     }
     if (pathname === "/api/erp/reports/yunqi-selection-list") {
-      try { const status = new URL(req.url || "/", "http://127.0.0.1").searchParams.get("status") || ""; writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelection({ status }) }); }
+      try { const u = new URL(req.url || "/", "http://127.0.0.1"); const status = u.searchParams.get("status") || ""; const accountId = u.searchParams.get("accountId") || ""; writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelection({ status, accountId }) }); }
       catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
     if (pathname === "/api/erp/reports/yunqi-selection-ids") {
-      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelectionIds() }); }
+      try { const accountId = new URL(req.url || "/", "http://127.0.0.1").searchParams.get("accountId") || ""; writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelectionIds(accountId) }); }
       catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
@@ -6343,13 +6342,13 @@ async function handleRequest({
     }
     if (pathname === "/api/erp/reports/yunqi-selection-remove") {
       if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
-      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").removeSelection(p?.goodsId) }); }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").removeSelection(p?.goodsId, p?.accountId) }); }
       catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
     if (pathname === "/api/erp/reports/yunqi-selection-update") {
       if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
-      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").updateSelection(p?.goodsId, { status: p?.status, note: p?.note }) }); }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").updateSelection(p?.goodsId, { status: p?.status, note: p?.note, accountId: p?.accountId }) }); }
       catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }

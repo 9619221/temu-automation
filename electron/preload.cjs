@@ -285,7 +285,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     selectionRemove: (params) => ipcRenderer.invoke("yunqi-db:selection-remove", params),
     selectionUpdate: (params) => ipcRenderer.invoke("yunqi-db:selection-update", params),
     selectionList: (params) => ipcRenderer.invoke("yunqi-db:selection-list", params),
-    selectionIds: () => ipcRenderer.invoke("yunqi-db:selection-ids"),
+    selectionIds: (params) => ipcRenderer.invoke("yunqi-db:selection-ids", params),
     categories: () => ipcRenderer.invoke("yunqi-db:categories"),
     exportAutoPrice: (params) => ipcRenderer.invoke("yunqi-db:export-auto-price", params),
     exportForListing: (params) => ipcRenderer.invoke("yunqi-db:export-for-listing", params),

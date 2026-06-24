@@ -115,6 +115,13 @@ function normalizeItem(raw) {
   };
 }
 
+const _searchCache = new Map();
+const CACHE_TTL = 3 * 60 * 1000;
+const CACHE_MAX = 50;
+function _cacheKey(obj) { return JSON.stringify(obj); }
+function _cacheGet(key) { const e = _searchCache.get(key); if (!e) return null; if (Date.now() - e.ts > CACHE_TTL) { _searchCache.delete(key); return null; } return e.data; }
+function _cacheSet(key, data) { if (_searchCache.size >= CACHE_MAX) { const oldest = _searchCache.keys().next().value; _searchCache.delete(oldest); } _searchCache.set(key, { data, ts: Date.now() }); }
+
 async function liveSearch(params = {}) {
   const { keyword = "", optId = "", mallMode = "", sortBy = "daily_sales", sortOrder = "DESC", page = 1, pageSize = 24 } = params;
   const pSize = Math.min(Math.max(Number(pageSize) || 24, 1), 100);
@@ -132,6 +139,10 @@ async function liveSearch(params = {}) {
   };
   if (keyword) searchBody.keyword = keyword;
   if (optId) searchBody.opt_ids = [String(optId)];
+
+  const ck = _cacheKey({ searchBody, minPrice: params.minPrice, maxPrice: params.maxPrice, minDailySales: params.minDailySales });
+  const cached = _cacheGet(ck);
+  if (cached) return cached;
 
   const resp = await proxyPost("/search", searchBody, 90000);
   if (resp.statusCode === 401) {
@@ -160,7 +171,9 @@ async function liveSearch(params = {}) {
     });
   }
 
-  return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
+  const result_ = { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
+  _cacheSet(ck, result_);
+  return result_;
 }
 
 async function tokenStatus() {

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { readActiveAccountId, ACTIVE_ACCOUNT_CHANGED_EVENT } from "../utils/multiStore";
 import listingTaskStore from "../stores/listingTaskStore";
 import {
   Alert,
@@ -479,6 +480,7 @@ export default function SelectionPlaza() {
   const [poolSummary, setPoolSummary] = useState<Record<string, number>>({});
   const [poolIds, setPoolIds] = useState<Set<string>>(new Set());
   const poolStatusFilter = "";
+  const [accountId, setAccountId] = useState<string>("");
 
   const [activeTab, setActiveTab] = useState("plaza");
   const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(new Set());
@@ -509,20 +511,20 @@ export default function SelectionPlaza() {
 
   const loadPoolIds = useCallback(async () => {
     try {
-      const ids = await api?.selectionIds();
+      const ids = await api?.selectionIds({ accountId });
       if (Array.isArray(ids)) setPoolIds(new Set(ids.map(String)));
     } catch { /* ignore */ }
-  }, []);
+  }, [accountId]);
 
   const loadPool = useCallback(async () => {
     try {
-      const r = await api?.selectionList({ status: poolStatusFilter || undefined });
+      const r = await api?.selectionList({ status: poolStatusFilter || undefined, accountId });
       if (r) {
         setPoolRows(r.rows || []);
         setPoolSummary(r.summary || {});
       }
     } catch { /* ignore */ }
-  }, [poolStatusFilter]);
+  }, [poolStatusFilter, accountId]);
 
   // ---- 搜索 ----
 
@@ -619,6 +621,7 @@ export default function SelectionPlaza() {
         mall_mode: item.mall_mode,
         source_keyword: keyword || "",
         opt_ids: item.opt_ids || [],
+        accountId,
       });
       if (r?.ok) {
         message.success("已加入选品池");
@@ -637,7 +640,7 @@ export default function SelectionPlaza() {
     setPoolIds((prev) => { const n = new Set(prev); n.delete(gid); return n; });
     setPoolRows((prev) => prev.filter((r) => String(r.goods_id) !== gid));
     try {
-      await api?.selectionRemove({ goodsId });
+      await api?.selectionRemove({ goodsId, accountId });
       message.success("已移出选品池");
     } catch (e: any) {
       message.error(e?.message || "移除失败");
@@ -649,7 +652,7 @@ export default function SelectionPlaza() {
   const changeStatus = async (goodsId: string, status: string) => {
     setPoolRows((prev) => prev.map((r) => String(r.goods_id) === String(goodsId) ? { ...r, status } : r));
     try {
-      await api?.selectionUpdate({ goodsId, status });
+      await api?.selectionUpdate({ goodsId, status, accountId });
     } catch (e: any) {
       message.error(e?.message || "更新状态失败");
       void loadPool();
@@ -658,7 +661,7 @@ export default function SelectionPlaza() {
 
   const updateNote = async (goodsId: string, note: string) => {
     try {
-      await api?.selectionUpdate({ goodsId, note });
+      await api?.selectionUpdate({ goodsId, note, accountId });
       void loadPool();
     } catch (e: any) {
       message.error(e?.message || "更新备注失败");
@@ -731,7 +734,7 @@ export default function SelectionPlaza() {
 
     try {
       const goodsIds = drawerProducts.map((p: any) => p.goods_id);
-      const exportResult = await api?.exportForListing?.({ goodsIds });
+      const exportResult = await api?.exportForListing?.({ goodsIds, accountId });
       if (!exportResult?.ok) {
         message.error(exportResult?.reason || exportResult?.error || "导出失败");
         return;
@@ -809,12 +812,26 @@ export default function SelectionPlaza() {
   }, [poolRows, selectedPoolIds, loadPool, loadPoolIds]);
 
   useEffect(() => {
+    const store = window.electronAPI?.store;
+    if (!store) return;
+    let cancelled = false;
+    const sync = async () => {
+      const id = await readActiveAccountId(store);
+      if (!cancelled) setAccountId(id || "");
+    };
+    void sync();
+    const onSwitch = () => void sync();
+    window.addEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, onSwitch);
+    return () => { cancelled = true; window.removeEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, onSwitch); };
+  }, []);
+
+  useEffect(() => {
     void loadCategories();
     void loadPoolIds();
     void doSearch(0);
     void loadPool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [accountId]);
 
 
   // 触底自动加载更多
