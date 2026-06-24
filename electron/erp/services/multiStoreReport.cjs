@@ -3980,14 +3980,20 @@ function buildActivityList(db, options = {}) {
   }
   // 补充已报名活动详情(temu_activity_enroll_record 有 signup_price/activity_stock/status/end_at)
   const enrollDetails = optionalAllLocal(db, `
-    WITH le AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_activity_enroll_record WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id)
+    WITH latest_enroll AS (
+      SELECT mall_id, enroll_id, sku_ext_code, MAX(stat_date) AS sd
+        FROM cloud.temu_activity_enroll_record
+       WHERE tenant_id = ? AND mall_id <> '' AND enroll_id IS NOT NULL AND enroll_id <> ''
+       GROUP BY mall_id, enroll_id, sku_ext_code
+    )
     SELECT e.mall_id, m.store_code, e.sku_ext_code, e.product_id, e.goods_id, e.skc_id,
            e.enroll_id, e.activity_thematic_id, e.activity_thematic_name, e.activity_type,
            e.activity_price_cents, e.daily_price_cents, e.activity_stock, e.remaining_stock,
            e.enroll_status, e.enroll_time, e.session_end_time, e.session_start_time, e.session_status_tag, e.site, e.sites_json,
            sc.product_id AS spu_id, k.wac AS cost, k.color_spec
       FROM cloud.temu_activity_enroll_record e
-      JOIN le ON le.mall_id = e.mall_id AND le.sd = e.stat_date
+      JOIN latest_enroll le ON le.mall_id = e.mall_id AND le.enroll_id = e.enroll_id
+           AND le.sku_ext_code = e.sku_ext_code AND le.sd = e.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = e.mall_id
       LEFT JOIN cloud.skc_snapshots sc ON sc.tenant_id = e.tenant_id AND sc.skc_id = e.skc_id
       LEFT JOIN (SELECT internal_sku_code, MAX(COALESCE(NULLIF(weighted_avg_cost,0), NULLIF(jst_cost_price,0))) AS wac, MAX(color_spec) AS color_spec
@@ -4028,6 +4034,7 @@ function buildActivityList(db, options = {}) {
     const start = startTime ? Number(startTime) : null;
     if (end && end > 1e12 && now > end) return "已结束";
     if (start && start > 1e12 && now >= start && (!end || now <= end)) return "进行中";
+    if (start && start > 1e12 && now < start) return "未开始";
     return enrollStatusLabel(enrollStatus);
   };
   const fmtEndTime = (v) => { if (!v) return null; const n = Number(v); if (n > 1e12) { const d = new Date(n); const p = (x) => String(x).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; } return String(v).slice(0, 10); };

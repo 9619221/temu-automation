@@ -637,15 +637,16 @@ export default function OperationsWorkbench() {
       },
     });
   }, [selActRows, effPrice, effStock]); void _submitViaExtension;
+  const modalActRowsActive = useMemo(() => modalActRows.filter(r => r.status !== "已结束"), [modalActRows]);
   const modalFiltered = useMemo(() => {
-    if (modalStatusFilter === "全部") return modalActRows;
-    return modalActRows.filter(r => r.status === modalStatusFilter);
-  }, [modalActRows, modalStatusFilter]);
+    if (modalStatusFilter === "全部") return modalActRowsActive;
+    return modalActRowsActive.filter(r => r.status === modalStatusFilter);
+  }, [modalActRowsActive, modalStatusFilter]);
   const modalStatusCounts = useMemo(() => {
-    const c: Record<string, number> = { "全部": modalActRows.length };
-    for (const r of modalActRows) { const s = r.status || "未知"; c[s] = (c[s] || 0) + 1; }
+    const c: Record<string, number> = { "全部": modalActRowsActive.length };
+    for (const r of modalActRowsActive) { const s = r.status || "未知"; c[s] = (c[s] || 0) + 1; }
     return c;
-  }, [modalActRows]);
+  }, [modalActRowsActive]);
   const _enrollColumns = useMemo<ColumnsType<ModalActRow>>(() => [
     { title: "SKU属性集", key: "spec", width: 120, render: (_, r) => r.color_spec || <span style={{ color: "#bbb" }}>—</span> },
     { title: "日常申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? `¥${v.toFixed(2)}` : <span style={{ color: "#bbb" }}>—</span> },
@@ -1465,9 +1466,21 @@ export default function OperationsWorkbench() {
               pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50], showTotal: (t, range) => `共有 ${t} 条  每页 ${range[1] - range[0] + 1} 条` }}
               scroll={{ x: 1100 }} locale={{ emptyText: "暂无可显示的筛信息" }}
               columns={[
-                { title: "SKU属性集", key: "spec", width: 110, render: (_, r) => r.color_spec || <span style={{ color: "#bbb" }}>—</span> },
-                { title: "日常申报价", dataIndex: "suggested_price", width: 100, align: "right", render: (v) => v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                { title: "活动申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
+                { title: "SKU属性集", key: "spec", width: 120, render: (_, r) => {
+                  const names = (r.skus || []).map((s: any) => s.spec_name).filter(Boolean);
+                  if (!names.length) return r.color_spec || <span style={{ color: "#bbb" }}>—</span>;
+                  return <div style={{ fontSize: 12, lineHeight: "18px" }}>{names.map((n: string, i: number) => <div key={i}>{n}</div>)}</div>;
+                } },
+                { title: "日常申报价", key: "suggested_price", width: 100, align: "right", render: (_, r) => {
+                  const skus = (r.skus || []).filter((s: any) => s.suggested_price != null);
+                  if (skus.length > 1) return <div style={{ fontSize: 12, lineHeight: "18px" }}>{skus.map((s: any, i: number) => <div key={i}>¥{s.suggested_price.toFixed(2)}</div>)}</div>;
+                  const v = r.suggested_price; return v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>;
+                } },
+                { title: "活动申报价", key: "signup_price", width: 100, align: "right", render: (_, r) => {
+                  const skus = (r.skus || []).filter((s: any) => s.signup_price != null);
+                  if (skus.length > 1) return <div style={{ fontSize: 12, lineHeight: "18px" }}>{skus.map((s: any, i: number) => <div key={i}>¥{s.signup_price.toFixed(2)}</div>)}</div>;
+                  const v = r.signup_price; return v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>;
+                } },
                 { title: "报名时间", key: "enroll_at", width: 150, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
                 { title: "活动类型", key: "title", width: 280, ellipsis: true, render: (_, r) => {
                   return <span>{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</span>;
