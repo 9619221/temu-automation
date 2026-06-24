@@ -67,6 +67,14 @@ const ENROLL_RECORD_TARGETS_MALLS_PER_RUN = 4; // 每轮 4 店,35店约9轮转�
 const PRICE_ADJUST_ACT_STATE_KEY = "temu_monitor_price_adjust_activities_state";
 const PRICE_ADJUST_ACT_INTERVAL_MS = 2 * 60 * 1000; // 临时2min验证，之后改回2h
 const PRICE_ADJUST_ACT_MAX_PRODUCTS = 80; // 每轮最多查询产品数
+// Sydney 活动总览 API(咕噜噜同源):分页拉全店所有活动,比 enroll/list 覆盖范围更全
+const ACTIVITY_OVERVIEW_ENDPOINT = "/sydney/api/activity/queryMallActivityOverView";
+const ACTIVITY_OVERVIEW_TYPE_ENDPOINT = "/sydney/api/activity/queryMallActivityTypeList";
+const ACTIVITY_OVERVIEW_STATE_KEY = "temu_monitor_activity_overview_state";
+const ACTIVITY_OVERVIEW_RUN_INTERVAL_MS = 60 * 60 * 1000; // 1h/轮
+const ACTIVITY_OVERVIEW_PAGE_SIZE = 50;
+const ACTIVITY_OVERVIEW_MAX_PAGES = 30; // 50*30=1500 条/店
+const ACTIVITY_OVERVIEW_MALLS_PER_RUN = 6;
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -306,10 +314,10 @@ const SITE_REGIONS = [
   { type: 3, name: "美区", origin: "https://agentseller-us.temu.com", siteTag: "agentseller-us" },
 ];
 
-async function ensureKuajingTab() {
-  const existing = await chrome.tabs.query({ url: "https://seller.kuajingmaihuo.com/*" });
-  if (existing.length) return existing[0].id;
-  const tab = await chrome.tabs.create({ url: "https://seller.kuajingmaihuo.com/", active: false });
+async function createBackgroundTab(url) {
+  const win = await chrome.windows.create({ url, state: "minimized", focused: false, left: -9999, top: -9999 });
+  const tab = win.tabs[0];
+  try { await chrome.windows.update(win.id, { state: "minimized", focused: false }); } catch {}
   await new Promise((resolve) => {
     const onUpdate = (tabId, info) => {
       if (tabId === tab.id && info.status === "complete") {
@@ -320,6 +328,14 @@ async function ensureKuajingTab() {
     chrome.tabs.onUpdated.addListener(onUpdate);
     setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdate); resolve(); }, 15000);
   });
+  try { await chrome.windows.update(win.id, { state: "minimized", focused: false }); } catch {}
+  return tab;
+}
+
+async function ensureKuajingTab() {
+  const existing = await chrome.tabs.query({ url: "https://seller.kuajingmaihuo.com/*" });
+  if (existing.length) return existing[0].id;
+  const tab = await createBackgroundTab("https://seller.kuajingmaihuo.com/");
   return tab.id;
 }
 
@@ -589,6 +605,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   collectActivityMatchFromTargets().catch((e) => console.warn("[sw] activity match targets collect err", e?.message || e));
   collectEnrollRecords().catch((e) => console.warn("[sw] enroll record collect err", e?.message || e));
   collectEnrollRecordsFromTargets().catch((e) => console.warn("[sw] enroll record targets collect err", e?.message || e));
+  collectActivityOverview().catch((e) => console.warn("[sw] activity overview collect err", e?.message || e));
   collectPriceAdjustActivities().catch((e) => console.warn("[sw] price-adjust-activities collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowMultiregion().catch((e) => console.warn("[sw] flow multiregion collect err", e?.message || e));
@@ -1529,6 +1546,7 @@ async function collectFlowForCurrentMall() {
   }
   return { ok: true, enqueuedCount, mall: cur.mallId };
 }
+self.collectFlowForCurrentMall = collectFlowForCurrentMall;
 
 async function collectFlowTrendsForProducts(mallId, productIds, origin, siteTag) {
   if (!productIds.length) return 0;
@@ -1947,7 +1965,7 @@ async function collectQualityViaPage(origin, mallId) {
   let opened = false;
   if (!tab) {
     try {
-      tab = await chrome.tabs.create({ url: origin + "/main/quality/dashboard", active: false });
+      tab = await createBackgroundTab(origin + "/main/quality/dashboard");
       opened = true;
       await new Promise((r) => setTimeout(r, 9000)); // 等页面加载 + hook 注入
     } catch { return; }
@@ -1980,6 +1998,104 @@ async function collectQualityViaPage(origin, mallId) {
   } catch (e) { console.warn("[sw] quality page-world err", e?.message || e); }
   await new Promise((r) => setTimeout(r, 4000)); // 等 hook 抓 + flush
   if (opened) { try { await chrome.tabs.remove(tab.id); } catch {} }
+}
+
+// ---------- Sydney 活动总览采集(queryMallActivityOverView,咕噜噜同源) ----------
+// 页面注入方式：在 kuajingmaihuo 标签页内发 fetch，hook 自动拦截上报（需 cookie + anti-content）。
+// SW 直接 fetch 会 403，必须走页面上下文。
+async function collectActivityOverview() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_OVERVIEW_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ACTIVITY_OVERVIEW_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ACTIVITY_OVERVIEW_RUN_INTERVAL_MS) return { ok: true, skipped: "interval" };
+
+  let malls = [];
+  try {
+    const tr = await fetch(`${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/activity-targets?limit=${ACTIVITY_LIBRARY_TARGET_LIMIT}`, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!tr.ok) return { ok: false, reason: `targets_http_${tr.status}` };
+    const td = await tr.json().catch(() => null);
+    const seen = new Set();
+    for (const t of (Array.isArray(td?.targets) ? td.targets : [])) {
+      const mid = String(t?.mall_id || t?.mallId || "").trim();
+      if (!mid || seen.has(mid)) continue;
+      seen.add(mid);
+      malls.push({ mallId: mid, site: t?.site || "agentseller" });
+    }
+  } catch { return { ok: false, reason: "targets_failed" }; }
+  if (!malls.length) return { ok: true, reason: "no_malls" };
+
+  // 找到或打开 kuajingmaihuo 标签页
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({ url: "https://seller.kuajingmaihuo.com/*" }); } catch {}
+  let tab = (tabs || []).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  let opened = false;
+  if (!tab) {
+    try {
+      tab = await createBackgroundTab("https://seller.kuajingmaihuo.com/main/activity-center");
+      opened = true;
+      await new Promise((r) => setTimeout(r, 9000));
+    } catch { return { ok: false, reason: "no_kuajingmaihuo_tab" }; }
+  }
+
+  const start = Number(state.cursor || 0) % malls.length;
+  const slice = [];
+  for (let i = 0; i < ACTIVITY_OVERVIEW_MALLS_PER_RUN && i < malls.length; i++) slice.push(malls[(start + i) % malls.length]);
+  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now, cursor: (start + ACTIVITY_OVERVIEW_MALLS_PER_RUN) % malls.length, total_malls: malls.length } });
+
+  // 在页面内注入 fetch 调用，hook 会自动拦截响应并上报
+  let totalFetched = 0;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      args: [slice.map((m) => m.mallId), ACTIVITY_OVERVIEW_PAGE_SIZE, ACTIVITY_OVERVIEW_MAX_PAGES],
+      func: async (mallIds, pageSize, maxPages) => {
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        let fetched = 0;
+        for (const mallId of mallIds) {
+          // 1. 活动类型列表
+          try {
+            await fetch("/sydney/api/activity/queryMallActivityTypeList", {
+              method: "POST", credentials: "include", cache: "no-store",
+              headers: { "Content-Type": "application/json", mallid: mallId },
+              body: JSON.stringify({}),
+            });
+            fetched++;
+          } catch {}
+          await delay(300);
+          // 2. 分页拉活动总览
+          for (let page = 1; page <= maxPages; page++) {
+            try {
+              const resp = await fetch("/sydney/api/activity/queryMallActivityOverView", {
+                method: "POST", credentials: "include", cache: "no-store",
+                headers: { "Content-Type": "application/json", mallid: mallId },
+                body: JSON.stringify({ pageNo: page, pageSize }),
+              });
+              const data = await resp.json();
+              fetched++;
+              const res = data?.result || data || {};
+              const list = res.overViewVOList || res.list || res.activityList || [];
+              const total = Number(res.totalNum || res.total || 0);
+              if (!Array.isArray(list) || !list.length || page * pageSize >= total) break;
+            } catch { break; }
+            await delay(400);
+          }
+          await delay(500);
+        }
+        return fetched;
+      },
+    });
+    totalFetched = results?.[0]?.result || 0;
+  } catch (e) { console.warn("[sw] activity-overview page-inject err:", e?.message || e); }
+
+  await new Promise((r) => setTimeout(r, 4000)); // 等 hook 捕获 + flush
+  if (opened) { try { await chrome.tabs.remove(tab.id); } catch {} }
+
+  console.log(`[sw] activity-overview page-inject done: fetched=${totalFetched} malls=${slice.length}`);
+  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now, last_success_at: totalFetched > 0 ? Date.now() : (state.last_success_at || 0), cursor: (start + ACTIVITY_OVERVIEW_MALLS_PER_RUN) % malls.length, total_malls: malls.length, last_malls: slice.length, last_fetched: totalFetched } });
+  if (totalFetched > 0) await flush();
+  return { ok: true, malls: slice.length, fetched: totalFetched };
 }
 
 // ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------
@@ -4091,4 +4207,4 @@ async function collectActivityGoodsViaTab() {
   return { ok: true, success, enqueuedCount, lastError };
 }
 
-self._dbg = { collectSiteExceptionsViaPage, collectProductsAndAfterSalesViaPage, collectShopStatsFromTargets, flush, bootEnrollSkcProbe, collectEnrollRecords, collectActivityGoodsViaTab, collectPriceAdjustActivities };
+self._dbg = { collectSiteExceptionsViaPage, collectProductsAndAfterSalesViaPage, collectShopStatsFromTargets, flush, bootEnrollSkcProbe, collectEnrollRecords, collectActivityGoodsViaTab, collectPriceAdjustActivities, collectActivityOverview };
