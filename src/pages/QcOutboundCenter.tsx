@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import {
   Alert,
@@ -503,6 +503,59 @@ function UnifiedColumnSettings({
     </div>
   );
 }
+
+const SCROLL_CONFIG = { x: 2560, y: "max(300px, calc(100vh - 400px))" } as const;
+
+const SelectableConsignTable = React.memo(function SelectableConsignTable({
+  className, rowKey, columns, dataSource, scroll, onRow, expandable, pagination, loading,
+  selectedKeysRef, clearRef, onSelectionChange,
+}: {
+  className: string;
+  rowKey: (row: ConsignDeliverUnifiedRow) => string;
+  columns: ColumnsType<ConsignDeliverUnifiedRow>;
+  dataSource: ConsignDeliverUnifiedRow[];
+  scroll: typeof SCROLL_CONFIG;
+  onRow: (row: ConsignDeliverUnifiedRow) => any;
+  expandable: any;
+  pagination: any;
+  loading: boolean;
+  selectedKeysRef: React.MutableRefObject<string[]>;
+  clearRef: React.MutableRefObject<() => void>;
+  onSelectionChange: (keys: string[]) => void;
+}) {
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const getCheckboxProps = useCallback((row: ConsignDeliverUnifiedRow) => ({ disabled: !row.soId }), []);
+  const handleChange = useCallback((keys: React.Key[]) => {
+    const next = keys as string[];
+    setSelectedKeys(next);
+    selectedKeysRef.current = next;
+    startTransition(() => { onSelectionChange(next); });
+  }, [selectedKeysRef, onSelectionChange]);
+  clearRef.current = () => { setSelectedKeys([]); selectedKeysRef.current = []; };
+  const rowSelection = useMemo(() => ({
+    selectedRowKeys: selectedKeys,
+    onChange: handleChange,
+    preserveSelectedRowKeys: true,
+    getCheckboxProps,
+    columnWidth: 48,
+  }), [selectedKeys, handleChange, getCheckboxProps]);
+  return (
+    <Table
+      className={className}
+      rowKey={rowKey}
+      rowSelection={rowSelection}
+      size="middle"
+      virtual
+      loading={loading}
+      columns={columns}
+      dataSource={dataSource}
+      scroll={scroll}
+      onRow={onRow}
+      expandable={expandable}
+      pagination={pagination}
+    />
+  );
+});
 
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
@@ -1158,7 +1211,10 @@ export default function QcOutboundCenter() {
   }, [unifiedItemsCache, unifiedItemsLoading, cloudItemsCache, cloudItemsLoading, itemShipDraft, itemShipSaving, handleSetItemShipQty, handleSetCloudItemShipQty, canCreateOutbound]);
 
   // ── 官方发货工作流（勾选 + 批量按钮）：加入发货台 → 创建发货单 → 确认发货 ──
+  const selectedKeysRef = useRef<string[]>([]);
+  const clearTableSelectionRef = useRef<() => void>(() => {});
   const [selectedShipKeys, setSelectedShipKeys] = useState<string[]>([]);
+  const onTableSelectionChange = useCallback((keys: string[]) => { setSelectedShipKeys(keys); }, []);
   // 本会话发货状态：soId → { stage:'staged'|'created'|'shipped', deliveryOrderSn, subWarehouseId, receiveAddressInfo, deliveryAddressId, expressBatchSn }
   const [officialShipState, setOfficialShipState] = useState<Record<string, any>>({});
   const [shipBatchBusy, setShipBatchBusy] = useState(false);
@@ -1182,11 +1238,13 @@ export default function QcOutboundCenter() {
   // 装箱弹窗：查看/编辑某发货单的分箱（单箱模式，改各 SKU 发货数量）。
   const [packageModal, setPackageModal] = useState<{ open: boolean; soId: string; mallId: string; deliveryOrderSn: string; loading: boolean; saving: boolean; rows: Array<{ productSkuId: string; skuNum: number }> } | null>(null);
 
-  // 勾选行里属于「官方单」（有店铺 + 备货单号）的行。
+  // 勾选行里属于「官方单」（有店铺 + 备货单号）的行（UI 显示用，由 transition 更新）。
   const selectedShipRows = useMemo(
     () => unifiedRows.filter((r) => r.soId && selectedShipKeys.includes(r.soId) && r.rawCloud?.mall_id),
     [unifiedRows, selectedShipKeys],
   );
+  const getSelectedShipRows = useCallback(() => unifiedRows.filter((r) => r.soId && selectedKeysRef.current.includes(r.soId) && r.rawCloud?.mall_id), [unifiedRows]);
+  const clearSelection = useCallback(() => { setSelectedShipKeys([]); clearTableSelectionRef.current(); }, []);
 
   // 官方发货阶段：优先本会话 state，回退 rawCloud 线上/erp 字段。
   const getShipStage = useCallback((row: ConsignDeliverUnifiedRow): "none" | "staged" | "created" | "shipped" => {
@@ -1202,7 +1260,7 @@ export default function QcOutboundCenter() {
   // 批量「加入发货台」：对勾选官方单串行 staging.add。
   const handleBatchStaging = useCallback(async () => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
-    const rows = selectedShipRows;
+    const rows = getSelectedShipRows();
     if (!rows.length) { message.warning("请先勾选官方单"); return; }
     const SHIPPED_STATUSES = ["已发货", "已收货", "已入库", "取消"];
     const eligible = rows.filter((r) => { const s = r.rawCloud?.temu_status || ""; return s && !SHIPPED_STATUSES.some((x) => s.includes(x)); });
@@ -1227,12 +1285,12 @@ export default function QcOutboundCenter() {
     const summary = `加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}${skipped ? `、跳过 ${skipped}` : ""}`;
     if (fail) message.warning(`${summary}。${fails.join("；")}`, 8);
     else message.success(summary);
-  }, [selectedShipRows, erp]);
+  }, [getSelectedShipRows, erp]);
 
   // 打开「创建发货单」弹窗：筛选可处理行 + 加载发货仓库 + SKU 明细。
   const openCreateShipModal = useCallback(async () => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
-    const rows = selectedShipRows;
+    const rows = getSelectedShipRows();
     if (!rows.length) { message.warning("请先勾选官方单"); return; }
     const SHIPPED_STATUSES = ["已发货", "已收货", "已入库", "取消"];
     const eligible = rows.filter((r) => { const s = r.rawCloud?.temu_status || ""; return s && !SHIPPED_STATUSES.some((x) => s.includes(x)); });
@@ -1266,7 +1324,7 @@ export default function QcOutboundCenter() {
       message.warning(`加载数据失败：${cleanIpcError(e)}`);
       setCreateShipModal((s) => s ? { ...s, loading: false } : s);
     }
-  }, [selectedShipRows, erp, cloudItemsCache]);
+  }, [getSelectedShipRows, erp, cloudItemsCache]);
 
   // 确认创建发货单：按弹窗设置批量执行。
   const confirmCreateShip = useCallback(async () => {
@@ -1396,7 +1454,8 @@ export default function QcOutboundCenter() {
   // 工具栏「确认发货」：对勾选行批量做本地确认发货（扣 ERP 库存；jst 走 o_id，cloud 走 mall_id+soId）。
   const handleBatchConsignShip = useCallback(async () => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
-    const rows = unifiedRows.filter((r) => r.soId && selectedShipKeys.includes(r.soId) && !r.inventoryDeducted);
+    const keys = selectedKeysRef.current;
+    const rows = unifiedRows.filter((r) => r.soId && keys.includes(r.soId) && !r.inventoryDeducted);
     if (!rows.length) { message.warning("勾选项里没有「未确认发货」的单"); return; }
     setShipBatchBusy(true);
     const hide = message.loading(`确认发货中…（${rows.length} 单）`, 0);
@@ -1416,20 +1475,20 @@ export default function QcOutboundCenter() {
     }
     hide();
     setShipBatchBusy(false);
-    // 乐观更新成功的行（含已扣过的），与单行确认发货一致：不重查，等物化快照刷新。
     setUnifiedSnapshot((snap) => ({
       ...snap,
       rows: snap.rows.map((r) => (r.soId && doneIds.has(r.soId)) ? { ...r, inventoryDeducted: true, localStatusOverride: "已发货", status: "已发货" } : r),
     }));
-    setSelectedShipKeys([]);
+    clearSelection();
     if (fail) message.warning(`确认发货完成：成功 ${ok}、跳过(已扣) ${skip}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
     else message.success(`确认发货完成：成功 ${ok}、跳过(已扣) ${skip}`);
-  }, [unifiedRows, selectedShipKeys, erp]);
+  }, [unifiedRows, erp, clearSelection]);
 
   // 工具栏「批量撤销」：对勾选的已发货行批量撤销本地确认发货（回补 ERP 库存）。
   const handleBatchUnship = useCallback(async () => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
-    const rows = unifiedRows.filter((r) => r.soId && selectedShipKeys.includes(r.soId) && r.inventoryDeducted);
+    const keys = selectedKeysRef.current;
+    const rows = unifiedRows.filter((r) => r.soId && keys.includes(r.soId) && r.inventoryDeducted);
     if (!rows.length) { message.warning("勾选项里没有「已确认发货」的单可撤销"); return; }
     setShipBatchBusy(true);
     const hide = message.loading(`撤销发货中…（${rows.length} 单）`, 0);
@@ -1453,10 +1512,10 @@ export default function QcOutboundCenter() {
       ...snap,
       rows: snap.rows.map((r) => (r.soId && doneIds.has(r.soId)) ? { ...r, inventoryDeducted: false, localStatusOverride: null, status: r.rawCloud?.temu_status || r.rawJst?.status || r.status } : r),
     }));
-    setSelectedShipKeys([]);
+    clearSelection();
     if (fail) message.warning(`撤销完成：成功 ${ok}、跳过 ${skip}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
     else message.success(`撤销发货完成：成功 ${ok}、跳过(未扣) ${skip}`);
-  }, [unifiedRows, selectedShipKeys, erp]);
+  }, [unifiedRows, erp, clearSelection]);
 
   const handlePrintBoxmark = useCallback(async (row: ConsignDeliverUnifiedRow) => {
     if (!erp?.inventory?.action || !row.soId || !row.rawCloud?.mall_id) return;
@@ -1554,7 +1613,7 @@ export default function QcOutboundCenter() {
   // 取消备货单（批量，对勾选官方单；后端只对「待接单」生效，其它状态平台忽略）。
   const handleCancelPurchase = useCallback(() => {
     if (!erp?.inventory?.action) return;
-    const rows = selectedShipRows;
+    const rows = getSelectedShipRows();
     if (!rows.length) { message.warning("请先勾选要取消备货的官方单"); return; }
     Modal.confirm({
       title: `取消 ${rows.length} 个备货单？`,
@@ -1573,7 +1632,7 @@ export default function QcOutboundCenter() {
         message[fail ? "warning" : "success"](`取消备货完成：成功 ${ok}、失败/忽略 ${fail}`);
       },
     });
-  }, [selectedShipRows, erp]);
+  }, [getSelectedShipRows, erp]);
 
   // 更新确认发货弹窗某行字段。
   const updateConfirmRow = useCallback((soId: string, patch: any) => {
@@ -1620,7 +1679,7 @@ export default function QcOutboundCenter() {
         hide();
         setShipBatchBusy(false);
         setConfirmShipOpen(false);
-        setSelectedShipKeys([]);
+        clearSelection();
         if (fail) message.warning(`发货完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
         else message.success(`发货成功：${ok} 单`);
       },
@@ -1942,15 +2001,6 @@ export default function QcOutboundCenter() {
     });
   }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage, parsedAddrCache]);
 
-  const getCheckboxProps = useCallback((row: ConsignDeliverUnifiedRow) => ({ disabled: !row.soId }), []);
-  const handleSelectionChange = useCallback((keys: React.Key[]) => setSelectedShipKeys(keys as string[]), []);
-  const unifiedRowSelection = useMemo(() => ({
-    selectedRowKeys: selectedShipKeys,
-    onChange: handleSelectionChange,
-    preserveSelectedRowKeys: true,
-    getCheckboxProps,
-  }), [selectedShipKeys, handleSelectionChange, getCheckboxProps]);
-
   const handleOnRow = useCallback((row: ConsignDeliverUnifiedRow) => ({
     onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); },
   }), [loadUnifiedItems, loadCloudItems]);
@@ -2161,18 +2211,19 @@ export default function QcOutboundCenter() {
                   <Button size="small" disabled={!selectedShipRows.length} danger onClick={() => handleCancelShipOrderBySoId(selectedShipRows[0])}>撤销发货单</Button>
                   <Button size="small" disabled={!selectedShipRows.length} onClick={() => handlePrintExpressNote(selectedShipRows[0])}>打印面单</Button>
                 </div>
-                <Table
+                <SelectableConsignTable
                   className="erp-compact-table consign-unified-table"
                   rowKey={unifiedRowKey}
-                  rowSelection={unifiedRowSelection}
-                  size="middle"
                   loading={unifiedLoading}
                   columns={cloudStockColumns}
                   dataSource={unifiedRows}
-                  scroll={{ x: 2560, y: "max(300px, calc(100vh - 400px))" }}
+                  scroll={SCROLL_CONFIG}
                   onRow={handleOnRow}
                   expandable={unifiedExpandable}
                   pagination={unifiedPagination}
+                  selectedKeysRef={selectedKeysRef}
+                  clearRef={clearTableSelectionRef}
+                  onSelectionChange={onTableSelectionChange}
                 />
               </Space>
             ),
