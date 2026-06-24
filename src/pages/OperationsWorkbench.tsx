@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState, useTransition } from "react";
-import { Alert, Button, Card, Empty, Image, Modal, Popover, Progress, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Image, InputNumber, Modal, Popover, Progress, Segmented, Select, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, diagnose, fmtNum, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
+import { NoSearchSelect, QUALITY_SITE_LABEL, LEVEL_COLOR, TAG_COLOR, RISK_TYPE_LABEL, SEV_COLOR, SEV_TEXT, SEV_RANK, KIND_LABEL, ACTIVITY_TYPE_LABEL, diagnose, fmtNum, fmtMoney, calcAdvice, sellThroughDays, isSlowMoving } from "../utils/opsWorkbench";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -398,9 +398,12 @@ export default function OperationsWorkbench() {
     jumpWorkbench("risk", nameQuery || codeQuery || productQuery);
   }, [jumpWorkbench, setProdSeg]);
   const [actStatusFilter, setActStatusFilter] = useState<string>("进行中");
+  const [enrollProdKey, setEnrollProdKey] = useState<string | null>(null);
+  const [selActRows, setSelActRows] = useState<ActivityRow[]>([]);
+  const [enrollBusy, setEnrollBusy] = useState(false);
+  const [batchPrice, setBatchPrice] = useState<number | null>(null);
+  const [batchStock, setBatchStock] = useState<number | null>(null);
   const navigate = useNavigate();
-
-
 
   // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
   const openFlawImages = useCallback(async (mallId: string, qcBillId: string) => {
@@ -507,7 +510,7 @@ export default function OperationsWorkbench() {
     return v; // 后端已按 店→可报活动数 排序
   }, [actProducts, storeFilter, kindFilter, search, inScope]);
 
-  type ActFlatRow = { key: string; store_code: string | null; mall_id: string; mall_name: string | null; product_name: string | null; sku_ext_code: string; thumb: string | null } & ActivityDetail;
+  type ActFlatRow = { key: string; _prodKey: string; store_code: string | null; mall_id: string; mall_name: string | null; product_name: string | null; sku_ext_code: string | null; thumb: string | null } & ActivityDetail;
   const actFlatView = useMemo(() => {
     if (activeTab !== "activity") return [] as ActFlatRow[];
     const rows: ActFlatRow[] = [];
@@ -516,7 +519,7 @@ export default function OperationsWorkbench() {
       if (storeFilter !== "all" && p.store_code !== storeFilter) continue;
       for (const a of p.activities) {
         if (a.status === "已结束") continue;
-        rows.push({ ...a, key: `${p.key}|${a.activity_id || a.title || rows.length}`, store_code: p.store_code, mall_id: p.mall_id, mall_name: p.mall_name, product_name: p.product_name, sku_ext_code: p.sku_ext_code, thumb: p.thumb });
+        rows.push({ ...a, key: `${p.key}|${a.activity_id || a.title || rows.length}`, _prodKey: p.key, store_code: p.store_code, mall_id: p.mall_id, mall_name: p.mall_name, product_name: p.product_name, sku_ext_code: p.sku_ext_code, thumb: p.thumb });
       }
     }
     return rows;
@@ -537,13 +540,13 @@ export default function OperationsWorkbench() {
     if (actStatusFilter !== "全部") v = v.filter(r => r.status === actStatusFilter);
     const kw = search.trim().toLowerCase();
     if (kw) v = v.filter(r => [r.product_name, r.sku_ext_code, r.title].some(x => (x || "").toLowerCase().includes(kw)));
-    const sorted = [...v].sort((a, b) => (a.store_code || a.mall_id).localeCompare(b.store_code || b.mall_id) || a.sku_ext_code.localeCompare(b.sku_ext_code));
+    const sorted = [...v].sort((a, b) => a._prodKey.localeCompare(b._prodKey));
     const out = sorted.map(r => ({ ...r, _prodSpan: 1 }));
     let i = 0;
     while (i < out.length) {
-      const gk = `${out[i].store_code || out[i].mall_id}|${out[i].sku_ext_code}`;
+      const gk = out[i]._prodKey;
       let j = i + 1;
-      while (j < out.length && `${out[j].store_code || out[j].mall_id}|${out[j].sku_ext_code}` === gk) j++;
+      while (j < out.length && out[j]._prodKey === gk) j++;
       out[i]._prodSpan = j - i;
       for (let k = i + 1; k < j; k++) out[k]._prodSpan = 0;
       i = j;
@@ -551,6 +554,146 @@ export default function OperationsWorkbench() {
     return out;
   }, [actFlatView, actStatusFilter, search]);
 
+  const enrollProduct = useMemo(() => enrollProdKey ? actProducts.find(p => p.key === enrollProdKey) ?? null : null, [enrollProdKey, actProducts]);
+  type ModalActRow = ActivityRow & { enroll_at: string | null; sites: string[]; skus: ActivitySkuDetail[] };
+  const modalActRows = useMemo<ModalActRow[]>(() => {
+    if (!enrollProduct) return [];
+    return enrollProduct.activities.map((a, i) => ({
+      mall_id: enrollProduct.mall_id, store_code: enrollProduct.store_code, mall_name: enrollProduct.mall_name,
+      kind: a.kind, title: a.title, status: a.status, activity_id: a.activity_id,
+      product_id: enrollProduct.product_id, activity_type: a.activity_type, sku_id: a.sku_id,
+      sku_ext_code: enrollProduct.sku_ext_code, skc_id: enrollProduct.skc_id, color_spec: (enrollProduct as any).color_spec ?? null,
+      product_name: enrollProduct.product_name, thumb: enrollProduct.thumb,
+      signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
+      activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: i,
+      enroll_at: a.enroll_at, sites: a.sites || [], skus: a.skus || [],
+    }));
+  }, [enrollProduct]);
+  const [modalStatusFilter, setModalStatusFilter] = useState<string>("全部");
+  const [enrollDraft, setEnrollDraft] = useState<Record<string, { price?: number; stock?: number }>>(() => {
+    try { return JSON.parse(localStorage.getItem("ow_enroll_draft") || "{}"); } catch { return {}; }
+  });
+  const enrollKey = useCallback((r: ActivityRow) => `${r.mall_id}|${r.activity_id || r.kind || ""}|${r.sku_ext_code || r.skc_id || ""}`, []);
+  const setDraft = useCallback((key: string, patch: { price?: number | null; stock?: number | null }) => {
+    setEnrollDraft(prev => {
+      const cur = { ...(prev[key] || {}) };
+      if ("price" in patch) { if (patch.price == null) delete cur.price; else cur.price = patch.price; }
+      if ("stock" in patch) { if (patch.stock == null) delete cur.stock; else cur.stock = patch.stock; }
+      const next = { ...prev, [key]: cur };
+      try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch { /* */ }
+      return next;
+    });
+  }, []);
+  const effPrice = useCallback((r: ActivityRow): number | null => {
+    const d = enrollDraft[enrollKey(r)]?.price;
+    return d != null ? d : (r.suggested_price != null ? r.suggested_price : r.signup_price);
+  }, [enrollDraft, enrollKey]);
+  const skuMinStock = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of actRows) {
+      const s = Number(r.activity_stock);
+      if (!r.sku_ext_code || !Number.isFinite(s) || s <= 0) continue;
+      const cur = m.get(r.sku_ext_code);
+      if (cur == null || s < cur) m.set(r.sku_ext_code, s);
+    }
+    return m;
+  }, [actRows]);
+  const effStock = useCallback((r: ActivityRow): number => {
+    const d = enrollDraft[enrollKey(r)]?.stock;
+    if (d != null) return d;
+    if (r.sku_ext_code && skuMinStock.has(r.sku_ext_code)) return skuMinStock.get(r.sku_ext_code)!;
+    return r.activity_stock || 0;
+  }, [enrollDraft, enrollKey, skuMinStock]);
+  const submitViaExtension = useCallback(async () => {
+    const rows = selActRows;
+    if (!rows.length) { message.warning("请先勾选要报名的行"); return; }
+    const api = window.electronAPI?.erp?.enroll?.create;
+    if (!api) { message.error("当前桌面端不支持(请重启/更新应用)"); return; }
+    const bad = rows.filter(r => !r.product_id || !r.skc_id || !r.sku_id || !r.activity_id);
+    if (bad.length) { message.error(`有 ${bad.length} 行缺 ID,走扩展路需完整 ID`); return; }
+    const noPrice = rows.filter(r => effPrice(r) == null);
+    if (noPrice.length) { message.error(`有 ${noPrice.length} 行没填申报价`); return; }
+    const groups = new Map<string, { mall_id: string; activity_type: number | null; activity_thematic_id: string; prod: Map<string, { productId: number; activityStock: number; skc: Map<string, Map<string, number>> }> }>();
+    for (const r of rows) {
+      const k = `${r.mall_id}|${r.activity_id}|${r.activity_type ?? ""}`;
+      if (!groups.has(k)) groups.set(k, { mall_id: r.mall_id, activity_type: r.activity_type, activity_thematic_id: r.activity_id!, prod: new Map() });
+      const g = groups.get(k)!;
+      if (!g.prod.has(r.product_id!)) g.prod.set(r.product_id!, { productId: Number(r.product_id), activityStock: effStock(r), skc: new Map() });
+      const pe = g.prod.get(r.product_id!)!;
+      pe.activityStock = effStock(r);
+      if (!pe.skc.has(r.skc_id!)) pe.skc.set(r.skc_id!, new Map());
+      pe.skc.get(r.skc_id!)!.set(r.sku_id!, Math.round(effPrice(r)! * 100));
+    }
+    const tasks = [...groups.values()].map(g => ({
+      mall_id: g.mall_id, site: "agentseller", activity_type: g.activity_type, activity_thematic_id: g.activity_thematic_id,
+      product_list: [...g.prod.values()].map(pe => ({
+        productId: pe.productId, activityStock: pe.activityStock,
+        skcList: [...pe.skc.entries()].map(([skcId, skuMap]) => ({ skcId: Number(skcId), skuList: [...skuMap.entries()].map(([skuId, activityPrice]) => ({ skuId: Number(skuId), activityPrice })) })),
+      })),
+    }));
+    const lossRows = rows.filter(r => { const p = effPrice(r); return p != null && r.cost != null && p < r.cost; });
+    Modal.confirm({
+      title: "下发报名任务(扩展执行)", width: 560,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p>共 <b>{rows.length}</b> 行 → <b>{tasks.length}</b> 个任务,下发到云端,由浏览器扩展自动报名。</p>
+          {lossRows.length > 0 && <p style={{ color: "#cf1322", fontWeight: 600 }}>{lossRows.length} 行申报价低于成本(亏本)</p>}
+          <p style={{ color: "#888" }}>需对应店铺的 Chrome 开着(装了扩展)才会执行。</p>
+        </div>
+      ),
+      okText: lossRows.length > 0 ? "仍然下发(含亏本)" : "下发任务",
+      okButtonProps: { danger: lossRows.length > 0 }, cancelText: "取消",
+      onOk: async () => {
+        setEnrollBusy(true);
+        try {
+          const resp = await api({ tasks });
+          const out = resp?.data?.rows || [];
+          const ok = out.filter((x: { ok: boolean }) => x.ok).length;
+          if (ok) { message.success(`已下发 ${ok}/${out.length} 个报名任务`); setSelActRows([]); }
+          else message.error("下发失败:" + (out[0]?.error || resp?.error || "未知"));
+        } catch (e: any) { message.error("下发失败:" + (e?.message || String(e))); }
+        finally { setEnrollBusy(false); }
+      },
+    });
+  }, [selActRows, effPrice, effStock]);
+  const modalFiltered = useMemo(() => {
+    if (modalStatusFilter === "全部") return modalActRows;
+    return modalActRows.filter(r => r.status === modalStatusFilter);
+  }, [modalActRows, modalStatusFilter]);
+  const modalStatusCounts = useMemo(() => {
+    const c: Record<string, number> = { "全部": modalActRows.length };
+    for (const r of modalActRows) { const s = r.status || "未知"; c[s] = (c[s] || 0) + 1; }
+    return c;
+  }, [modalActRows]);
+  const enrollColumns = useMemo<ColumnsType<ModalActRow>>(() => [
+    { title: "SKU属性集", key: "spec", width: 120, render: (_, r) => r.color_spec || <span style={{ color: "#bbb" }}>—</span> },
+    { title: "日常申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? `¥${v.toFixed(2)}` : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "活动申报价", key: "bid", width: 120, align: "right", render: (_, r) => {
+      const v = effPrice(r); const loss = v != null && r.cost != null && v < r.cost;
+      return <InputNumber size="small" min={0} step={0.01} precision={2} value={v ?? undefined} status={loss ? "error" : undefined} style={{ width: 100 }} onChange={val => setDraft(enrollKey(r), { price: val == null ? null : Number(val) })} />;
+    } },
+    { title: "报名时间", key: "enroll_at", width: 160, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
+    { title: "活动类型", key: "title", width: 280, ellipsis: true, render: (_, r) => {
+      const typeLabel = (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "";
+      return <span>{typeLabel ? typeLabel + " " : ""}{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</span>;
+    } },
+    { title: "报名场次", key: "sites", width: 260, render: (_, r) => {
+      const s = r.sites || [];
+      if (!s.length) return <span style={{ color: "#bbb" }}>—</span>;
+      const show = s.slice(0, 2);
+      const rest = s.length - 2;
+      return (<div style={{ fontSize: 12, lineHeight: "20px" }}>
+        {show.map((n, i) => <div key={i}>{n}</div>)}
+        {rest > 0 && <Popover trigger="click" title={`全部场次 (${s.length})`} content={<div style={{ maxHeight: 300, overflow: "auto", fontSize: 13, lineHeight: "24px" }}>{s.map((n, i) => <div key={i}>{n}</div>)}</div>}><a style={{ fontSize: 12 }}>更多 (+{rest})</a></Popover>}
+      </div>);
+    } },
+    { title: "提报数量", dataIndex: "activity_stock", width: 90, align: "right", render: (v: number) => v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span> },
+    { title: "剩余数量", key: "stock", width: 110, align: "right", render: (_, r) => <InputNumber size="small" min={0} precision={0} value={effStock(r)} style={{ width: 80 }} onChange={val => setDraft(enrollKey(r), { stock: val == null ? null : Number(val) })} /> },
+    { title: "活动状态", key: "status", width: 80, render: (_, r) => {
+      const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
+      return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : s === "已结束" ? "default" : "default"} style={{ margin: 0 }}>{s}</Tag>;
+    } },
+  ], [effPrice, effStock, setDraft, enrollKey]);
 
   // 活动概览顶部汇总(我的店范围):优先用 temu_shop_stats 官方统计,全 0 时 fallback 到 actProductView 前端聚合
 
@@ -886,8 +1029,8 @@ export default function OperationsWorkbench() {
               if (!dm.has(p.date)) dm.set(p.date, { date: p.date });
               const row = dm.get(p.date)!;
               row[`expose_${label}`] = p.expose;
-              row[`ctr_${label}`] = p.ctr != null ? +(p.ctr * 100).toFixed(1) : null;
-              row[`cvr_${label}`] = p.click_pay_rate != null ? +(p.click_pay_rate * 100).toFixed(1) : null;
+              row[`ctr_${label}`] = p.ctr != null ? +p.ctr.toFixed(1) : null;
+              row[`cvr_${label}`] = p.click_pay_rate != null ? +p.click_pay_rate.toFixed(1) : null;
             });
           });
           setFlowTrendRows([...dm.values()].sort((a, b) => a.date.localeCompare(b.date)));
@@ -1164,7 +1307,7 @@ export default function OperationsWorkbench() {
                       {r.thumb ? <Image src={r.thumb} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
                       <div style={{ minWidth: 0, flex: 1 }}>
                         <div style={{ fontSize: 12, color: "#555", lineHeight: "18px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.product_name || "—"}</div>
-                        <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text>
+                        <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code || "—"}</Typography.Text>
                       </div>
                     </div>
                   ) : null },
@@ -1186,6 +1329,7 @@ export default function OperationsWorkbench() {
                     const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
                     return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : "default"} style={{ margin: 0 }}>{s}</Tag>;
                   } },
+                  { title: "操作", key: "op", width: 70, fixed: "right" as const, onCell: (r) => ({ rowSpan: r._prodSpan }), render: (_, r) => r._prodSpan > 0 ? <Button size="small" type="link" onClick={() => { setEnrollProdKey(r._prodKey); setSelActRows([]); }}>报名</Button> : null },
                 ]}
               />
             )
@@ -1239,7 +1383,7 @@ export default function OperationsWorkbench() {
                       <CartesianGrid {...gridProps} />
                       <XAxis {...xProps} />
                       <YAxis tick={{ fontSize: 10 }} allowDecimals={false} tickFormatter={(v: number) => v >= 10000 ? `${(v / 10000).toFixed(1)}万` : v.toLocaleString()} />
-                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [v?.toLocaleString(), name.replace("expose_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [v?.toLocaleString(), name.replace("expose_", "")]} labelFormatter={(l: string) => l} />
                       <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("expose_", "")} />
                       {active.map(r => (
                         <Area key={r.key} type="monotone" dataKey={`expose_${r.key}`} name={`expose_${r.key}`} stroke={r.color} strokeWidth={2} fill={`url(#grad_expose_${r.key})`} dot={{ r: 2.5, fill: r.color, strokeWidth: 0 }} activeDot={{ r: 5 }} connectNulls />
@@ -1252,7 +1396,7 @@ export default function OperationsWorkbench() {
                       <CartesianGrid {...gridProps} />
                       <XAxis {...xProps} />
                       <YAxis tick={{ fontSize: 10 }} unit="%" />
-                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("ctr_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("ctr_", "")]} labelFormatter={(l: string) => l} />
                       <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("ctr_", "")} />
                       {active.map(r => (
                         <Line key={r.key} type="monotone" dataKey={`ctr_${r.key}`} name={`ctr_${r.key}`} stroke={r.color} strokeWidth={2} dot={{ r: 3, fill: "#fff", stroke: r.color, strokeWidth: 2 }} activeDot={{ r: 5 }} connectNulls />
@@ -1265,7 +1409,7 @@ export default function OperationsWorkbench() {
                       <CartesianGrid {...gridProps} />
                       <XAxis {...xProps} />
                       <YAxis tick={{ fontSize: 10 }} unit="%" />
-                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("cvr_", "")]} labelFormatter={(l: string) => `📅 ${l}`} />
+                      <RTooltip {...tipStyle} formatter={(v: number, name: string) => [`${v}%`, name.replace("cvr_", "")]} labelFormatter={(l: string) => l} />
                       <Legend iconType="circle" iconSize={8} formatter={(v: string) => v.replace("cvr_", "")} />
                       {active.map(r => (
                         <Line key={r.key} type="monotone" dataKey={`cvr_${r.key}`} name={`cvr_${r.key}`} stroke={r.color} strokeWidth={2} dot={{ r: 3, fill: "#fff", stroke: r.color, strokeWidth: 2 }} activeDot={{ r: 5 }} connectNulls />
@@ -1299,7 +1443,7 @@ export default function OperationsWorkbench() {
     // 风险待办 Tab
     sevFilter, setSevFilter,
     // 活动报名 Tab
-    actFiltered, actStatusCounts, actStatusFilter, actLoading,
+    actFiltered, actStatusCounts, actStatusFilter, actLoading, setEnrollProdKey, setSelActRows,
     // 流量 Tab
     flowView, flowColumns, flowLoading, flowSiteFilter, setFlowSiteFilter,
     flowDateFilter, setFlowDateFilter, flowDates,
@@ -1325,6 +1469,31 @@ export default function OperationsWorkbench() {
       <div style={{ display: "none" }}>
         <Image.PreviewGroup items={flawPreviewImages} preview={{ visible: flawPreviewVisible, onVisibleChange: (v) => setFlawPreviewVisible(v) }} />
       </div>
+      <Modal open={!!enrollProdKey} onCancel={() => { setEnrollProdKey(null); setSelActRows([]); }} width={1180} destroyOnClose
+        title={enrollProduct ? `报名活动 · ${enrollProduct.product_name || enrollProduct.sku_ext_code}` : ""}
+        footer={[
+          <Button key="cancel" size="small" onClick={() => { setEnrollProdKey(null); setSelActRows([]); }}>取消</Button>,
+          <Button key="submit" type="primary" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitViaExtension}>下发扩展报名 ({selActRows.length})</Button>,
+        ]}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 12 }}>
+          {["全部", "进行中", "未开始"].map(s => (
+            <Button key={s} size="small" type={modalStatusFilter === s ? "primary" : "default"}
+              onClick={() => setModalStatusFilter(s)}>{s}{modalStatusCounts[s] ? ` (${modalStatusCounts[s]})` : ""}</Button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+          <Button size="small" onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { const p = r.suggested_price ?? r.signup_price; if (p == null) continue; next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: p }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>按参考价填全部</Button>
+          <InputNumber size="small" min={0} step={0.01} precision={2} prefix="¥" placeholder="批量申报价" value={batchPrice ?? undefined} style={{ width: 120 }} onChange={v => setBatchPrice(v == null ? null : Number(v))} />
+          <Button size="small" disabled={batchPrice == null} onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: batchPrice! }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>填全部</Button>
+          <InputNumber size="small" min={0} precision={0} placeholder="批量库存" value={batchStock ?? undefined} style={{ width: 110 }} onChange={v => setBatchStock(v == null ? null : Number(v))} />
+          <Button size="small" disabled={batchStock == null} onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), stock: batchStock! }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>填库存</Button>
+        </div>
+        <Table dataSource={modalFiltered} columns={enrollColumns} rowKey={r => String(r.__rk)} size="small"
+          rowSelection={{ selectedRowKeys: selActRows.map(r => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ModalActRow[]) }}
+          pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50], showTotal: t => `共 ${t} 条` }}
+          scroll={{ x: 1400 }} locale={{ emptyText: "暂无活动数据" }} />
+        {modalActRows.some(r => !r.activity_id) && <div style={{ fontSize: 12, color: "#d46b08", marginTop: 8 }}>另有 {modalActRows.filter(r => !r.activity_id).length} 个活动缺活动ID,暂时无法报名。</div>}
+      </Modal>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
         {trendModalLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>

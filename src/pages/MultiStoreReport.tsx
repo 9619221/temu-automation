@@ -915,6 +915,26 @@ export default function MultiStoreReport() {
     if (activeTab === "warehouse" && !invLoaded && !invLoading) loadWarehouseInventory();
   }, [activeTab, invLoaded, invLoading, loadWarehouseInventory]);
 
+  const temuValueByStore = useMemo(() => {
+    const m = new Map<string, { wh: number; transit: number }>();
+    const add = (key: string, wh: number, tr: number) => {
+      const prev = m.get(key) || { wh: 0, transit: 0 };
+      m.set(key, { wh: prev.wh + wh, transit: prev.transit + tr });
+    };
+    for (const s of stores) {
+      const wh = s.inventory?.warehouse_value || 0;
+      const tr = s.inventory?.in_transit_value || 0;
+      if (!wh && !tr) continue;
+      if (s.store_code) {
+        add(s.store_code, wh, tr);
+        add(s.store_code + "店", wh, tr);
+      }
+      if (s.mall_name) add(s.mall_name, wh, tr);
+      if (s.mall_id) add(s.mall_id, wh, tr);
+    }
+    return m;
+  }, [stores]);
+
   const skuStoreOptions = useMemo(() => {
     const set = new Set<string>();
     for (const r of skuRows) if (r.store_code) set.add(r.store_code);
@@ -1458,7 +1478,6 @@ export default function MultiStoreReport() {
             <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
               <Statistic title="总库存（件）" value={fmtNum(invSummary.total_qty)} />
               <Statistic title="可用库存" value={fmtNum(invSummary.available_qty)} valueStyle={{ color: COLOR.good }} />
-              <Statistic title="已预留" value={fmtNum(invSummary.reserved_qty)} valueStyle={invSummary.reserved_qty > 0 ? { color: "#d46b08" } : undefined} />
               <Statistic title="库存货值" value={fmtMoney(invSummary.total_value)} valueStyle={{ fontWeight: 600 }} />
               <Statistic title="SKU 总数" value={fmtNum(invSummary.sku_count)} />
             </div>
@@ -1470,18 +1489,16 @@ export default function MultiStoreReport() {
                 size="small"
                 icon={<DownloadOutlined />}
                 onClick={() => {
-                  const header = ["店铺账号", "SKU数", "可用", "预留待发", "冻结", "残次", "返工", "总库存", "库存货值", "批次数"];
-                  const body = invRows.map((r: any) => [
-                    r.account_name || r.account_id, r.sku_count, r.available_qty, r.reserved_qty,
-                    r.blocked_qty, r.defective_qty, r.rework_qty, r.total_qty,
-                    Number(r.stock_value.toFixed(2)), r.batch_count,
-                  ]);
-                  const total = invRows.reduce((a: any, r: any) => ({
-                    s: a.s + r.sku_count, av: a.av + r.available_qty, re: a.re + r.reserved_qty,
-                    bl: a.bl + r.blocked_qty, de: a.de + r.defective_qty, rw: a.rw + r.rework_qty,
-                    to: a.to + r.total_qty, va: a.va + r.stock_value, ba: a.ba + r.batch_count,
-                  }), { s: 0, av: 0, re: 0, bl: 0, de: 0, rw: 0, to: 0, va: 0, ba: 0 });
-                  body.push(["合计", total.s, total.av, total.re, total.bl, total.de, total.rw, total.to, Number(total.va.toFixed(2)), total.ba]);
+                  const header = ["店铺账号", "SKU数", "可用", "总库存", "库存货值", "仓内货值", "在途货值", "批次数"];
+                  const body = invRows.map((r: any) => { const tv = temuValueByStore.get(r.account_name); return [
+                    r.account_name || r.account_id, r.sku_count, r.available_qty, r.total_qty,
+                    Number(r.stock_value.toFixed(2)), Number((tv?.wh || 0).toFixed(2)), Number((tv?.transit || 0).toFixed(2)), r.batch_count,
+                  ]; });
+                  const total = invRows.reduce((a: any, r: any) => { const tv2 = temuValueByStore.get(r.account_name); return {
+                    s: a.s + r.sku_count, av: a.av + r.available_qty,
+                    to: a.to + r.total_qty, va: a.va + r.stock_value, wh: a.wh + (tv2?.wh || 0), tr: a.tr + (tv2?.transit || 0), ba: a.ba + r.batch_count,
+                  }; }, { s: 0, av: 0, to: 0, va: 0, wh: 0, tr: 0, ba: 0 });
+                  body.push(["合计", total.s, total.av, total.to, Number(total.va.toFixed(2)), Number(total.wh.toFixed(2)), Number(total.tr.toFixed(2)), total.ba]);
                   downloadCsv(`仓内库存_${new Date().toISOString().slice(0, 10)}.csv`, [header, ...body]);
                 }}
               >导出 CSV</Button>
@@ -1498,12 +1515,10 @@ export default function MultiStoreReport() {
               { title: "店铺账号", dataIndex: "account_name", width: 160, fixed: "left" as const, render: (v: string | null, r: any) => <Typography.Text strong>{v || r.account_id}</Typography.Text>, sorter: (a: any, b: any) => (a.account_name || a.account_id).localeCompare(b.account_name || b.account_id) },
               { title: "SKU 数", dataIndex: "sku_count", width: 80, align: "right" as const, render: (v: number) => fmtNum(v), sorter: (a: any, b: any) => a.sku_count - b.sku_count },
               { title: "可用", dataIndex: "available_qty", width: 100, align: "right" as const, render: (v: number) => <span style={{ color: COLOR.good }}>{fmtNum(v)}</span>, sorter: (a: any, b: any) => a.available_qty - b.available_qty },
-              { title: "预留待发", dataIndex: "reserved_qty", width: 100, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.reserved_qty - b.reserved_qty },
-              { title: "冻结", dataIndex: "blocked_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.bad }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.blocked_qty - b.blocked_qty },
-              { title: "残次", dataIndex: "defective_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.bad }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.defective_qty - b.defective_qty },
-              { title: "返工", dataIndex: "rework_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.warn }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.rework_qty - b.rework_qty },
               { title: "总库存", dataIndex: "total_qty", width: 100, align: "right" as const, render: (v: number) => <Typography.Text strong>{fmtNum(v)}</Typography.Text>, sorter: (a: any, b: any) => a.total_qty - b.total_qty, defaultSortOrder: "descend" as const },
-              { title: "库存货值", dataIndex: "stock_value", width: 130, align: "right" as const, render: (v: number) => <Typography.Text strong>{fmtMoney(v)}</Typography.Text>, sorter: (a: any, b: any) => a.stock_value - b.stock_value },
+              { title: "库存货值", dataIndex: "stock_value", width: 120, align: "right" as const, render: (v: number) => <Typography.Text strong>{fmtMoney(v)}</Typography.Text>, sorter: (a: any, b: any) => a.stock_value - b.stock_value },
+              { title: <Tooltip title="Temu 平台仓可售库存 × 加权均价"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>仓内货值</span></Tooltip>, key: "wh_value", width: 120, align: "right" as const, render: (_: any, r: any) => { const v = temuValueByStore.get(r.account_name)?.wh || 0; return v ? <span style={{ color: "#1677ff" }}>{fmtMoney(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>; }, sorter: (a: any, b: any) => (temuValueByStore.get(a.account_name)?.wh || 0) - (temuValueByStore.get(b.account_name)?.wh || 0) },
+              { title: <Tooltip title="送仓在途 × 加权均价"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>在途货值</span></Tooltip>, key: "transit_value", width: 120, align: "right" as const, render: (_: any, r: any) => { const v = temuValueByStore.get(r.account_name)?.transit || 0; return v ? <span style={{ color: "#d46b08" }}>{fmtMoney(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>; }, sorter: (a: any, b: any) => (temuValueByStore.get(a.account_name)?.transit || 0) - (temuValueByStore.get(b.account_name)?.transit || 0) },
               { title: "批次数", dataIndex: "batch_count", width: 80, align: "right" as const, render: (v: number) => fmtNum(v), sorter: (a: any, b: any) => a.batch_count - b.batch_count },
             ]}
             summary={() => {
@@ -1511,27 +1526,23 @@ export default function MultiStoreReport() {
               const t = invRows.reduce((acc, r) => ({
                 sku: acc.sku + r.sku_count,
                 avail: acc.avail + r.available_qty,
-                res: acc.res + r.reserved_qty,
-                blk: acc.blk + r.blocked_qty,
-                def: acc.def + r.defective_qty,
-                rew: acc.rew + r.rework_qty,
                 tot: acc.tot + r.total_qty,
                 val: acc.val + r.stock_value,
+                whv: acc.whv + (temuValueByStore.get(r.account_name)?.wh || 0),
+                trv: acc.trv + (temuValueByStore.get(r.account_name)?.transit || 0),
                 bat: acc.bat + r.batch_count,
-              }), { sku: 0, avail: 0, res: 0, blk: 0, def: 0, rew: 0, tot: 0, val: 0, bat: 0 });
+              }), { sku: 0, avail: 0, tot: 0, val: 0, whv: 0, trv: 0, bat: 0 });
               return (
                 <Table.Summary fixed>
                   <Table.Summary.Row style={{ fontWeight: 600, background: "#fafafa" }}>
                     <Table.Summary.Cell index={0}>合计</Table.Summary.Cell>
                     <Table.Summary.Cell index={1} align="right">{fmtNum(t.sku)}</Table.Summary.Cell>
                     <Table.Summary.Cell index={2} align="right">{fmtNum(t.avail)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={3} align="right">{fmtNum(t.res)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={4} align="right">{fmtNum(t.blk)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={5} align="right">{fmtNum(t.def)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={6} align="right">{fmtNum(t.rew)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={7} align="right">{fmtNum(t.tot)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={8} align="right">{fmtMoney(t.val)}</Table.Summary.Cell>
-                    <Table.Summary.Cell index={9} align="right">{fmtNum(t.bat)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={3} align="right">{fmtNum(t.tot)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={4} align="right">{fmtMoney(t.val)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={5} align="right">{t.whv ? <span style={{ color: "#1677ff" }}>{fmtMoney(t.whv)}</span> : "—"}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={6} align="right">{t.trv ? <span style={{ color: "#d46b08" }}>{fmtMoney(t.trv)}</span> : "—"}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={7} align="right">{fmtNum(t.bat)}</Table.Summary.Cell>
                   </Table.Summary.Row>
                 </Table.Summary>
               );

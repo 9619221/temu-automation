@@ -146,6 +146,35 @@ async function pollEnrollResults(taskIds = []) {
   return { tasks: data?.tasks || [] };
 }
 
+// 追加活动库存:桌面端把任务下发到云端 addstock_task
+async function createAddStockTasks(tasks = []) {
+  const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
+  let token = await getToken(fetchImpl);
+  const out = [];
+  for (const t of tasks) {
+    const post = (tk) => fetchImpl(`${CLOUD_BASE}/api/ingest/v1/addstock-tasks/create`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${tk}` },
+      body: JSON.stringify(t),
+    });
+    let resp = await post(token);
+    if (resp.status === 401) { cachedToken = null; token = await loginCloud(fetchImpl); resp = await post(token); }
+    const data = await resp.json().catch(() => ({}));
+    out.push({ ok: !!(resp.ok && data?.ok), task_id: data?.task_id || null, mall_id: t?.mall_id || null, error: data?.error || (resp.ok ? null : `HTTP ${resp.status}`) });
+  }
+  return { rows: out };
+}
+
+async function pollAddStockResults(taskIds = []) {
+  if (!Array.isArray(taskIds) || !taskIds.length) return { tasks: [] };
+  const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
+  let token = await getToken(fetchImpl);
+  const url = `${CLOUD_BASE}/api/ingest/v1/addstock-tasks/status?ids=${encodeURIComponent(taskIds.join(","))}`;
+  let resp = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (resp.status === 401) { cachedToken = null; token = await loginCloud(fetchImpl); resp = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } }); }
+  const data = await resp.json().catch(() => ({}));
+  return { tasks: data?.tasks || [] };
+}
+
 async function fetchCloudReport(options = {}) {
   const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
   const includeTest = options.includeTest ? "1" : "0";
@@ -2690,6 +2719,58 @@ function buildSiteExceptionList(db, opts = {}) {
     }
   } catch { /* */ }
 
+  // 从官方 API 销量表补图片(capture_events 里 sku-goods-mapping 覆盖率低)
+  try {
+    const gids = new Set(rows.map(r => r.goods_id || r.sku_id).filter(Boolean));
+    if (gids.size > 0) {
+      const thumbRows = db.prepare(`
+        SELECT product_skc_id, product_id, title, thumb_url
+          FROM erp_temu_openapi_sku_sales
+         WHERE thumb_url IS NOT NULL AND thumb_url <> ''
+         GROUP BY COALESCE(product_id, product_skc_id)
+      `).all();
+      for (const tr of thumbRows) {
+        for (const gid of [tr.product_id, tr.product_skc_id]) {
+          if (!gid || !gids.has(gid)) continue;
+          if (!goodsInfo[gid]) goodsInfo[gid] = {};
+          if (!goodsInfo[gid].thumb) goodsInfo[gid].thumb = tr.thumb_url;
+          if (!goodsInfo[gid].title && tr.title) goodsInfo[gid].title = tr.title;
+        }
+      }
+    }
+  } catch { /* */ }
+
+  // 通过 sku_id → product_sku_id 补图片（goods_id 与 product_id 不一致时的兜底）
+  try {
+    const missing = rows.filter(r => {
+      const gid = r.goods_id || r.sku_id;
+      return gid && (!goodsInfo[gid] || !goodsInfo[gid].thumb);
+    });
+    if (missing.length > 0) {
+      const skuToGid = new Map();
+      for (const r of missing) skuToGid.set(r.sku_id, r.goods_id || r.sku_id);
+      const skuIds = [...skuToGid.keys()];
+      const batchSize = 500;
+      for (let i = 0; i < skuIds.length; i += batchSize) {
+        const batch = skuIds.slice(i, i + batchSize);
+        const ph = batch.map(() => "?").join(",");
+        const thumbRows = db.prepare(`
+          SELECT product_sku_id, title, thumb_url
+            FROM erp_temu_openapi_sku_sales
+           WHERE product_sku_id IN (${ph})
+             AND thumb_url IS NOT NULL AND thumb_url <> ''
+        `).all(...batch);
+        for (const tr of thumbRows) {
+          const gid = skuToGid.get(tr.product_sku_id);
+          if (!gid) continue;
+          if (!goodsInfo[gid]) goodsInfo[gid] = {};
+          if (!goodsInfo[gid].thumb) goodsInfo[gid].thumb = tr.thumb_url;
+          if (!goodsInfo[gid].title && tr.title) goodsInfo[gid].title = tr.title;
+        }
+      }
+    }
+  } catch { /* */ }
+
   return { rows, goodsInfo, skuInfo };
 }
 
@@ -3428,7 +3509,7 @@ function _calcAdvice(today, last7d, totalStock) {
 
 // 进程级结果缓存：跨库聚合冷态可达 ~17s（OS page cache 被挤出后首查），
 // 缓存 + 服务端定时预热让用户请求永远命中暖缓存、秒回。
-const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
+const REPORT_CACHE_TTL_MS = 15 * 60 * 1000;
 
 // 读运营报表物化缓存(erp_report_cache,由 refresh-ops-reports cron 预聚合)。
 // 命中返回解析后的数据,否则 null;表不存在/解析失败均静默回退实时计算(保证正确性)。
@@ -3820,7 +3901,7 @@ function buildActivityList(db, options = {}) {
        AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
        ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
      ORDER BY a.mall_id, a.activity_kind
-     LIMIT 4000
+     LIMIT 50000
   `, [tid, tid]);
   // [DEBUG] 临时诊断：查看 color_spec 三层回退的命中情况
   if (rows.length > 0) {
@@ -3866,15 +3947,16 @@ function buildActivityList(db, options = {}) {
   const seen = new Set();
   const pmap = new Map();
   for (const r of out) {
-    if (!r.sku_ext_code) continue; // 无货号的活动表头噪声行不进概览
-    const dk = `${r.store_code || r.mall_id}|${r.sku_ext_code}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
+    const skuCode = r.sku_ext_code || r.skc_id || r.product_id || null;
+    if (!skuCode && !r.activity_id && !r.title) continue; // 完全无标识的噪声行才跳过
+    const dk = `${r.store_code || r.mall_id}|${skuCode || ""}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
     if (seen.has(dk)) continue; seen.add(dk);
-    const pid = r.spu_id || r.goods_id || r.product_id || r.sku_ext_code;
+    const pid = r.spu_id || r.goods_id || r.product_id || skuCode;
     const pkey = `${r.store_code || r.mall_id}|${pid}`;
     let e = pmap.get(pkey);
     if (!e) {
       e = { key: pkey, mall_id: r.mall_id, store_code: r.store_code, mall_name: r.mall_name,
-        sku_ext_code: r.sku_ext_code, sku_ext_codes: [r.sku_ext_code],
+        sku_ext_code: r.sku_ext_code || null, sku_ext_codes: r.sku_ext_code ? [r.sku_ext_code] : [],
         product_id: r.product_id, skc_id: r.skc_id, color_spec: r.color_spec,
         product_name: r.product_name, thumb: r.thumb,
         act_count: 0, pending_count: 0, best_margin: null, best_profit: null,
@@ -3882,6 +3964,7 @@ function buildActivityList(db, options = {}) {
       pmap.set(pkey, e);
     }
     if (r.sku_ext_code && !e.sku_ext_codes.includes(r.sku_ext_code)) e.sku_ext_codes.push(r.sku_ext_code);
+    if (!e.sku_ext_code && r.sku_ext_code) e.sku_ext_code = r.sku_ext_code;
     if (!e.product_name && r.product_name) e.product_name = r.product_name;
     if (!e.thumb && r.thumb) e.thumb = r.thumb;
     if (!e.product_id && r.product_id) e.product_id = r.product_id;
@@ -3891,7 +3974,8 @@ function buildActivityList(db, options = {}) {
     e.activities.push({ activity_id: r.activity_id, kind: r.kind, title: r.title, status: r.status,
       activity_type: r.activity_type, sku_id: r.sku_id, signup_price: r.signup_price,
       suggested_price: r.suggested_price, price_diff: r.price_diff, activity_stock: r.activity_stock,
-      cost: r.cost, start_at: null, end_at: r.end_at, sites: [], skus: [] });
+      cost: r.cost, start_at: null, end_at: r.end_at, enroll_at: null, sites: r.site ? [r.site] : [],
+      skus: r.sku_ext_code ? [{ sku_ext_code: r.sku_ext_code, spec_name: r.color_spec || null, signup_price: r.signup_price, suggested_price: r.suggested_price, activity_stock: r.activity_stock != null ? r.activity_stock : 0, cost: r.cost, enroll_at: null, enroll_id: null }] : [] });
   }
   // 补充已报名活动详情(temu_activity_enroll_record 有 signup_price/activity_stock/status/end_at)
   const enrollDetails = optionalAllLocal(db, `
@@ -3899,7 +3983,7 @@ function buildActivityList(db, options = {}) {
     SELECT e.mall_id, m.store_code, e.sku_ext_code, e.product_id, e.goods_id, e.skc_id,
            e.enroll_id, e.activity_thematic_id, e.activity_thematic_name, e.activity_type,
            e.activity_price_cents, e.daily_price_cents, e.activity_stock,
-           e.enroll_status, e.enroll_time, e.session_end_time, e.session_start_time, e.site, e.sites_json,
+           e.enroll_status, e.enroll_time, e.session_end_time, e.session_start_time, e.session_status_tag, e.site, e.sites_json,
            sc.product_id AS spu_id, k.wac AS cost, k.color_spec
       FROM cloud.temu_activity_enroll_record e
       JOIN le ON le.mall_id = e.mall_id AND le.sd = e.stat_date
@@ -3909,9 +3993,35 @@ function buildActivityList(db, options = {}) {
                    FROM erp_skus GROUP BY internal_sku_code) k ON k.internal_sku_code = e.sku_ext_code
      WHERE e.tenant_id = ? AND COALESCE(e.enroll_status, 0) <> 2 AND e.sku_ext_code IS NOT NULL
        ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
-     LIMIT 8000`, [tid, tid]);
+     LIMIT 50000`, [tid, tid]);
+  // 跨店回填:enrollDetails 不再截断(旧 LIMIT 8000 导致部分已报名商品丢失)
+  const crossMallMeta = new Map();
+  const crossRows = optionalAllLocal(db, `
+    SELECT activity_thematic_name,
+           MAX(activity_type) AS activity_type,
+           MAX(sites_json) AS sites_json,
+           MAX(activity_stock) AS activity_stock,
+           MAX(enroll_time) AS enroll_time
+      FROM cloud.temu_activity_enroll_record
+     WHERE tenant_id = ? AND activity_thematic_name IS NOT NULL
+       AND (activity_type IS NOT NULL OR sites_json IS NOT NULL OR activity_stock IS NOT NULL OR enroll_time IS NOT NULL)
+     GROUP BY activity_thematic_name`, [tid]);
+  for (const r of crossRows) crossMallMeta.set(r.activity_thematic_name, r);
+  for (const er of enrollDetails) {
+    const meta = er.activity_thematic_name && crossMallMeta.get(er.activity_thematic_name);
+    if (!meta) continue;
+    if (er.activity_type == null && meta.activity_type != null) er.activity_type = meta.activity_type;
+    if (!er.sites_json && meta.sites_json) er.sites_json = meta.sites_json;
+    if (er.activity_stock == null && meta.activity_stock != null) er.activity_stock = meta.activity_stock;
+    if (!er.enroll_time && meta.enroll_time) er.enroll_time = meta.enroll_time;
+  }
   const enrollStatusLabel = (s) => { if (s === 0) return "待审核"; if (s === 1) return "已报名"; if (s === 3) return "进行中"; if (s === 4) return "已结束"; if (s === 5) return "未开始"; if (s === 6) return "已取消"; return s != null ? String(s) : null; };
-  const computeStatus = (enrollStatus, startTime, endTime) => {
+  const computeStatus = (enrollStatus, startTime, endTime, sessionStatusTag) => {
+    if (sessionStatusTag != null) {
+      if (sessionStatusTag === 0) return "已结束";
+      if (sessionStatusTag === 1) return "进行中";
+      if (sessionStatusTag === 2) return "未开始";
+    }
     const now = Date.now();
     const end = endTime ? Number(endTime) : null;
     const start = startTime ? Number(startTime) : null;
@@ -3944,23 +4054,44 @@ function buildActivityList(db, options = {}) {
       if (er.activity_stock != null) existing.activity_stock = (existing.activity_stock || 0) + Number(er.activity_stock);
       if (er.session_end_time && !existing.end_at) existing.end_at = fmtEndTime(er.session_end_time);
       if (er.session_start_time && !existing.start_at) existing.start_at = fmtEndTime(er.session_start_time);
-      if (!existing.status) existing.status = computeStatus(er.enroll_status, er.session_start_time, er.session_end_time);
+      if (!existing.status) existing.status = computeStatus(er.enroll_status, er.session_start_time, er.session_end_time, er.session_status_tag);
       if (er.enroll_time && !existing.enroll_at) existing.enroll_at = fmtDateTime(er.enroll_time);
       if (sp != null && sg != null && existing.price_diff == null) existing.price_diff = sp - sg;
       if (cost && !existing.cost) existing.cost = cost;
       if (sites && sites.length && (!existing.sites || !existing.sites.length)) existing.sites = sites;
-      if (!existing.skus.find(s => s.sku_ext_code === er.sku_ext_code)) existing.skus.push(skuDetail);
+      const prevSku = existing.skus.find(s => s.sku_ext_code === er.sku_ext_code);
+      if (prevSku) {
+        if (skuDetail.enroll_at) prevSku.enroll_at = skuDetail.enroll_at;
+        if (skuDetail.enroll_id) prevSku.enroll_id = skuDetail.enroll_id;
+        if (skuDetail.signup_price != null) prevSku.signup_price = skuDetail.signup_price;
+        if (skuDetail.activity_stock > 0) prevSku.activity_stock = skuDetail.activity_stock;
+      } else { existing.skus.push(skuDetail); }
     } else {
       e.activities.push({ activity_id: er.activity_thematic_id || null, kind: "enrolled", title: er.activity_thematic_name || null,
-        status: computeStatus(er.enroll_status, er.session_start_time, er.session_end_time), activity_type: er.activity_type != null ? Number(er.activity_type) : null,
+        status: computeStatus(er.enroll_status, er.session_start_time, er.session_end_time, er.session_status_tag), activity_type: er.activity_type != null ? Number(er.activity_type) : null,
         sku_id: null, sku_ext_code: er.sku_ext_code || null, signup_price: sp, suggested_price: sg, price_diff: sp != null && sg != null ? sp - sg : null,
         activity_stock: er.activity_stock != null ? Number(er.activity_stock) : 0, cost, start_at: fmtEndTime(er.session_start_time), end_at: fmtEndTime(er.session_end_time), enroll_at: fmtDateTime(er.enroll_time), sites: sites || [],
         skus: [skuDetail] });
     }
   }
   for (const e of pmap.values()) {
+    // filter 前：收集 sites/activity_type（按 activity_id 和 title 双索引，snapshot 行可能有这些数据）
+    const metaById = new Map(), metaByTitle = new Map();
+    for (const a of e.activities) {
+      const meta = { sites: a.sites && a.sites.length ? a.sites : null, activity_type: a.activity_type };
+      const merge = (prev, m) => { if (!prev.sites && m.sites) prev.sites = m.sites; if (prev.activity_type == null && m.activity_type != null) prev.activity_type = m.activity_type; };
+      if (a.activity_id) { const prev = metaById.get(a.activity_id); if (!prev) metaById.set(a.activity_id, { ...meta }); else merge(prev, meta); }
+      if (a.title) { const prev = metaByTitle.get(a.title); if (!prev) metaByTitle.set(a.title, { ...meta }); else merge(prev, meta); }
+    }
     // 过滤噪音:活动标题==商品名且无 signup_price 的 snapshot 行(只有参考价没有活动详情,对用户无用)
     e.activities = e.activities.filter(a => a.signup_price != null || a.kind === "enrolled" || (a.title && a.title !== e.product_name));
+    // filter 后：回填 sites/activity_type（先按 activity_id 精确匹配，再按 title 模糊匹配）
+    for (const a of e.activities) {
+      const meta = (a.activity_id && metaById.get(a.activity_id)) || (a.title && metaByTitle.get(a.title));
+      if (!meta) continue;
+      if ((!a.sites || !a.sites.length) && meta.sites) a.sites = meta.sites;
+      if (a.activity_type == null && meta.activity_type != null) a.activity_type = meta.activity_type;
+    }
     const ids = new Set(), pend = new Set();
     for (const a of e.activities) {
       if (a.activity_id) ids.add(a.activity_id); else pend.add(a.title || "");
@@ -4571,7 +4702,8 @@ function buildHighPriceFlowList(db, options = {}) {
            MAX(r.skc_id) skc_id,
            MAX(CAST(json_extract(r.raw_json, '$.flowDeclineRate') AS REAL)) AS decline_rate,
            MAX(CAST(json_extract(r.raw_json, '$.currentSupplierPrice') AS REAL)) AS cur_cents,
-           MAX(CAST(json_extract(r.raw_json, '$.targetSupplierPriceForAllSite') AS REAL)) AS tgt_cents
+           MAX(CAST(json_extract(r.raw_json, '$.targetSupplierPriceForAllSite') AS REAL)) AS tgt_cents,
+           MIN(COALESCE(r.flow_reduce_status, CAST(json_extract(r.raw_json, '$.flowReduceStatus') AS INTEGER))) AS flow_reduce_status
       FROM cloud.temu_operation_risk_snapshot r
       JOIN lr ON lr.mall_id = r.mall_id AND lr.product_id = r.product_id AND lr.sd = r.stat_date
      WHERE r.risk_type = 'high_price_flow'
@@ -4607,7 +4739,8 @@ function buildHighPriceFlowList(db, options = {}) {
   const out = [];
   for (const r of limRows) {
     const m = mallMap.get(r.mall_id);
-    if (!includeTest && m && m.status === "test") continue;
+    if (!m) continue;
+    if (!includeTest && m.status === "test") continue;
     const off = offMap.get(r.mall_id + "|" + r.product_id);
     const cl = cloudMap.get(String(r.product_id));
     out.push({
@@ -4628,6 +4761,7 @@ function buildHighPriceFlowList(db, options = {}) {
       stock: off ? toNum(off.stock) : null,
       today_sales: off ? toNum(off.today_sales) : null,
       last7d_sales: off ? toNum(off.last7d_sales) : null,
+      flow_reduce_status: r.flow_reduce_status != null ? Number(r.flow_reduce_status) : null,
     });
   }
   // 默认按流量下降率降序(限得最狠的排前)，其次最近限流日新的在前
@@ -5601,6 +5735,7 @@ function buildPipelineOverviewFast(db, options = {}) {
   for (const sKey of Object.keys(stages)) summary[sKey] = stages[sKey].length;
   const data = { generated_at: Date.now(), sku_count: base.length, summary, stages, source: cloudOk ? "official+cloud" : "official" };
   _pipelineCache.set("pf", { ts: Date.now(), data });
+  try { db.prepare("INSERT INTO erp_report_cache (cache_key, payload_json, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at").run("pipeline_overview", JSON.stringify(data)); } catch { /* 表不存在时静默 */ }
   return data;
 }
 
@@ -5799,6 +5934,117 @@ function buildProductRiskTags(db, options = {}) {
   return { generated_at: Date.now(), rows };
 }
 
+// 运营工作台：流量分析（商品级流量明细，从 cloud.temu_product_flow_snapshot 读完整字段）
+const _flowAnalysisCache = new Map();
+function buildFlowAnalysis(db, options = {}) {
+  if (!db) throw new Error("buildFlowAnalysis: db is required");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], available_dates: [] };
+  }
+  const statDate = options.statDate || "";
+  const key = (options.includeTest ? "1" : "0") + "|" + statDate;
+  if (!options.force) {
+    const c = _flowAnalysisCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const available_dates = optionalAllLocal(db, `
+    SELECT DISTINCT stat_date FROM cloud.temu_product_flow_snapshot
+     WHERE tenant_id = ? AND product_id IS NOT NULL AND product_id <> ''
+           AND mall_id IS NOT NULL AND mall_id <> ''
+     ORDER BY stat_date DESC`, [tid]).map((r) => r.stat_date);
+
+  const selectCols = `f.mall_id, f.site, f.stat_date, f.product_id, f.goods_id, f.title, f.category_name, f.thumb_url,
+           f.expose_num, f.click_num, f.detail_visit_num, f.detail_visitor_num,
+           f.add_to_cart_user_num, f.collect_user_num, f.pay_goods_num, f.pay_order_num, f.buyer_num,
+           f.expose_pay_conversion_rate, f.expose_click_conversion_rate, f.click_pay_conversion_rate,
+           f.search_expose_num, f.search_click_num, f.search_pay_goods_num,
+           f.recommend_expose_num, f.recommend_click_num, f.recommend_pay_goods_num,
+           f.flow_grow_status, f.grow_data_text`;
+  const effectiveDate = statDate || (available_dates[0] || "");
+  const flowRows = effectiveDate ? optionalAllLocal(db, `
+    SELECT ${selectCols}
+      FROM cloud.temu_product_flow_snapshot f
+     WHERE f.tenant_id = ? AND f.stat_date = ?
+           AND f.product_id IS NOT NULL AND f.product_id <> ''
+           AND f.mall_id IS NOT NULL AND f.mall_id <> ''`, [tid, effectiveDate]) : [];
+
+  const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name FROM erp_temu_malls`, []);
+  const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
+  const rows = flowRows.map((f, i) => {
+    const m = mallMap.get(f.mall_id) || {};
+    return {
+      mall_id: f.mall_id,
+      store_code: m.store_code || null,
+      mall_name: m.mall_name || null,
+      site: f.site || null,
+      stat_date: f.stat_date || null,
+      product_id: f.product_id,
+      goods_id: f.goods_id || null,
+      title: f.title || null,
+      category_name: f.category_name || null,
+      thumb_url: f.thumb_url || null,
+      expose: toNum(f.expose_num),
+      click: toNum(f.click_num),
+      detail_visit: toNum(f.detail_visit_num),
+      detail_visitor: toNum(f.detail_visitor_num),
+      add_cart: toNum(f.add_to_cart_user_num),
+      collect: toNum(f.collect_user_num),
+      pay_goods: toNum(f.pay_goods_num),
+      pay_order: toNum(f.pay_order_num),
+      buyer: toNum(f.buyer_num),
+      expose_pay_rate: f.expose_pay_conversion_rate == null ? null : Number(f.expose_pay_conversion_rate),
+      ctr: f.expose_click_conversion_rate == null ? null : Number(f.expose_click_conversion_rate),
+      click_pay_rate: f.click_pay_conversion_rate == null ? null : Number(f.click_pay_conversion_rate),
+      search_expose: toNum(f.search_expose_num),
+      search_click: toNum(f.search_click_num),
+      search_pay: toNum(f.search_pay_goods_num),
+      recommend_expose: toNum(f.recommend_expose_num),
+      recommend_click: toNum(f.recommend_click_num),
+      recommend_pay: toNum(f.recommend_pay_goods_num),
+      grow: f.flow_grow_status === "1" || f.flow_grow_status === 1 ? "增长中" : f.flow_grow_status === "2" || f.flow_grow_status === 2 ? "待增长" : f.flow_grow_status === "3" || f.flow_grow_status === 3 ? "下降" : f.flow_grow_status || null,
+      grow_text: f.grow_data_text || null,
+      __rk: i,
+    };
+  });
+  const data = { generated_at: Date.now(), row_count: rows.length, rows, available_dates };
+  _flowAnalysisCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+function buildFlowTrend(db, options = {}) {
+  if (!db) throw new Error("buildFlowTrend: db is required");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { rows: [] };
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const { mallId, productId, goodsId, site } = options;
+  if (!mallId || !productId) return { rows: [] };
+  const trendRows = optionalAllLocal(db, `
+    SELECT stat_date, expose_num, click_num, detail_visitor_num,
+           add_to_cart_user_num, buyer_num, pay_goods_num,
+           expose_click_conversion_rate, click_pay_conversion_rate
+      FROM cloud.temu_product_flow_snapshot
+     WHERE tenant_id = ? AND mall_id = ? AND product_id = ?
+           AND COALESCE(goods_id,'') = ? AND COALESCE(site,'') = ?
+     ORDER BY stat_date`, [tid, mallId, productId, goodsId || "", site || ""]);
+  return {
+    rows: trendRows.map((r) => ({
+      date: r.stat_date,
+      expose: toNum(r.expose_num),
+      click: toNum(r.click_num),
+      detail_visitor: toNum(r.detail_visitor_num),
+      add_cart: toNum(r.add_to_cart_user_num),
+      buyer: toNum(r.buyer_num),
+      pay_goods: toNum(r.pay_goods_num),
+      ctr: r.expose_click_conversion_rate == null ? null : Number((Number(r.expose_click_conversion_rate) * 100).toFixed(2)),
+      click_pay_rate: r.click_pay_conversion_rate == null ? null : Number((Number(r.click_pay_conversion_rate) * 100).toFixed(2)),
+    })),
+  };
+}
+
 module.exports = {
   buildMultiStoreReport,
   getMultiStoreReportFast,
@@ -5829,6 +6075,8 @@ module.exports = {
   setOpTaskState,
   createEnrollTasks,
   pollEnrollResults,
+  createAddStockTasks,
+  pollAddStockResults,
   // 结算收入（income-summary 抓包物化）：采集入口 + 报表聚合
   upsertSettlementIncomeFromDashboard,
   syncSettlementIncomeFromCapture,
@@ -5869,6 +6117,8 @@ module.exports = {
   buildPipelineOverviewFast,
   buildProductRiskTags,
   buildGoodsDataSnapshot,
+  buildFlowAnalysis,
+  buildFlowTrend,
   syncSiteExceptionsFromCapture,
   buildSiteExceptionList,
   // 暴露给测试用
