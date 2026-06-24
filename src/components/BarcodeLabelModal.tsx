@@ -252,11 +252,12 @@ function drawBarcodeArea(
   const fs2 = small ? 4.5 : 5.5;
   const fsBig = small ? 5.5 : 7;
 
+  const bw = iconReserve > 0 ? ew : w;
   doc.setFillColor(255, 255, 255);
-  doc.rect(x, y, w, h, "F");
+  doc.rect(x, y, bw, h, "F");
   doc.setDrawColor(0);
   doc.setLineWidth(0.3);
-  doc.rect(x, y, w, h);
+  doc.rect(x, y, bw, h);
 
   doc.setFont(fontName, "bold");
   doc.setFontSize(fs1);
@@ -353,16 +354,20 @@ async function buildPdf(
           if (tpl.barcode) {
             const code = item.labelCode || item.skuCode;
             const iconCount = Math.min(spanishIcons.length, 2);
-            const iconSize = 13;
-            const iconReserve = iconCount > 0 ? iconCount * iconSize + iconCount : 0;
+            const icoSz = 15;
+            const icoGap = 2;
+            const iconReserve = iconCount === 1 ? icoSz + icoGap : iconCount === 2 ? icoSz * 2 + icoGap : 0;
             if (code) {
               drawBarcodeArea(doc, tpl.barcode, code, item.skuCode, item.specName, item.skuId, originText, fontData ? "NotoSansSC" : "helvetica", iconReserve);
             }
             if (iconCount > 0) {
               const bc = tpl.barcode;
-              for (let si = 0; si < iconCount; si++) {
-                const ix = bc.x + bc.w - iconSize * (si + 1) - si;
-                doc.addImage(spanishIcons[si], "PNG", ix, bc.y, iconSize, iconSize);
+              const icoX = bc.x + bc.w - icoSz;
+              if (iconCount === 1) {
+                doc.addImage(spanishIcons[0], "PNG", icoX, bc.y, icoSz, icoSz);
+              } else {
+                doc.addImage(spanishIcons[0], "PNG", icoX - icoSz, bc.y, icoSz, icoSz);
+                doc.addImage(spanishIcons[1], "PNG", icoX, bc.y, icoSz, icoSz);
               }
             }
           }

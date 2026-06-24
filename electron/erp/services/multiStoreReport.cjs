@@ -3983,7 +3983,7 @@ function buildActivityList(db, options = {}) {
     WITH le AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_activity_enroll_record WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id)
     SELECT e.mall_id, m.store_code, e.sku_ext_code, e.product_id, e.goods_id, e.skc_id,
            e.enroll_id, e.activity_thematic_id, e.activity_thematic_name, e.activity_type,
-           e.activity_price_cents, e.daily_price_cents, e.activity_stock,
+           e.activity_price_cents, e.daily_price_cents, e.activity_stock, e.remaining_stock,
            e.enroll_status, e.enroll_time, e.session_end_time, e.session_start_time, e.session_status_tag, e.site, e.sites_json,
            sc.product_id AS spu_id, k.wac AS cost, k.color_spec
       FROM cloud.temu_activity_enroll_record e
@@ -4055,12 +4055,15 @@ function buildActivityList(db, options = {}) {
     const cost = er.cost != null && Number(er.cost) > 0 ? Number(er.cost) : null;
     let sites = null;
     if (er.sites_json) { try { const arr = JSON.parse(er.sites_json); if (Array.isArray(arr)) sites = arr.map(s => s.name || s.siteName).filter(Boolean); } catch {} }
-    const skuDetail = { sku_ext_code: er.sku_ext_code, spec_name: er.color_spec || null, signup_price: sp, suggested_price: sg, activity_stock: er.activity_stock != null ? Number(er.activity_stock) : 0, cost, enroll_at: fmtDateTime(er.enroll_time), enroll_id: er.enroll_id || null };
+    const actStock = er.activity_stock != null ? Number(er.activity_stock) : 0;
+    const remStock = er.remaining_stock != null ? Number(er.remaining_stock) : actStock;
+    const skuDetail = { sku_ext_code: er.sku_ext_code, spec_name: er.color_spec || null, signup_price: sp, suggested_price: sg, activity_stock: actStock, remaining_stock: remStock, cost, enroll_at: fmtDateTime(er.enroll_time), enroll_id: er.enroll_id || null };
     const existing = er.enroll_id ? e.activities.find(a => a.enroll_id === er.enroll_id) : null;
     if (existing) {
       if (sp != null && existing.signup_price == null) existing.signup_price = sp;
       if (sg != null && existing.suggested_price == null) existing.suggested_price = sg;
-      if (er.activity_stock != null) existing.activity_stock = (existing.activity_stock || 0) + Number(er.activity_stock);
+      if (actStock && !existing.activity_stock) existing.activity_stock = actStock;
+      if (remStock && existing.remaining_stock == null) existing.remaining_stock = remStock;
       if (er.session_end_time && !existing.end_at) existing.end_at = fmtEndTime(er.session_end_time);
       if (er.session_start_time && !existing.start_at) existing.start_at = fmtEndTime(er.session_start_time);
       if (!existing.status) existing.status = computeStatus(er.enroll_status, er.session_start_time, er.session_end_time, er.session_status_tag);
@@ -4074,12 +4077,13 @@ function buildActivityList(db, options = {}) {
         if (skuDetail.enroll_id) prevSku.enroll_id = skuDetail.enroll_id;
         if (skuDetail.signup_price != null) prevSku.signup_price = skuDetail.signup_price;
         if (skuDetail.activity_stock > 0) prevSku.activity_stock = skuDetail.activity_stock;
+        if (skuDetail.remaining_stock > 0) prevSku.remaining_stock = skuDetail.remaining_stock;
       } else { existing.skus.push(skuDetail); }
     } else {
       e.activities.push({ enroll_id: er.enroll_id || null, activity_id: er.activity_thematic_id || null, kind: "enrolled", title: er.activity_thematic_name || null,
         status: computeStatus(er.enroll_status, er.session_start_time, er.session_end_time, er.session_status_tag), activity_type: er.activity_type != null ? Number(er.activity_type) : null,
         sku_id: null, sku_ext_code: er.sku_ext_code || null, signup_price: sp, suggested_price: sg, price_diff: sp != null && sg != null ? sp - sg : null,
-        activity_stock: er.activity_stock != null ? Number(er.activity_stock) : 0, cost, start_at: fmtEndTime(er.session_start_time), end_at: fmtEndTime(er.session_end_time), enroll_at: fmtDateTime(er.enroll_time), sites: sites || [],
+        activity_stock: actStock, remaining_stock: remStock, cost, start_at: fmtEndTime(er.session_start_time), end_at: fmtEndTime(er.session_end_time), enroll_at: fmtDateTime(er.enroll_time), sites: sites || [],
         skus: [skuDetail] });
     }
   }

@@ -545,7 +545,7 @@ export default function OperationsWorkbench() {
       sku_ext_code: enrollProduct.sku_ext_code, skc_id: enrollProduct.skc_id, color_spec: (enrollProduct as any).color_spec ?? null,
       product_name: enrollProduct.product_name, thumb: enrollProduct.thumb,
       signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
-      activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: i,
+      activity_stock: a.activity_stock, remaining_stock: (a as any).remaining_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: i,
       enroll_at: a.enroll_at, start_at: a.start_at, sites: a.sites || [], skus: a.skus || [],
     }));
   }, [enrollProduct]);
@@ -1469,8 +1469,7 @@ export default function OperationsWorkbench() {
                 { title: "活动申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
                 { title: "报名时间", key: "enroll_at", width: 150, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
                 { title: "活动类型", key: "title", width: 280, ellipsis: true, render: (_, r) => {
-                  const typeLabel = (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "";
-                  return <span>{typeLabel ? typeLabel + " " : ""}{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</span>;
+                  return <span>{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</span>;
                 } },
                 { title: "报名场次", key: "sites", width: 280, render: (_, r) => {
                   const s = r.sites || [];
@@ -1491,7 +1490,7 @@ export default function OperationsWorkbench() {
                   </div>);
                 } },
                 { title: "提报数量", dataIndex: "activity_stock", width: 90, align: "right", render: (v: number) => v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span> },
-                { title: "剩余数量", key: "remain", width: 90, align: "right", render: (_, r) => r.activity_stock > 0 ? fmtNum(r.activity_stock) : <span style={{ color: "#bbb" }}>0</span> },
+                { title: "剩余数量", key: "remain", width: 90, align: "right", render: (_, r) => { const v = (r as any).remaining_stock ?? r.activity_stock; return v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span>; } },
                 { title: "活动状态", key: "status", width: 80, render: (_, r) => {
                   const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
                   return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : "default"} style={{ margin: 0 }}>{s}</Tag>;

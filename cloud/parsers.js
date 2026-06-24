@@ -2452,13 +2452,13 @@ function parseEnrollRecord(db, ctx, evt, body) {
       id, tenant_id, mall_id, site, stat_date, row_key,
       enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
       product_id, skc_id, sku_id, sku_ext_code, goods_id,
-      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time, session_start_time,
+      activity_price_cents, daily_price_cents, activity_stock, remaining_stock, sold_status, session_end_time, session_start_time,
       session_status_tag, sites_json, raw_json, source_event_id
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
       @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
       @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
-      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time, @session_start_time,
+      @activity_price_cents, @daily_price_cents, @activity_stock, @remaining_stock, @sold_status, @session_end_time, @session_start_time,
       @session_status_tag, @sites_json, @raw_json, @source_event_id
     )
     ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
@@ -2475,6 +2475,7 @@ function parseEnrollRecord(db, ctx, evt, body) {
       activity_price_cents = COALESCE(excluded.activity_price_cents, activity_price_cents),
       daily_price_cents    = COALESCE(excluded.daily_price_cents, daily_price_cents),
       activity_stock       = COALESCE(excluded.activity_stock, activity_stock),
+      remaining_stock      = COALESCE(excluded.remaining_stock, remaining_stock),
       sold_status          = COALESCE(excluded.sold_status, sold_status),
       session_end_time     = COALESCE(excluded.session_end_time, session_end_time),
       session_start_time   = COALESCE(excluded.session_start_time, session_start_time),
@@ -2497,7 +2498,8 @@ function parseEnrollRecord(db, ctx, evt, body) {
       activity_thematic_name: toNullableString(firstDefined(rec, ["activityThematicName", "activityName", "activityTypeName"]), 500),
       product_id: toNullableString(firstDefined(rec, ["productId", "productSpuId", "spuId"]), 100),
       goods_id: toNullableString(firstDefined(rec, ["goodsId", "goods_id"]), 100),
-      activity_stock: toNullableInteger(firstDefined(rec, ["activityStock", "remainingActivityStock"])),
+      activity_stock: toNullableInteger(firstDefined(rec, ["activityStock"])),
+      remaining_stock: toNullableInteger(firstDefined(rec, ["remainingActivityStock"])),
       sold_status: toNullableInteger(firstDefined(rec, ["soldStatus"])),
       session_end_time: toNullableString(firstDefined(rec, ["sessionEndTime", "endTime"])),
       session_start_time: toNullableString(firstDefined(rec, ["sessionStartTime", "startTime"])),
@@ -3012,13 +3014,13 @@ function parsePriceAdjustActivities(db, ctx, evt, body) {
       id, tenant_id, mall_id, site, stat_date, row_key,
       enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
       product_id, skc_id, sku_id, sku_ext_code, goods_id,
-      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time, session_start_time,
+      activity_price_cents, daily_price_cents, activity_stock, remaining_stock, sold_status, session_end_time, session_start_time,
       session_status_tag, sites_json, raw_json, source_event_id
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
       @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
       @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
-      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time, @session_start_time,
+      @activity_price_cents, @daily_price_cents, @activity_stock, @remaining_stock, @sold_status, @session_end_time, @session_start_time,
       @session_status_tag, @sites_json, @raw_json, @source_event_id
     )
     ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
@@ -3075,6 +3077,7 @@ function parsePriceAdjustActivities(db, ctx, evt, body) {
             activity_price_cents: toNullableInteger(act.supplyPrice),
             daily_price_cents: toNullableInteger(sku.originSupplyPrice),
             activity_stock: null,
+            remaining_stock: null,
             sold_status: null,
             session_end_time: toNullableString(act.activityEndTime),
             session_start_time: toNullableString(act.activityStartTime),
