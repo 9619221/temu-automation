@@ -168,6 +168,8 @@ const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 
 const FLOW_PAGE_SIZE = 100;
 const FLOW_MAX_PAGES = 12;
 const FLOW_PAGE_DELAY_MS = 500;
+const FLOW_TREND_MAX_PRODUCTS = 30;
+const FLOW_TREND_DELAY_MS = 800;
 const FLOW_BACKFILL_STATE_KEY = "temu_flow_backfill_state";
 const FLOW_BACKFILL_DAYS = 30;
 const FLOW_BACKFILL_PAGE_DELAY_MS = 600;
@@ -1471,6 +1473,7 @@ async function collectFlowForCurrentMall() {
 
   const url = `${cur.origin}/api/seller/full/flow/analysis/goods/list`;
   let enqueuedCount = 0;
+  const collectedProductIds = [];
   for (let page = 1; page <= FLOW_MAX_PAGES; page++) {
     const requestBody = JSON.stringify({ pageNum: page, pageSize: FLOW_PAGE_SIZE, timeDimension: 1 });
     let ac = "";
@@ -1504,6 +1507,12 @@ async function collectFlowForCurrentMall() {
       await bumpStats({ captured_count_delta: 1 });
       enqueuedCount++;
       const list = body?.result?.list || body?.result?.pageItems || [];
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          const gid = item.goodsId || item.goods_id;
+          if (gid) collectedProductIds.push(gid);
+        }
+      }
       if (!Array.isArray(list) || list.length < FLOW_PAGE_SIZE) break; // 末页
     } catch {
       break;
@@ -1514,7 +1523,57 @@ async function collectFlowForCurrentMall() {
     [FLOW_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_enqueued: enqueuedCount, last_mall: cur.mallId },
   });
   if (enqueuedCount > 0) await flush();
+  if (collectedProductIds.length > 0) {
+    const trendCount = await collectFlowTrendsForProducts(cur.mallId, collectedProductIds, cur.origin, "agentseller");
+    console.log("[sw] flow trend collected:", trendCount, "products for mall", cur.mallId);
+  }
   return { ok: true, enqueuedCount, mall: cur.mallId };
+}
+
+async function collectFlowTrendsForProducts(mallId, productIds, origin, siteTag) {
+  if (!productIds.length) return 0;
+  const trendUrl = `${origin}/api/seller/full/flow/analysis/goods/trend`;
+  const unique = [...new Set(productIds)].slice(0, FLOW_TREND_MAX_PRODUCTS);
+  let enqueuedCount = 0;
+  for (const pid of unique) {
+    let ac = "";
+    try { ac = await getAntiContent(); } catch {}
+    const requestBody = JSON.stringify({ goodsId: Number(pid), statType: 1, timeDimension: 4 });
+    try {
+      const resp = await fetch(trendUrl, {
+        method: "POST",
+        credentials: "include",
+        redirect: "follow",
+        headers: { "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9", "content-type": "application/json", mallid: mallId, ...(ac ? { "anti-content": ac } : {}) },
+        body: requestBody,
+      });
+      const text = await resp.text();
+      const body = safeParseJson(text);
+      if (!resp.ok || !body || typeof body !== "object") continue;
+      const isRateLimited = body?.success === false && (Number(body?.errorCode) === 4000004 || /too many visitors/i.test(String(body?.errorMsg || "")));
+      if (isRateLimited) { await new Promise(r => setTimeout(r, 3000)); continue; }
+      await enqueue({
+        kind: "fetch-active-flow-trend",
+        url: trendUrl,
+        method: "POST",
+        status: resp.status,
+        ts: Date.now(),
+        site: siteTag,
+        page: "background/flow-trend",
+        mall_id: mallId,
+        body,
+        bodyText: text.length > 200000 ? null : text,
+        requestBodyText: requestBody,
+        bodySize: text.length,
+        activeSource: "flow_trend_background",
+      });
+      await bumpStats({ captured_count_delta: 1 });
+      enqueuedCount++;
+    } catch { continue; }
+    await new Promise(r => setTimeout(r, FLOW_TREND_DELAY_MS));
+  }
+  if (enqueuedCount > 0) await flush();
+  return enqueuedCount;
 }
 
 // 流量历史回填：遍历最近 30 天，逐天逐页采集所有登录店的流量数据，支持中断恢复

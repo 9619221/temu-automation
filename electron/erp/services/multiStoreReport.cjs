@@ -6022,16 +6022,29 @@ function buildFlowTrend(db, options = {}) {
   const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
   const { mallId, productId, goodsId, site } = options;
   if (!mallId || !productId) return { rows: [] };
-  const trendRows = optionalAllLocal(db, `
-    SELECT stat_date, expose_num, click_num, detail_visitor_num,
+  const params = [tid, mallId, productId, goodsId || "", site || ""];
+  const sql = `SELECT stat_date, expose_num, click_num, detail_visitor_num,
+           add_to_cart_user_num, buyer_num, pay_goods_num,
+           expose_click_conversion_rate, click_pay_conversion_rate
+      FROM cloud.temu_product_flow_trend
+     WHERE tenant_id = ? AND mall_id = ? AND product_id = ?
+           AND COALESCE(goods_id,'') = ? AND COALESCE(site,'') = ?
+     ORDER BY stat_date`;
+  const snapshotSql = `SELECT stat_date, expose_num, click_num, detail_visitor_num,
            add_to_cart_user_num, buyer_num, pay_goods_num,
            expose_click_conversion_rate, click_pay_conversion_rate
       FROM cloud.temu_product_flow_snapshot
      WHERE tenant_id = ? AND mall_id = ? AND product_id = ?
            AND COALESCE(goods_id,'') = ? AND COALESCE(site,'') = ?
-     ORDER BY stat_date`, [tid, mallId, productId, goodsId || "", site || ""]);
+     ORDER BY stat_date`;
+  const trendRows = optionalAllLocal(db, sql, params);
+  const snapshotRows = optionalAllLocal(db, snapshotSql, params);
+  const byDate = new Map();
+  for (const r of snapshotRows) if (r.stat_date) byDate.set(r.stat_date, r);
+  for (const r of trendRows) if (r.stat_date) byDate.set(r.stat_date, r);
+  const merged = [...byDate.values()].sort((a, b) => (a.stat_date || "").localeCompare(b.stat_date || ""));
   return {
-    rows: trendRows.map((r) => ({
+    rows: merged.map((r) => ({
       date: r.stat_date,
       expose: toNum(r.expose_num),
       click: toNum(r.click_num),
