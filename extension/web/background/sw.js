@@ -2000,9 +2000,9 @@ async function collectQualityViaPage(origin, mallId) {
   if (opened) { try { await chrome.tabs.remove(tab.id); } catch {} }
 }
 
-// ---------- Sydney 活动总览采集(queryMallActivityOverView,咕噜噜同源) ----------
-// 页面注入方式：在 kuajingmaihuo 标签页内发 fetch，hook 自动拦截上报（需 cookie + anti-content）。
-// SW 直接 fetch 会 403，必须走页面上下文。
+// ---------- 活动全量采集(enroll/activity/list + enroll/list，咕噜噜同源) ----------
+// 步骤：1) 拉活动主题列表 → 2) 逐活动分页拉商品详情 → hook 自动拦截上报云端。
+// 全部走 agentseller 域名，需 anti-content。
 async function collectActivityOverview() {
   const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_OVERVIEW_STATE_KEY]);
   if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
@@ -2010,92 +2010,86 @@ async function collectActivityOverview() {
   const state = cfg[ACTIVITY_OVERVIEW_STATE_KEY] || {};
   if (state.last_run_at && now - Number(state.last_run_at) < ACTIVITY_OVERVIEW_RUN_INTERVAL_MS) return { ok: true, skipped: "interval" };
 
-  let malls = [];
-  try {
-    const tr = await fetch(`${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/activity-targets?limit=${ACTIVITY_LIBRARY_TARGET_LIMIT}`, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
-    if (!tr.ok) return { ok: false, reason: `targets_http_${tr.status}` };
-    const td = await tr.json().catch(() => null);
-    const seen = new Set();
-    for (const t of (Array.isArray(td?.targets) ? td.targets : [])) {
-      const mid = String(t?.mall_id || t?.mallId || "").trim();
-      if (!mid || seen.has(mid)) continue;
-      seen.add(mid);
-      malls.push({ mallId: mid, site: t?.site || "agentseller" });
-    }
-  } catch { return { ok: false, reason: "targets_failed" }; }
-  if (!malls.length) return { ok: true, reason: "no_malls" };
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab" };
+  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now } });
 
-  // 找到或打开 kuajingmaihuo 标签页
-  let tabs = [];
-  try { tabs = await chrome.tabs.query({ url: "https://seller.kuajingmaihuo.com/*" }); } catch {}
-  let tab = (tabs || []).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
-  let opened = false;
-  if (!tab) {
-    try {
-      tab = await createBackgroundTab("https://seller.kuajingmaihuo.com/main/activity-center");
-      opened = true;
-      await new Promise((r) => setTimeout(r, 9000));
-    } catch { return { ok: false, reason: "no_kuajingmaihuo_tab" }; }
+  let ac = "";
+  try { ac = await getAntiContent(); } catch {}
+  const headers = { "Content-Type": "application/json", mallid: cur.mallId, ...(ac ? { "anti-content": ac } : {}) };
+
+  // 1. 拉活动主题列表
+  let activities = [];
+  try {
+    const url = `${cur.origin}/api/kiana/gamblers/marketing/enroll/activity/list`;
+    const resp = await fetch(url, {
+      method: "POST", credentials: "include", cache: "no-store", headers,
+      body: JSON.stringify({ needSessionItem: true }),
+    });
+    const text = await resp.text();
+    const body = safeParseJson(text);
+    console.log(`[sw] activity-overview activityList mall=${cur.mallId} status=${resp.status} count=${(body?.result?.activityList || []).length}`);
+    if (resp.ok && body) {
+      await enqueue({
+        kind: "fetch-enroll-activity-list", url, method: "POST", status: resp.status, ts: Date.now(),
+        site: "agentseller", page: "background/activity-overview", mall_id: cur.mallId,
+        body, bodyText: text.length > 200000 ? null : text, bodySize: text.length,
+        activeSource: "activity_overview_bg",
+      });
+      await bumpStats({ captured_count_delta: 1 });
+      activities = body?.result?.activityList || [];
+      if (activities.length) console.log("[sw] activity-overview first act keys:", JSON.stringify(Object.keys(activities[0])), "sample:", JSON.stringify(activities[0]).slice(0, 500));
+    }
+  } catch (e) { console.warn("[sw] activity-overview activityList err:", e?.message || e); }
+
+  // 2. 按场次状态分页拉商品详情（去重 sessionStatus 避免重复拉）
+  let enqueuedCount = 1;
+  const seenStatus = new Set();
+  for (const act of activities) {
+    const sessions = act.sessionList || act.sessionItemList || act.sessions || [];
+    for (const sess of sessions) {
+      const sessionStatus = sess.sessionStatus ?? sess.status;
+      if (sessionStatus == null || seenStatus.has(sessionStatus)) continue;
+      seenStatus.add(sessionStatus);
+      for (let pageNo = 1; pageNo <= ACTIVITY_OVERVIEW_MAX_PAGES; pageNo++) {
+        try {
+          if (!ac) { try { ac = await getAntiContent(); } catch {} }
+          const reqBody = { pageSize: ACTIVITY_OVERVIEW_PAGE_SIZE, pageNo };
+          if (sessionStatus != null) reqBody.sessionStatus = sessionStatus;
+          const reqText = JSON.stringify(reqBody);
+          const url = `${cur.origin}/api/kiana/gamblers/marketing/enroll/list`;
+          const resp = await fetch(url, {
+            method: "POST", credentials: "include", cache: "no-store",
+            headers: { "Content-Type": "application/json", mallid: cur.mallId, ...(ac ? { "anti-content": ac } : {}) },
+            body: reqText,
+          });
+          const text = await resp.text();
+          const body = safeParseJson(text);
+          console.log(`[sw] activity-overview enroll/list sess=${sessionStatus} page=${pageNo} status=${resp.status} len=${text.length} preview=${text.slice(0, 300)}`);
+          if (!resp.ok || !body) break;
+
+          await enqueue({
+            kind: "fetch-enroll-list", url, method: "POST", status: resp.status, ts: Date.now(),
+            site: "agentseller", page: "background/activity-overview", mall_id: cur.mallId,
+            body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqText, bodySize: text.length,
+            activeSource: "activity_overview_bg",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+
+          const list = body?.result?.list || body?.result?.productList || [];
+          const total = Number(body?.result?.total || body?.result?.totalNum || 0);
+          if (!Array.isArray(list) || !list.length || pageNo * ACTIVITY_OVERVIEW_PAGE_SIZE >= total) break;
+        } catch { break; }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
   }
 
-  const start = Number(state.cursor || 0) % malls.length;
-  const slice = [];
-  for (let i = 0; i < ACTIVITY_OVERVIEW_MALLS_PER_RUN && i < malls.length; i++) slice.push(malls[(start + i) % malls.length]);
-  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now, cursor: (start + ACTIVITY_OVERVIEW_MALLS_PER_RUN) % malls.length, total_malls: malls.length } });
-
-  // 在页面内注入 fetch 调用，hook 会自动拦截响应并上报
-  let totalFetched = 0;
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: "MAIN",
-      args: [slice.map((m) => m.mallId), ACTIVITY_OVERVIEW_PAGE_SIZE, ACTIVITY_OVERVIEW_MAX_PAGES],
-      func: async (mallIds, pageSize, maxPages) => {
-        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-        let fetched = 0;
-        for (const mallId of mallIds) {
-          // 1. 活动类型列表
-          try {
-            await fetch("/sydney/api/activity/queryMallActivityTypeList", {
-              method: "POST", credentials: "include", cache: "no-store",
-              headers: { "Content-Type": "application/json", mallid: mallId },
-              body: JSON.stringify({}),
-            });
-            fetched++;
-          } catch {}
-          await delay(300);
-          // 2. 分页拉活动总览
-          for (let page = 1; page <= maxPages; page++) {
-            try {
-              const resp = await fetch("/sydney/api/activity/queryMallActivityOverView", {
-                method: "POST", credentials: "include", cache: "no-store",
-                headers: { "Content-Type": "application/json", mallid: mallId },
-                body: JSON.stringify({ pageNo: page, pageSize }),
-              });
-              const data = await resp.json();
-              fetched++;
-              const res = data?.result || data || {};
-              const list = res.overViewVOList || res.list || res.activityList || [];
-              const total = Number(res.totalNum || res.total || 0);
-              if (!Array.isArray(list) || !list.length || page * pageSize >= total) break;
-            } catch { break; }
-            await delay(400);
-          }
-          await delay(500);
-        }
-        return fetched;
-      },
-    });
-    totalFetched = results?.[0]?.result || 0;
-  } catch (e) { console.warn("[sw] activity-overview page-inject err:", e?.message || e); }
-
-  await new Promise((r) => setTimeout(r, 4000)); // 等 hook 捕获 + flush
-  if (opened) { try { await chrome.tabs.remove(tab.id); } catch {} }
-
-  console.log(`[sw] activity-overview page-inject done: fetched=${totalFetched} malls=${slice.length}`);
-  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now, last_success_at: totalFetched > 0 ? Date.now() : (state.last_success_at || 0), cursor: (start + ACTIVITY_OVERVIEW_MALLS_PER_RUN) % malls.length, total_malls: malls.length, last_malls: slice.length, last_fetched: totalFetched } });
-  if (totalFetched > 0) await flush();
-  return { ok: true, malls: slice.length, fetched: totalFetched };
+  await setStorage({ [ACTIVITY_OVERVIEW_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_mall: cur.mallId, last_activities: activities.length, last_enqueued: enqueuedCount } });
+  if (enqueuedCount > 0) await flush();
+  console.log(`[sw] activity-overview done: mall=${cur.mallId} activities=${activities.length} enqueued=${enqueuedCount}`);
+  return { ok: true, mall: cur.mallId, activities: activities.length, enqueued: enqueuedCount };
 }
 
 // ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------

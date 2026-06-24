@@ -146,6 +146,8 @@ export const URL_WHITELIST = [
   "/bg/swift/api/common/statistics/queryIncomeRanking",
 
   // === 活动 / 营销 / 优惠券 / 竞价 ===
+  "/sydney/api/activity/queryMallActivityOverView",
+  "/sydney/api/activity/queryMallActivityTypeList",
   "/api/activity/data/query-activity-theme-info",
   "/api/activity/data/market/trend",
   "/api/activity/data/market/monitor",
