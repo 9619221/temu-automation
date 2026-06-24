@@ -46,7 +46,6 @@ function shortReason(raw: string | null): string {
   return [...tags].join("，") || clean;
 }
 
-type SkuInfoMap = Record<string, { ext?: string; spec?: string }>;
 type GoodsInfoMap = Record<string, { title?: string; thumb?: string; skcId?: string }>;
 
 interface SpuRow {
@@ -93,7 +92,7 @@ function groupBySpu(rows: SiteExceptionRow[], gi: GoodsInfoMap): SpuRow[] {
 }
 
 export default function SiteExceptionTab({ active, storeFilter, search, commonFilters }: SiteExceptionTabProps) {
-  const { rows: rawRows, skuInfo, goodsInfo, loading } = useSiteExceptions(active);
+  const { rows: rawRows, goodsInfo, loading } = useSiteExceptions(active);
   const { inScope } = useStoreScope();
 
   const filtered = useMemo(() => {
@@ -144,20 +143,6 @@ export default function SiteExceptionTab({ active, storeFilter, search, commonFi
     { title: "最新时间", dataIndex: "latest_time", width: 160, sorter: (a, b) => (a.latest_time || "").localeCompare(b.latest_time || ""), defaultSortOrder: "descend", render: (v: string | null) => <span style={{ fontSize: 12 }}>{fmtTime(v)}</span> },
   ];
 
-  const skuColumns: ColumnsType<SiteExceptionRow> = [
-    { title: "SKU ID", dataIndex: "sku_id", width: 150, render: (v: string, r) => {
-      const ext = r.sku_ext_code || (skuInfo as SkuInfoMap)?.[v]?.ext;
-      return <Typography.Text copyable={{ text: ext || v }} style={{ fontSize: 12 }}>{ext || v}</Typography.Text>;
-    } },
-    { title: "SKU属性", dataIndex: "sku_spec", width: 140, render: (v: string | null, r) => {
-      const spec = v || (skuInfo as SkuInfoMap)?.[r.sku_id]?.spec;
-      return spec ? <span style={{ fontSize: 12 }}>{spec}</span> : <span style={{ color: "#bbb" }}>—</span>;
-    } },
-    { title: "异常原因", dataIndex: "exception_reason", render: (v: string | null) => <span style={{ fontSize: 12 }}>{shortReason(v)}</span> },
-    { title: "异常站点", dataIndex: "site_name", width: 100, render: (v: string) => <Tag color="orange">{v}</Tag> },
-    { title: "异常时间", dataIndex: "exception_time", width: 160, render: (v: string | null) => <span style={{ fontSize: 12 }}>{fmtTime(v)}</span> },
-  ];
-
   const skuCount = new Set(filtered.map((r) => r.sku_id)).size;
 
   return (
@@ -180,17 +165,6 @@ export default function SiteExceptionTab({ active, storeFilter, search, commonFi
           loading={loading}
           pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }}
           scroll={{ x: 960 }}
-          expandable={{
-            expandedRowRender: (record) => (
-              <Table<SiteExceptionRow>
-                dataSource={record._rows}
-                columns={skuColumns}
-                rowKey={(r) => `${r.sku_id}::${r.site_name}`}
-                size="small"
-                pagination={false}
-              />
-            ),
-          }}
         />
       )}
     </div>

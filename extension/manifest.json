@@ -9,7 +9,8 @@
     "alarms",
     "scripting",
     "tabs",
-    "windows"
+    "windows",
+    "offscreen"
   ],
   "host_permissions": [
     "https://erp.temu.chat/*",

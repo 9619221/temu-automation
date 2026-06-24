@@ -2864,7 +2864,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             onRow={(row) => ({
               onDoubleClick: () => setSkuDetailRow(row),
             })}
-            scroll={{ x: 1728, y: "max(220px, calc(100vh - 500px))" }}
+            scroll={{ x: 1728, y: "calc(100vh - 170px)" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],

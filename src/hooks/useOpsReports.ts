@@ -8,7 +8,7 @@ import useSWR, { type SWRConfiguration, mutate as globalMutate } from "swr";
 import type {
   SkuRow, RiskRow, ActivityRow, ActProductRow, ShopHealthRow, StockOrderRow, TrendRow,
   AdMallRow, ProductPanelRow, FirstShipRow, GoodsCreatedRow, QcRow, QualityRow, QualityShopRow,
-  ReviewRow, HpfRow, HpfDetail, LifecycleRow, SiteExceptionRow,
+  ReviewRow, HpfRow, HpfDetail, LifecycleRow, SiteExceptionRow, FlowAnalysisRow,
 } from "../types/opsWorkbench";
 
 // 首次拉满即停,不自动重验(对齐原 loaded 标记语义);刷新统一走 mutate()。
@@ -53,6 +53,33 @@ export const useFirstShipToday = makeRowsHook<FirstShipRow>("firstShipToday", "f
 export const useGoodsCreatedToday = makeRowsHook<GoodsCreatedRow>("goodsCreatedToday", "goodsCreatedToday");
 export const useOpenapiQc = makeRowsHook<QcRow>("openapiQc", "openapiQc");
 export const useHighPriceFlow = makeRowsHook<HpfRow>("highPriceFlow", "highPriceFlow");
+export function useFlowAnalysis(enabled = true, statDate = "") {
+  const key = enabled ? `ops:flowAnalysis:${statDate}` : null;
+  const { data, isLoading, mutate } = useSWR<{ rows: FlowAnalysisRow[]; available_dates: string[] }>(
+    key,
+    async () => {
+      const api = reportsApi();
+      const fn = api?.flowAnalysis as undefined | ((arg: any) => Promise<any>);
+      if (!fn) return { rows: [], available_dates: [] };
+      const resp = await fn({ includeTest: false, statDate });
+      if (resp?.ok && resp.data) return { rows: (resp.data.rows || []) as FlowAnalysisRow[], available_dates: (resp.data.available_dates || []) as string[] };
+      return { rows: [], available_dates: [] };
+    },
+    SWR_OPTS,
+  );
+  return { rows: data?.rows ?? [], availableDates: data?.available_dates ?? [], loading: isLoading, reload: () => mutate() };
+}
+
+export interface FlowTrendPoint { date: string; expose: number; click: number; detail_visitor: number; add_cart: number; buyer: number; pay_goods: number; ctr: number | null; click_pay_rate: number | null; }
+export async function fetchFlowTrend(mallId: string, productId: string, goodsId: string, site: string): Promise<FlowTrendPoint[]> {
+  const api = reportsApi();
+  const fn = (api as any)?.flowTrend;
+  if (!fn) return [];
+  const resp = await fn({ mallId, productId, goodsId, site });
+  if (resp?.ok && resp.data) return (resp.data.rows || []) as FlowTrendPoint[];
+  return [];
+}
+
 export async function fetchHpfDetail(mallId: string, productId: string): Promise<HpfDetail | null> {
   const api = reportsApi();
   const fn = (api as any)?.highPriceFlowDetail;

@@ -24,7 +24,7 @@ const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
   buyer: "/sourcing-center",
   finance: "/purchase-center",
   warehouse: "/warehouse-center",
-  viewer: "/shop",
+  viewer: "/ops-workbench",
 };
 
 const ROUTE_ROLES: Record<string, string[]> = {
@@ -38,7 +38,6 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/warehouse-center": ["admin", "manager", "warehouse"],
   "/qc-outbound": ["admin", "manager", "operations", "warehouse"],
   "/work-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
-  "/shop": ["admin", "manager", "operations", "viewer"],
   "/multi-store-report": ["admin", "manager", "operations", "finance", "viewer"],
   "/ops-workbench": ["admin", "manager", "operations", "viewer"],
   "/after-sales": ["admin", "manager", "operations", "viewer"],

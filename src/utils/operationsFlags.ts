@@ -1,7 +1,7 @@
 // 运营工作台「切官方 API」期间：官方未覆盖的板块统一隐藏开关（一处控制、可逆）
 // 想恢复某块：把对应开关改成 false 即可——代码与后端数据都保留着，不是删除。
 export const HIDE_RISK = true;     // 风险违规：官方 API 无接口
-export const HIDE_ACTIVITY = false; // 活动可报/报名：恢复抓包版（决策表+一键报名）。官方「活动API组」35 店未授权，暂沿用扩展抓包数据源（temu_activity_snapshot）；待官方授权到位后再切官方 API。
+export const HIDE_ACTIVITY = false; // 活动：简化只读列表（报名操作走咕噜噜扩展）
 export const HIDE_REVIEW = true;   // 评价口碑：官方 API 无接口
 // 已切官方 API 数据源：官方未提供的数据（销量逐日趋势 / 申报价 / 商品流量 / 限流 / 合规）随之隐藏
 export const OFFICIAL_SOURCE = true;

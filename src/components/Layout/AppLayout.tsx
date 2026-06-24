@@ -9,7 +9,6 @@ import {
   BellOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
-  DashboardOutlined,
   DatabaseOutlined,
   DollarOutlined,
   ExportOutlined,
@@ -71,7 +70,6 @@ const menuItems = [
     key: "group-operations",
     label: "运营",
     children: [
-      { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
       { key: "/auto-purchase", icon: <PlusCircleOutlined />, label: "采购备货" },
@@ -139,8 +137,6 @@ export default function AppLayout() {
   let selectedKey = location.pathname;
   if (location.pathname.startsWith("/products/")) {
     selectedKey = "/products";
-  } else if (location.pathname === "/dashboard") {
-    selectedKey = "/shop";
   } else if (location.pathname === "/tasks") {
     selectedKey = "/temu-robots";
   }

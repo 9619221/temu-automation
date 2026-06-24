@@ -521,6 +521,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       settlement: (options) => ipcRenderer.invoke("erp:reports:settlement", options || {}),
       pipelineOverview: (options) => ipcRenderer.invoke("erp:reports:pipeline-overview", options || {}),
       productRiskTags: (options) => ipcRenderer.invoke("erp:reports:product-risk-tags", options || {}),
+      flowAnalysis: (options) => ipcRenderer.invoke("erp:reports:flow-analysis", options || {}),
+      flowTrend: (options) => ipcRenderer.invoke("erp:reports:flow-trend", options || {}),
       siteExceptions: (options) => ipcRenderer.invoke("erp:reports:site-exceptions", options || {}),
     },
     opTask: {
@@ -530,6 +532,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     enroll: {
       create: (payload) => ipcRenderer.invoke("erp:enroll:create", payload || {}),
       status: (payload) => ipcRenderer.invoke("erp:enroll:status", payload || {}),
+    },
+    addstock: {
+      create: (payload) => ipcRenderer.invoke("erp:addstock:create", payload || {}),
+      status: (payload) => ipcRenderer.invoke("erp:addstock:status", payload || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {
@@ -580,6 +586,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     printSilent: (payload) => ipcRenderer.invoke("print:silent", payload),
     printDialog: (payload) => ipcRenderer.invoke("print:dialog", payload),
     printPdfSilent: (payload) => ipcRenderer.invoke("print:pdf-silent", payload),
+    savePdfFile: (payload) => ipcRenderer.invoke("print:save-pdf", payload),
     openGuluWindow: (payload) => ipcRenderer.invoke("print:open-gulu", payload),
     openLogisticsWindow: (billNo) => ipcRenderer.invoke("app:open-logistics-window", billNo),
     readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),

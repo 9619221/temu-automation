@@ -64,7 +64,7 @@ function runCleanup() {
     const now = Date.now();
     const del = db.prepare("DELETE FROM capture_events WHERE received_at < ?").run(now - 3 * 86400_000);
     const nul = db.prepare("UPDATE capture_events SET body_json = NULL WHERE body_json IS NOT NULL AND received_at < ?").run(now - 2 * 3600_000);
-    const rsk = db.prepare("UPDATE temu_operation_risk_snapshot SET raw_json = NULL WHERE raw_json IS NOT NULL AND first_seen_at < datetime('now', '-7 days')").run();
+    const rsk = db.prepare("UPDATE temu_operation_risk_snapshot SET raw_json = NULL WHERE raw_json IS NOT NULL AND first_seen_at < datetime('now', '-60 days')").run();
     const stk = db.prepare("UPDATE temu_stock_order_snapshot SET raw_json = NULL WHERE raw_json IS NOT NULL AND first_seen_at < datetime('now', '-7 days')").run();
     const hb = db.prepare("DELETE FROM agent_heartbeats WHERE received_at < ?").run(now - 30 * 86400_000);
     db.pragma("wal_checkpoint(TRUNCATE)");

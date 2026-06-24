@@ -2907,9 +2907,10 @@ function getImageStudioProjectInfo() {
 
 function getImageStudioAuthHeaders(projectInfo = getImageStudioProjectInfo()) {
   const envLocalVars = readEnvKeyValueFile(projectInfo.envLocalPath);
-  if (envLocalVars.API_SECRET) {
+  const secret = envLocalVars.API_SECRET || getDefaultCredentials().apiSecret;
+  if (secret) {
     return {
-      Authorization: `Bearer ${envLocalVars.API_SECRET}`,
+      Authorization: `Bearer ${secret}`,
     };
   }
   return {};
@@ -6846,8 +6847,22 @@ ipcMain.handle("print:dialog", async (_event, payload) => {
   return printHtml({ ...payload, silent: false });
 });
 
+ipcMain.handle("print:save-pdf", async (_event, payload) => {
+  const { base64 } = payload || {};
+  if (!base64) throw new Error("缺少 PDF 数据");
+  const { dialog } = require("electron");
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "保存标签 PDF",
+    defaultPath: `temu-label-${Date.now()}.pdf`,
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(result.filePath, Buffer.from(base64, "base64"));
+  return { ok: true, filePath: result.filePath };
+});
+
 ipcMain.handle("print:pdf-silent", async (_event, payload) => {
-  const { base64, printerName, copies } = payload || {};
+  const { base64, printerName, copies, color, scaleFactor, pagesPerSheet } = payload || {};
   if (!base64) throw new Error("缺少 PDF 数据");
   const os = require("node:os");
   const tmpPath = path.join(os.tmpdir(), `temu-label-${Date.now()}.pdf`);
@@ -6857,14 +6872,16 @@ ipcMain.handle("print:pdf-silent", async (_event, payload) => {
   const useSilent = printerName && !isVirtualPrinter;
 
   return new Promise((resolve, reject) => {
-    const win = new BrowserWindow({ show: !useSilent, width: 400, height: 300, webPreferences: { contextIsolation: true, nodeIntegration: false } });
-    if (!useSilent) win.setMenuBarVisibility(false);
-    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, useSilent ? 30000 : 120000);
+    const win = new BrowserWindow({ show: !useSilent, width: 800, height: 600, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+    const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); reject(new Error("打印超时")); }, 120000);
     win.webContents.on("did-finish-load", () => {
       setTimeout(() => {
-        const opts = { printBackground: true, margins: { marginType: "none" } };
-        if (useSilent) { opts.silent = true; opts.deviceName = printerName; } else { opts.silent = false; if (printerName) opts.deviceName = printerName; }
+        const opts = { printBackground: true, margins: { marginType: "none" }, silent: false };
+        if (useSilent) { opts.silent = true; opts.deviceName = printerName; }
         if (copies > 1) opts.copies = copies;
+        if (color !== undefined) opts.color = color;
+        if (scaleFactor > 0) opts.scaleFactor = scaleFactor;
+        if (pagesPerSheet > 1) opts.pagesPerSheet = pagesPerSheet;
         win.webContents.print(opts, (success, reason) => {
           clearTimeout(timer);
           if (!win.isDestroyed()) win.destroy();

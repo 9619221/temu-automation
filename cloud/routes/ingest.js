@@ -161,6 +161,26 @@ r.get("/v1/activity-targets", authMiddleware, (req, res) => {
   }
 });
 
+r.get("/v1/price-adjust-products", authMiddleware, (req, res) => {
+  const db = getDb();
+  const mallId = String(req.query.mall_id || "").trim();
+  if (!mallId) return res.json({ ok: true, products: [] });
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT product_id FROM skc_snapshots
+      WHERE tenant_id = ? AND mall_id = ? AND product_id IS NOT NULL AND product_id <> ''
+      ORDER BY last_updated_at DESC LIMIT ?
+    `).all(req.user.tid, mallId, limit);
+    res.json({ ok: true, products: rows.map((r) => r.product_id) });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return res.json({ ok: true, products: [] });
+    }
+    throw error;
+  }
+});
+
 // Sales trend active backfill targets. The extension asks the cloud which
 // product SKU ids recently sold by mall, then fetches querySkuSalesNumber in
 // the seller browser session where Temu cookies are available.
@@ -562,6 +582,87 @@ r.get("/v1/enroll-tasks/status", authMiddleware, (req, res) => {
   try {
     const ph = ids.map(() => "?").join(",");
     const rows = db.prepare(`SELECT id, status, result_json, created_at, done_at FROM enroll_task WHERE tenant_id=? AND id IN (${ph})`).all(tenant_id, ...ids);
+    res.json({ ok: true, tasks: rows.map((row) => ({ task_id: row.id, status: row.status, created_at: row.created_at, done_at: row.done_at, result: row.result_json ? JSON.parse(row.result_json) : null })) });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
+// ===== 追加活动库存任务通道 =====
+r.post("/v1/addstock-tasks/create", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { mall_id, enroll_id, add_stock, sku_ext_code } = req.body || {};
+  if (!mall_id || !enroll_id || !add_stock || add_stock <= 0) {
+    return res.status(400).json({ error: "mall_id / enroll_id / add_stock(>0) 必填" });
+  }
+  const id = crypto.randomUUID();
+  try {
+    db.prepare(`
+      INSERT INTO addstock_task (id, tenant_id, mall_id, enroll_id, add_stock, sku_ext_code, status, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now'))
+    `).run(id, tenant_id, String(mall_id), String(enroll_id), Number(add_stock), sku_ext_code || null, req.user.uid || null);
+    res.json({ ok: true, task_id: id });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.status(503).json({ error: "addstock_task 表未迁移(需 migrate)" });
+    throw error;
+  }
+});
+
+r.get("/v1/addstock-tasks", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const mall_id = String(req.query.mall_id || "").trim();
+  if (!mall_id) return res.json({ ok: true, tasks: [] });
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 10));
+  try {
+    const rows = db.prepare(`
+      SELECT id, mall_id, enroll_id, add_stock, sku_ext_code
+      FROM addstock_task WHERE tenant_id = ? AND mall_id = ? AND status = 'pending'
+      ORDER BY created_at ASC LIMIT ?
+    `).all(tenant_id, mall_id, limit);
+    if (rows.length) {
+      const mark = db.prepare("UPDATE addstock_task SET status='dispatched', dispatched_at=datetime('now') WHERE id=? AND status='pending'");
+      db.transaction(() => { for (const row of rows) mark.run(row.id); })();
+    }
+    const tasks = rows.map((row) => ({
+      task_id: row.id, mall_id: row.mall_id,
+      enroll_id: row.enroll_id, add_stock: row.add_stock, sku_ext_code: row.sku_ext_code,
+    }));
+    res.json({ ok: true, tasks });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
+r.post("/v1/addstock-tasks/result", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { task_id, status, result } = req.body || {};
+  if (!task_id) return res.status(400).json({ error: "task_id 必填" });
+  const st = status === "failed" ? "failed" : "done";
+  try {
+    const info = db.prepare(`
+      UPDATE addstock_task SET status=?, result_json=?, done_at=datetime('now')
+      WHERE id=? AND tenant_id=?
+    `).run(st, result != null ? JSON.stringify(result).slice(0, 20000) : null, String(task_id), tenant_id);
+    res.json({ ok: true, updated: info.changes });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, updated: 0 });
+    throw error;
+  }
+});
+
+r.get("/v1/addstock-tasks/status", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const ids = String(req.query.ids || req.query.task_id || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return res.json({ ok: true, tasks: [] });
+  try {
+    const ph = ids.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT id, status, result_json, created_at, done_at FROM addstock_task WHERE tenant_id=? AND id IN (${ph})`).all(tenant_id, ...ids);
     res.json({ ok: true, tasks: rows.map((row) => ({ task_id: row.id, status: row.status, created_at: row.created_at, done_at: row.done_at, result: row.result_json ? JSON.parse(row.result_json) : null })) });
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });

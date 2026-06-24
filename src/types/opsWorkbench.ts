@@ -141,6 +141,7 @@ export interface HpfRow {
   product_id: string; skc_id: string | null; title: string | null; thumb: string | null;
   sku_codes: string | null; decline_rate: number | null; last_seen_date: string | null;
   declared_price: number | null; current_price: number | null; target_price: number | null; stock: number | null; today_sales: number | null; last7d_sales: number | null;
+  flow_reduce_status: number | null;
   __rk?: number;
 }
 export interface HpfSkuDetail {
@@ -161,6 +162,21 @@ export interface LifecycleRow { mall_id: string; skc_id: string; status: string;
 export interface Diag { label: string; action: string; level: number }
 export interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
 
+export interface FlowAnalysisRow {
+  mall_id: string; store_code: string | null; mall_name: string | null;
+  site: string | null; stat_date: string | null;
+  product_id: string; goods_id: string | null;
+  title: string | null; category_name: string | null; thumb_url: string | null;
+  expose: number | null; click: number | null;
+  detail_visit: number | null; detail_visitor: number | null;
+  add_cart: number | null; collect: number | null;
+  pay_goods: number | null; pay_order: number | null; buyer: number | null;
+  expose_pay_rate: number | null; ctr: number | null; click_pay_rate: number | null;
+  search_expose: number | null; search_click: number | null; search_pay: number | null;
+  recommend_expose: number | null; recommend_click: number | null; recommend_pay: number | null;
+  grow: string | null; grow_text: string | null;
+  __rk?: number;
+}
 export interface SiteExceptionRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
   sku_id: string; goods_id: string | null; skc_id: string | null;

@@ -204,6 +204,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/goods-created-today": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/quality-panel": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/reviews": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/flow-analysis": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/site-exceptions": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/qc-flaw-images": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
@@ -6188,7 +6189,7 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc" || pathname === "/api/erp/reports/firstship-today" || pathname === "/api/erp/reports/goods-created-today" || pathname === "/api/erp/reports/quality-panel" || pathname === "/api/erp/reports/reviews" || pathname === "/api/erp/reports/high-price-flow" || pathname === "/api/erp/reports/warehouse-inventory") {
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc" || pathname === "/api/erp/reports/firstship-today" || pathname === "/api/erp/reports/goods-created-today" || pathname === "/api/erp/reports/quality-panel" || pathname === "/api/erp/reports/reviews" || pathname === "/api/erp/reports/high-price-flow" || pathname === "/api/erp/reports/warehouse-inventory" || pathname === "/api/erp/reports/flow-analysis" || pathname === "/api/erp/reports/flow-trend") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -6198,8 +6199,12 @@ async function handleRequest({
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const productId = parsed.searchParams.get("product_id") || "";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.getOpenapiQcFast : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.getQualityPanelFast : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : svc.buildActivityList;
-        const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.getOpenapiQcFast : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.getQualityPanelFast : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : pathname.endsWith("flow-analysis") ? svc.buildFlowAnalysis : pathname.endsWith("flow-trend") ? svc.buildFlowTrend : svc.buildActivityList;
+        const statDate = parsed.searchParams.get("stat_date") || "";
+        const mallId = parsed.searchParams.get("mall_id") || "";
+        const goodsId = parsed.searchParams.get("goods_id") || "";
+        const site = parsed.searchParams.get("site") || "";
+        const data = fn(db, { includeTest, productId, statDate, mallId, goodsId, site, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

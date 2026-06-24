@@ -33,6 +33,7 @@ function firstDeepDefined(obj, keys, maxDepth = 3) {
 function pickList(body) {
   const candidates = [
     body?.result?.pageItems,
+    body?.result?.data,
     body?.result?.dataList,
     body?.result?.list,
     body?.result?.items,
@@ -971,6 +972,13 @@ function parseMallActivityOverview(db, ctx, evt, body) {
     total_activity_count: total,
     sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
   });
+  // 活动明细列表:queryMallActivityOverView 返回的逐条活动数据,复用 parseActivitySnapshot 的字段提取
+  const overviewList = result.overViewVOList || result.activityOverViewVOList || result.list || result.activityList || result.dataList;
+  if (Array.isArray(overviewList) && overviewList.length > 0) {
+    try { parseActivitySnapshot(db, ctx, evt, { result: { list: overviewList } }); } catch (e) {
+      console.warn(`[parseMallActivityOverview] overview list parse: ${String(e?.message || e).slice(0, 200)}`);
+    }
+  }
 }
 
 // ---------- 店铺流量 / 经营数据（mallFlow / mallInfo） ----------
@@ -2016,11 +2024,11 @@ function parseOperationRisk(db, ctx, evt, body) {
     INSERT INTO temu_operation_risk_snapshot (
       id, tenant_id, mall_id, site, stat_date, risk_type, risk_key,
       risk_title, risk_status, severity, product_id, skc_id, goods_id,
-      order_id, quantity, metric_json, raw_json, source_event_id, sources_json
+      order_id, quantity, flow_reduce_status, metric_json, raw_json, source_event_id, sources_json
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @risk_type, @risk_key,
       @risk_title, @risk_status, @severity, @product_id, @skc_id, @goods_id,
-      @order_id, @quantity, @metric_json, @raw_json, @source_event_id, @sources_json
+      @order_id, @quantity, @flow_reduce_status, @metric_json, @raw_json, @source_event_id, @sources_json
     )
     ON CONFLICT(tenant_id, mall_id, risk_type, risk_key, stat_date) DO UPDATE SET
       site            = COALESCE(excluded.site, site),
@@ -2032,6 +2040,7 @@ function parseOperationRisk(db, ctx, evt, body) {
       goods_id        = COALESCE(excluded.goods_id, goods_id),
       order_id        = COALESCE(excluded.order_id, order_id),
       quantity        = COALESCE(excluded.quantity, quantity),
+      flow_reduce_status = COALESCE(excluded.flow_reduce_status, flow_reduce_status),
       metric_json     = COALESCE(excluded.metric_json, metric_json),
       raw_json        = COALESCE(excluded.raw_json, raw_json),
       source_event_id = COALESCE(excluded.source_event_id, source_event_id),
@@ -2044,6 +2053,9 @@ function parseOperationRisk(db, ctx, evt, body) {
   // querySiteTargetPrice 的每条站点记录不含 productId，从请求体 __request 提取
   const requestProductId = /querySiteTargetPrice/i.test(String(evt.url_path || ""))
     ? toNullableString(body?.__request?.productId) : null;
+  // queryFullHighPriceFlowReduceList 的请求体含 flowReduceStatus(1=已限流 2=即将限流)
+  const requestFlowReduceStatus = (type === "high_price_flow")
+    ? toNullableInteger(body?.__request?.flowReduceStatus) : null;
   items.forEach((row, index) => {
     if (!row || typeof row !== "object") return;
     const order_id = toNullableString(firstDeepDefined(row, [
@@ -2078,6 +2090,9 @@ function parseOperationRisk(db, ctx, evt, body) {
         "quantity", "qty", "expectQuantity", "expectedQuantity", "actualQuantity", "deliverQuantity",
         "purchaseQuantity", "returnQuantity", "stockNum", "lackNum",
       ], 2)),
+      flow_reduce_status: type === "high_price_flow"
+        ? (toNullableInteger(row.flowReduceStatus) ?? requestFlowReduceStatus)
+        : null,
       metric_json: toJsonText({
         sourcePath: evt.url_path,
         status: firstDeepDefined(row, ["status", "state", "auditStatus", "orderStatus", "exceptionStatus"], 2),
@@ -2438,13 +2453,13 @@ function parseEnrollRecord(db, ctx, evt, body) {
       enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
       product_id, skc_id, sku_id, sku_ext_code, goods_id,
       activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time, session_start_time,
-      sites_json, raw_json, source_event_id
+      session_status_tag, sites_json, raw_json, source_event_id
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
       @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
       @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
       @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time, @session_start_time,
-      @sites_json, @raw_json, @source_event_id
+      @session_status_tag, @sites_json, @raw_json, @source_event_id
     )
     ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
       enroll_status        = COALESCE(excluded.enroll_status, enroll_status),
@@ -2463,11 +2478,13 @@ function parseEnrollRecord(db, ctx, evt, body) {
       sold_status          = COALESCE(excluded.sold_status, sold_status),
       session_end_time     = COALESCE(excluded.session_end_time, session_end_time),
       session_start_time   = COALESCE(excluded.session_start_time, session_start_time),
+      session_status_tag   = COALESCE(excluded.session_status_tag, session_status_tag),
       sites_json           = COALESCE(excluded.sites_json, sites_json),
       source_event_id      = COALESCE(excluded.source_event_id, source_event_id),
       last_updated_at      = datetime('now')
   `);
   const stat_date = normalizeStatDate(firstDefined(result, ["statDate", "date", "dataDate"]), evt);
+  const session_status_tag = toNullableInteger(body?.__request?.sessionStatusTag);
   const mall_id = eventMallId(ctx, evt);
   for (const rec of list) {
     if (!isRecord(rec)) continue;
@@ -2520,6 +2537,7 @@ function parseEnrollRecord(db, ctx, evt, body) {
         stat_date,
         row_key,
         ...base,
+        session_status_tag,
         skc_id: r.skc_id,
         sku_id: r.sku_id,
         sku_ext_code: r.sku_ext_code,
@@ -2717,6 +2735,10 @@ function parseActivitySnapshot(db, ctx, evt, body) {
 // ---------- 合规属性(制造商/欧代/土代/进口商):compliance_property API ----------
 
 function parseComplianceProperty(db, ctx, evt, body) {
+  const templateList = body?.result?.template_list;
+  if (Array.isArray(templateList) && templateList.length) {
+    return parseComplianceQueryDetail(db, ctx, evt, body);
+  }
   const items = pickList(body);
   if (!Array.isArray(items) || !items.length) return;
   const upsert = db.prepare(`
@@ -2755,7 +2777,7 @@ function parseComplianceProperty(db, ctx, evt, body) {
   `);
   const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
   for (const item of items) {
-    const skc = toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id", "productSKCId"]));
+    const skc = toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id", "productSKCId", "spu_id", "spuId", "goods_id", "goodsId"]));
     if (!skc) continue;
     const props = extractComplianceProps(item);
     upsert.run({
@@ -2834,6 +2856,88 @@ function extractComplianceProps(item) {
   return out;
 }
 
+function parseComplianceQueryDetail(db, ctx, evt, body) {
+  const templates = body.result.template_list;
+  const r = body.result || {};
+  const skc = String(r.spu_id || r.goods_id || "").trim();
+  if (!skc) return;
+  const props = {
+    manufacturer_name: null, manufacturer_address: null, manufacturer_email: null,
+    ec_rep_name: null, ec_rep_address: null, ec_rep_email: null,
+    tur_rep_name: null, tur_rep_address: null,
+    importer_name: null, importer_address: null,
+  };
+  for (const tmpl of templates) {
+    const reps = Array.isArray(tmpl.rep_detail_list) ? tmpl.rep_detail_list : [];
+    if (!reps.length) continue;
+    const first = reps[0] || {};
+    const name = (first.rep_name || "").trim();
+    if (!name) continue;
+    const addrInfo = first.rep_address_info || {};
+    const addr = [addrInfo.address_line_one, addrInfo.city, addrInfo.state_name, addrInfo.region_name, addrInfo.post_code].filter(Boolean).join(", ");
+    const email = first.rep_mail || null;
+    const taskType = Number(tmpl.task_type);
+    if (taskType === 25) {
+      props.ec_rep_name = name;
+      if (addr) props.ec_rep_address = addr;
+      if (email) props.ec_rep_email = email;
+    } else if (taskType === 60) {
+      props.manufacturer_name = name;
+      if (addr) props.manufacturer_address = addr;
+      if (email) props.manufacturer_email = email;
+    } else if (taskType === 84) {
+      props.tur_rep_name = name;
+      if (addr) props.tur_rep_address = addr;
+    }
+  }
+  if (!props.ec_rep_name && !props.manufacturer_name && !props.tur_rep_name) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_compliance_property (
+      id, tenant_id, mall_id, site, product_skc_id, product_name,
+      manufacturer_name, manufacturer_address, manufacturer_email,
+      ec_rep_name, ec_rep_address, ec_rep_email,
+      tur_rep_name, tur_rep_address,
+      importer_name, importer_address,
+      raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @product_skc_id, @product_name,
+      @manufacturer_name, @manufacturer_address, @manufacturer_email,
+      @ec_rep_name, @ec_rep_address, @ec_rep_email,
+      @tur_rep_name, @tur_rep_address,
+      @importer_name, @importer_address,
+      @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, product_skc_id) DO UPDATE SET
+      site                 = COALESCE(excluded.site, site),
+      manufacturer_name    = COALESCE(excluded.manufacturer_name, manufacturer_name),
+      manufacturer_address = COALESCE(excluded.manufacturer_address, manufacturer_address),
+      manufacturer_email   = COALESCE(excluded.manufacturer_email, manufacturer_email),
+      ec_rep_name          = COALESCE(excluded.ec_rep_name, ec_rep_name),
+      ec_rep_address       = COALESCE(excluded.ec_rep_address, ec_rep_address),
+      ec_rep_email         = COALESCE(excluded.ec_rep_email, ec_rep_email),
+      tur_rep_name         = COALESCE(excluded.tur_rep_name, tur_rep_name),
+      tur_rep_address      = COALESCE(excluded.tur_rep_address, tur_rep_address),
+      importer_name        = COALESCE(excluded.importer_name, importer_name),
+      importer_address     = COALESCE(excluded.importer_address, importer_address),
+      raw_json             = excluded.raw_json,
+      source_event_id      = excluded.source_event_id,
+      sources_json         = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at      = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: ctx.mall_id || "",
+    site: ctx.site || null,
+    product_skc_id: skc,
+    product_name: null,
+    ...props,
+    raw_json: JSON.stringify(body.result).slice(0, 20000),
+    source_event_id: evt.id,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
+}
+
 // ---------- SKU 站点绑定异常（queryFullyOtherMessage） ----------
 
 function parseTemuSkuSiteException(db, ctx, evt, body) {
@@ -2898,6 +3002,93 @@ function parseTemuSkuSiteException(db, ctx, evt, body) {
   }
 }
 
+// 从 /price-adjust/product-adjust-query 响应提取 marketingActivityPriceDTOList，
+// 补充 /enroll/list 遗漏的活动报名数据（如独立日等当前进行中的活动）。
+function parsePriceAdjustActivities(db, ctx, evt, body) {
+  const spuMap = body?.result?.spuAdjustResult;
+  if (!spuMap || typeof spuMap !== "object") return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_activity_enroll_record (
+      id, tenant_id, mall_id, site, stat_date, row_key,
+      enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
+      product_id, skc_id, sku_id, sku_ext_code, goods_id,
+      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time, session_start_time,
+      session_status_tag, sites_json, raw_json, source_event_id
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
+      @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
+      @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
+      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time, @session_start_time,
+      @session_status_tag, @sites_json, @raw_json, @source_event_id
+    )
+    ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
+      enroll_status        = COALESCE(excluded.enroll_status, enroll_status),
+      activity_thematic_name = COALESCE(excluded.activity_thematic_name, activity_thematic_name),
+      activity_price_cents = COALESCE(excluded.activity_price_cents, activity_price_cents),
+      session_end_time     = COALESCE(excluded.session_end_time, session_end_time),
+      session_start_time   = COALESCE(excluded.session_start_time, session_start_time),
+      product_id           = COALESCE(excluded.product_id, product_id),
+      skc_id               = COALESCE(excluded.skc_id, skc_id),
+      sku_id               = COALESCE(excluded.sku_id, sku_id),
+      sku_ext_code         = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      source_event_id      = COALESCE(excluded.source_event_id, source_event_id),
+      last_updated_at      = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const stat_date = normalizeStatDate(null, evt);
+  for (const [productId, spu] of Object.entries(spuMap)) {
+    if (!spu || typeof spu !== "object") continue;
+    const skcItems = Array.isArray(spu.skcItems) ? spu.skcItems : [];
+    for (const skc of skcItems) {
+      if (!isRecord(skc)) continue;
+      const skc_id = toNullableString(skc.productSkcId, 100);
+      const skuItems = Array.isArray(skc.items) ? skc.items : [];
+      for (const sku of skuItems) {
+        if (!isRecord(sku)) continue;
+        const sku_id = toNullableString(sku.productSkuId, 100);
+        const sku_ext_code = toNullableString(sku.skuExtCode, 200);
+        const activities = Array.isArray(sku.marketingActivityPriceDTOList) ? sku.marketingActivityPriceDTOList : [];
+        for (const act of activities) {
+          if (!isRecord(act) || !act.activityInvitationId) continue;
+          const rawName = String(act.activityInvitationName || "");
+          const stripped = rawName.replace(/^活动价格-/, "");
+          const displayName = (stripped.match(/【.*$/) || [])[0] || stripped || rawName;
+          const row_key = [act.activityInvitationId, skc_id || "", sku_id || "", ""].join("|").slice(0, 300);
+          upsert.run({
+            id: crypto.randomUUID(),
+            tenant_id: ctx.tenant_id,
+            mall_id,
+            site: evt.site || null,
+            stat_date,
+            row_key,
+            enroll_id: toNullableString(act.activityInvitationId, 100),
+            enroll_status: 5,
+            enroll_time: null,
+            activity_type: null,
+            activity_thematic_id: null,
+            activity_thematic_name: toNullableString(displayName, 500),
+            product_id: toNullableString(productId, 100),
+            skc_id,
+            sku_id,
+            sku_ext_code,
+            goods_id: toNullableString(spu.goodsId || skc.goodsId, 100),
+            activity_price_cents: toNullableInteger(act.supplyPrice),
+            daily_price_cents: toNullableInteger(sku.originSupplyPrice),
+            activity_stock: null,
+            sold_status: null,
+            session_end_time: toNullableString(act.activityEndTime),
+            session_start_time: toNullableString(act.activityStartTime),
+            session_status_tag: null,
+            sites_json: null,
+            raw_json: null,
+            source_event_id: evt.id,
+          });
+        }
+      }
+    }
+  }
+}
+
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
@@ -2909,6 +3100,7 @@ const PARSERS = [
   { match: /\/api\/activity\/data\/|\/gamblers\/|\/gambit\/|\/colossus\/bsr\/|\/biddingInvitationSupplierRpcService|\/sale\/manage\/supplier\/api\/activity\//, fn: parseActivitySnapshot, name: "activitySnapshot" },
   { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
+  { match: /\/magneto\/price-adjust\/product-adjust-query/, fn: parsePriceAdjustActivities, name: "priceAdjustActivities" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
   { match: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryOrders|deliverGoods\/management\/pageQueryDeliveryBatch|\/purchase\/manager\/querySubOrderList/, fn: parseTemuStockOrders, name: "temuStockOrders" },
   { match: /querySuggestCloseJitSkc|suggestCloseJitSkc/i, fn: parseTemuJitStatus, name: "temuJitStatus" },

@@ -116,7 +116,7 @@ export const COLLECT_GROUPS = [
   {
     key: "overview",
     label: "经营与销售总览",
-    description: "聚合店铺概览、商品、销售和活动经营数据。",
+    description: "聚合商品、销售和活动经营数据。",
     category: "经营与销售",
     taskKeys: ["dashboard", "products", "sales", "salesChart", "activity", "activityLog", "activityUS", "activityEU", "chanceGoods", "marketingActivity", "yunduActivityList"],
   },

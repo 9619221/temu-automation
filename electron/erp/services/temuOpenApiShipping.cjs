@@ -517,12 +517,12 @@ async function queryGoodsLabelCodes({ db, mallId, skcIds }) {
   const ids = (skcIds || []).map((x) => Number(x)).filter(Boolean);
   if (!ids.length) return {};
   const map = {};
-  const pageSize = 100;
-  for (let i = 0; i < ids.length; i += pageSize) {
-    const chunk = ids.slice(i, i + pageSize);
+  const chunkSize = 20;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
     const result = await callShipApi(creds, "bg.glo.goods.labelv2.get", {
       productSkcIdList: chunk,
-      pageSize,
+      pageSize: chunkSize,
       page: 1,
     });
     const items = (result && result.labelCodePageResult && result.labelCodePageResult.data) || [];
@@ -687,12 +687,14 @@ async function syncShipOrderStatus({ db, soIds }) {
   if (!Array.isArray(soIds) || !soIds.length) return { updated: 0 };
   const placeholders = soIds.map(() => "?").join(",");
   const rows = db.prepare(
-    `SELECT mall_id, so_id, delivery_order_sn FROM erp_temu_openapi_consign WHERE so_id IN (${placeholders})`
+    `SELECT mall_id, so_id, delivery_order_sn, temu_status FROM erp_temu_openapi_consign WHERE so_id IN (${placeholders})`
   ).all(...soIds);
+  const SKIP_STATUSES = new Set(["取消", "已取消", "已付款待审核"]);
   // 按 mall 分组：有 delivery_order_sn 的走批量查询，没有的走逐个 subPurchaseOrderSn 查
   const byMall = new Map();
   const missingSnByMall = new Map();
   for (const r of rows) {
+    if (SKIP_STATUSES.has(r.temu_status)) continue;
     if (r.delivery_order_sn) {
       if (!byMall.has(r.mall_id)) byMall.set(r.mall_id, new Set());
       byMall.get(r.mall_id).add(r.delivery_order_sn);

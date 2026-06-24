@@ -7969,155 +7969,11 @@ td.status-cell-colored {
   font-size: 28px;
 }
 
-/* Shop overview command center */
-.shop-overview-shell {
-  gap: 18px;
-}
-
-.shop-command-grid {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.2fr) repeat(4, minmax(150px, 1fr));
-  gap: 12px;
-  align-items: stretch;
-}
-
-.shop-command-panel,
-.shop-command-card {
-  min-width: 0;
-  border: 1px solid var(--google-border-soft, #dadce0);
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: var(--shadow-card);
-}
-
-.shop-command-panel {
-  display: grid;
-  gap: 14px;
-  padding: 18px 20px;
-  border-left: 3px solid var(--google-blue, #1a73e8);
-}
-
-.shop-command-panel__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.shop-command-panel__eyebrow,
-.shop-command-card__label {
-  color: var(--google-muted, #5f6368);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.shop-command-panel__title {
-  margin-top: 4px;
-  color: var(--google-ink, #202124);
-  font-size: 18px;
-  font-weight: 760;
-}
-
-.shop-command-status {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-  border: 1px solid #d2e3fc;
-  border-radius: 999px;
-  background: #f8fbff;
-  color: var(--google-blue, #1a73e8);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.shop-command-status.is-warning {
-  border-color: rgba(251, 188, 4, 0.30);
-  background: rgba(251, 188, 4, 0.10);
-  color: #9a6700;
-}
-
-.shop-command-status.is-success {
-  border-color: rgba(52, 168, 83, 0.24);
-  background: rgba(52, 168, 83, 0.08);
-  color: #137333;
-}
-
-.shop-command-panel__value {
-  color: var(--google-ink, #202124);
-  font-size: 38px;
-  font-weight: 780;
-  line-height: 1;
-}
-
-.shop-command-panel__meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--google-muted, #5f6368);
-  font-size: 12px;
-  flex-wrap: wrap;
-}
-
-.shop-command-card {
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-  padding: 16px;
-}
-
-.shop-command-card__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: #e8f0fe;
-  color: var(--google-blue, #1a73e8);
-}
-
-.shop-command-card__value {
-  margin-top: 4px;
-  color: var(--google-ink, #202124);
-  font-size: 24px;
-  font-weight: 780;
-  line-height: 1.1;
-}
-
-.shop-command-card__hint {
-  margin-top: 4px;
-  color: var(--google-muted, #5f6368);
-  font-size: 12px;
-}
-
-.shop-data-alert.ant-alert {
-  margin: 0;
-  border-color: rgba(251, 188, 4, 0.28) !important;
-  background: #fffdf5 !important;
-}
-
-.shop-overview-tabs > .ant-tabs-nav {
-  margin-bottom: 14px !important;
-}
-
-.shop-overview-tabs > .ant-tabs-nav::before {
-  border-bottom-color: var(--google-border-soft, #dadce0) !important;
-}
-
-.shop-overview-dashboard {
-  display: grid;
-  gap: 16px;
-}
-
-.shop-overview-dashboard > .app-panel {
-  background: #ffffff !important;
-}
 
 @media (max-width: 1180px) {
   .settings-grid,
   .robot-dashboard-grid,
-  .auto-swap-layout,
-  .shop-command-grid {
+  .auto-swap-layout {
     grid-template-columns: 1fr;
   }
 
@@ -8134,9 +7990,6 @@ td.status-cell-colored {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .shop-command-card {
-    grid-template-columns: 32px minmax(0, 1fr);
-  }
 }
 
 /* AI studio desktop canvas: keep tool pages from collapsing back into a centered mini panel. */

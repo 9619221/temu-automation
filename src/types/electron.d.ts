@@ -242,6 +242,7 @@ interface AppAPI {
   printSilent?: (payload: { html: string; printerName: string; pageWidth: number; pageHeight: number; copies: number }) => Promise<{ ok: boolean }>;
   printDialog?: (payload: { html: string; pageWidth: number; pageHeight: number }) => Promise<{ ok: boolean }>;
   printPdfSilent?: (payload: { base64: string; printerName?: string; copies?: number }) => Promise<{ ok: boolean }>;
+  savePdfFile?: (payload: { base64: string }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>;
   openGuluWindow?: (payload: { printUrl: string; printerName?: string }) => Promise<{ ok: boolean }>;
   openLogisticsWindow?: (billNo: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{

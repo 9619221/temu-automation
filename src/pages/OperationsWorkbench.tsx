@@ -500,62 +500,42 @@ export default function OperationsWorkbench() {
     return [...v].sort((a, b) => (SEV_RANK[b.severity || ""] || 0) - (SEV_RANK[a.severity || ""] || 0)).map((r, i) => ({ ...r, __rk: i }));
   }, [riskStoreReady, storeFilter, sevFilter, search, inScope]);
 
-  // 活动报名「概览」:后端已聚合好每商品一行(店×货号),前端只做用户筛选(范围/店铺/活动类型/搜索),沿用后端排序
-  const actProductView = useMemo<ActProductRow[]>(() => {
+  // 活动报名「概览」:后端已聚合好每商品一行(店×货号),前端只做用户筛选(范围/店铺/活动类型/搜索/状态),沿用后端排序
+  const actProductView = useMemo<(ActProductRow & { _actInProgress: number; _actPending: number; _actTotal: number })[]>(() => {
     let v = actProducts.filter((p) => inScope(p.store_code || p.mall_id));
     if (storeFilter !== "all") v = v.filter((p) => p.store_code === storeFilter);
     if (kindFilter !== "all") v = v.filter((p) => p.kinds.includes(kindFilter));
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((p) => (p.product_name || "").toLowerCase().includes(q) || (p.sku_ext_code || "").toLowerCase().includes(q));
-    return v; // 后端已按 店→可报活动数 排序
-  }, [actProducts, storeFilter, kindFilter, search, inScope]);
+    const enriched = v.map(p => {
+      const acts = p.activities.filter(a => a.status !== "已结束");
+      const inProg = acts.filter(a => a.status === "进行中").length;
+      const pending = acts.filter(a => a.status === "未开始").length;
+      return { ...p, _actInProgress: inProg, _actPending: pending, _actTotal: acts.length };
+    });
+    const withActs = enriched.filter(p => p._actTotal > 0);
+    if (actStatusFilter === "进行中") return withActs.filter(p => p._actInProgress > 0);
+    if (actStatusFilter === "未开始") return withActs.filter(p => p._actPending > 0);
+    return withActs;
+  }, [actProducts, storeFilter, kindFilter, search, inScope, actStatusFilter]);
 
-  type ActFlatRow = { key: string; _prodKey: string; store_code: string | null; mall_id: string; mall_name: string | null; product_name: string | null; sku_ext_code: string | null; thumb: string | null } & ActivityDetail;
-  const actFlatView = useMemo(() => {
-    if (activeTab !== "activity") return [] as ActFlatRow[];
-    const rows: ActFlatRow[] = [];
-    for (const p of actProducts) {
-      if (!inScope(p.store_code || p.mall_id)) continue;
-      if (storeFilter !== "all" && p.store_code !== storeFilter) continue;
-      for (const a of p.activities) {
-        if (a.status === "已结束") continue;
-        rows.push({ ...a, key: `${p.key}|${a.activity_id || a.title || rows.length}`, _prodKey: p.key, store_code: p.store_code, mall_id: p.mall_id, mall_name: p.mall_name, product_name: p.product_name, sku_ext_code: p.sku_ext_code, thumb: p.thumb });
-      }
-    }
-    return rows;
-  }, [activeTab, actProducts, storeFilter, inScope]);
   const actStatusCounts = useMemo(() => {
-    const c: Record<string, number> = { "全部": 0 };
-    const kw = search.trim().toLowerCase();
-    for (const r of actFlatView) {
-      if (kw && ![r.product_name, r.sku_ext_code, r.title].some(x => (x || "").toLowerCase().includes(kw))) continue;
-      c["全部"]++;
-      const s = r.status || "未知";
-      c[s] = (c[s] || 0) + 1;
+    let v = actProducts.filter((p) => inScope(p.store_code || p.mall_id));
+    if (storeFilter !== "all") v = v.filter((p) => p.store_code === storeFilter);
+    if (kindFilter !== "all") v = v.filter((p) => p.kinds.includes(kindFilter));
+    const q = search.trim().toLowerCase();
+    if (q) v = v.filter((p) => (p.product_name || "").toLowerCase().includes(q) || (p.sku_ext_code || "").toLowerCase().includes(q));
+    const withActs = v.filter(p => p.activities.some(a => a.status !== "已结束"));
+    const c: Record<string, number> = { "全部": withActs.length };
+    for (const p of withActs) {
+      const acts = p.activities.filter(a => a.status !== "已结束");
+      if (acts.some(a => a.status === "进行中")) c["进行中"] = (c["进行中"] || 0) + 1;
+      if (acts.some(a => a.status === "未开始")) c["未开始"] = (c["未开始"] || 0) + 1;
     }
     return c;
-  }, [actFlatView, search]);
-  const actFiltered = useMemo(() => {
-    let v = actFlatView;
-    if (actStatusFilter !== "全部") v = v.filter(r => r.status === actStatusFilter);
-    const kw = search.trim().toLowerCase();
-    if (kw) v = v.filter(r => [r.product_name, r.sku_ext_code, r.title].some(x => (x || "").toLowerCase().includes(kw)));
-    const sorted = [...v].sort((a, b) => a._prodKey.localeCompare(b._prodKey));
-    const out = sorted.map(r => ({ ...r, _prodSpan: 1 }));
-    let i = 0;
-    while (i < out.length) {
-      const gk = out[i]._prodKey;
-      let j = i + 1;
-      while (j < out.length && out[j]._prodKey === gk) j++;
-      out[i]._prodSpan = j - i;
-      for (let k = i + 1; k < j; k++) out[k]._prodSpan = 0;
-      i = j;
-    }
-    return out;
-  }, [actFlatView, actStatusFilter, search]);
-
+  }, [actProducts, storeFilter, kindFilter, search, inScope]);
   const enrollProduct = useMemo(() => enrollProdKey ? actProducts.find(p => p.key === enrollProdKey) ?? null : null, [enrollProdKey, actProducts]);
-  type ModalActRow = ActivityRow & { enroll_at: string | null; sites: string[]; skus: ActivitySkuDetail[] };
+  type ModalActRow = ActivityRow & { enroll_at: string | null; start_at: string | null; sites: string[]; skus: ActivitySkuDetail[] };
   const modalActRows = useMemo<ModalActRow[]>(() => {
     if (!enrollProduct) return [];
     return enrollProduct.activities.map((a, i) => ({
@@ -566,7 +546,7 @@ export default function OperationsWorkbench() {
       product_name: enrollProduct.product_name, thumb: enrollProduct.thumb,
       signup_price: a.signup_price, suggested_price: a.suggested_price, price_diff: a.price_diff,
       activity_stock: a.activity_stock, cost: a.cost, end_at: a.end_at, stat_date: null, __rk: i,
-      enroll_at: a.enroll_at, sites: a.sites || [], skus: a.skus || [],
+      enroll_at: a.enroll_at, start_at: a.start_at, sites: a.sites || [], skus: a.skus || [],
     }));
   }, [enrollProduct]);
   const [modalStatusFilter, setModalStatusFilter] = useState<string>("全部");
@@ -1289,20 +1269,19 @@ export default function OperationsWorkbench() {
             <Segmented size="small" value={actStatusFilter} onChange={(v) => setActStatusFilter(String(v))}
               options={[
                 { label: `全部 (${actStatusCounts["全部"] || 0})`, value: "全部" },
-                ...["进行中", "未开始", "已报名"].filter(s => actStatusCounts[s]).map(s => ({ label: `${s} (${actStatusCounts[s]})`, value: s })),
+                ...["进行中", "未开始"].filter(s => actStatusCounts[s]).map(s => ({ label: `${s} (${actStatusCounts[s]})`, value: s })),
               ]}
             />
           </div>
           {commonFilters()}
           {actLoading ? <div style={{ textAlign: "center", padding: 60 }}><Spin /></div> : (
-            actFiltered.length === 0 ? <Empty description="暂无活动数据" style={{ padding: 40 }} /> : (
-              <Table<ActFlatRow & { _prodSpan: number }> dataSource={actFiltered} rowKey="key" size="small"
-                onRow={(r) => r._prodSpan > 0 ? { style: { borderTop: "2px solid #e6e6e6" } } : {}}
-                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个活动` }}
-                scroll={{ x: 1400 }}
+            actProductView.length === 0 ? <Empty description="暂无活动数据" style={{ padding: 40 }} /> : (
+              <Table dataSource={actProductView} rowKey="key" size="small"
+                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }}
+                scroll={{ x: 1100 }}
                 columns={[
-                  { title: "店铺", key: "store", width: 78, fixed: "left" as const, render: (_, r) => r._prodSpan > 0 ? formatStoreNo(r.store_code, r.mall_id) : null },
-                  { title: "商品", key: "prod", width: 280, fixed: "left" as const, render: (_, r) => r._prodSpan > 0 ? (
+                  { title: "店铺", key: "store", width: 78, fixed: "left" as const, render: (_, r) => formatStoreNo(r.store_code, r.mall_id) },
+                  { title: "商品", key: "prod", width: 280, fixed: "left" as const, render: (_, r) => (
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       {r.thumb ? <Image src={r.thumb} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
                       <div style={{ minWidth: 0, flex: 1 }}>
@@ -1310,26 +1289,19 @@ export default function OperationsWorkbench() {
                         <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 13, fontWeight: 600 }}>{r.sku_ext_code || "—"}</Typography.Text>
                       </div>
                     </div>
-                  ) : null },
-                  { title: "活动名称", key: "title", width: 220, ellipsis: true, render: (_, r) => r.title || <span style={{ color: "#bbb" }}>(未命名)</span> },
-                  { title: "类型", key: "type", width: 80, filters: [{ text: "活动", value: "activity" }, { text: "竞价", value: "bidding" }, { text: "优惠券", value: "coupon" }], onFilter: (v, r) => (r.kind || "") === v, render: (_, r) => {
-                    const label = (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "活动";
-                    return <Tag color={r.kind === "bidding" ? "purple" : r.kind === "coupon" ? "cyan" : "blue"} style={{ margin: 0 }}>{label}</Tag>;
+                  ) },
+                  { title: "活动数", key: "actCount", width: 80, align: "center" as const, sorter: (a, b) => a._actTotal - b._actTotal, render: (_, r) => <span style={{ fontWeight: 600 }}>{r._actTotal}</span> },
+                  { title: "进行中", key: "inProg", width: 80, align: "center" as const, sorter: (a, b) => a._actInProgress - b._actInProgress, render: (_, r) => r._actInProgress > 0 ? <Tag color="green" style={{ margin: 0 }}>{r._actInProgress}</Tag> : <span style={{ color: "#bbb" }}>0</span> },
+                  { title: "未开始", key: "pending", width: 80, align: "center" as const, sorter: (a, b) => a._actPending - b._actPending, render: (_, r) => r._actPending > 0 ? <Tag color="orange" style={{ margin: 0 }}>{r._actPending}</Tag> : <span style={{ color: "#bbb" }}>0</span> },
+                  { title: "最佳利润", key: "margin", width: 100, align: "right" as const, sorter: (a, b) => (a.best_profit ?? -Infinity) - (b.best_profit ?? -Infinity), render: (_, r) => {
+                    if (r.best_profit == null) return <span style={{ color: "#bbb" }}>—</span>;
+                    return <span style={{ color: r.best_profit > 0 ? "#3f8600" : r.best_profit < 0 ? "#cf1322" : undefined, fontWeight: 600 }}>¥{r.best_profit.toFixed(2)}</span>;
                   } },
-                  { title: "站点", key: "sites", width: 120, render: (_, r) => r.sites?.length ? r.sites.slice(0, 2).join(", ") + (r.sites.length > 2 ? ` +${r.sites.length - 2}` : "") : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "报名价", key: "price", width: 90, align: "right" as const, render: (_, r) => r.signup_price != null ? <span style={{ color: "#1677ff" }}>¥{r.signup_price.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "利润", key: "profit", width: 90, align: "right" as const, sorter: (a, b) => ((a.signup_price ?? 0) - (a.cost ?? 0)) - ((b.signup_price ?? 0) - (b.cost ?? 0)), render: (_, r) => {
-                    if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>;
-                    const p = r.signup_price - r.cost;
-                    return <span style={{ color: p > 0 ? "#3f8600" : p < 0 ? "#cf1322" : undefined, fontWeight: 600 }}>¥{p.toFixed(2)}</span>;
-                  } },
-                  { title: "活动库存", dataIndex: "activity_stock", width: 90, align: "right" as const, sorter: (a, b) => a.activity_stock - b.activity_stock, render: (v: number) => v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span> },
-                  { title: "报名时间", key: "enroll_at", width: 140, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
-                  { title: "状态", key: "status", width: 80, render: (_, r) => {
-                    const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
-                    return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : "default"} style={{ margin: 0 }}>{s}</Tag>;
-                  } },
-                  { title: "操作", key: "op", width: 70, fixed: "right" as const, onCell: (r) => ({ rowSpan: r._prodSpan }), render: (_, r) => r._prodSpan > 0 ? <Button size="small" type="link" onClick={() => { setEnrollProdKey(r._prodKey); setSelActRows([]); }}>报名</Button> : null },
+                  { title: "类型", key: "kinds", width: 120, render: (_, r) => r.kinds.length ? r.kinds.map(k => {
+                    const label = KIND_LABEL[k] || k;
+                    return <Tag key={k} color={k === "bidding" ? "purple" : k === "coupon" ? "cyan" : "blue"} style={{ margin: "0 4px 0 0" }}>{label}</Tag>;
+                  }) : <span style={{ color: "#bbb" }}>—</span> },
+                  { title: "操作", key: "op", width: 100, fixed: "right" as const, render: (_, r) => <Button size="small" type="link" onClick={() => { setEnrollProdKey(r.key); setSelActRows([]); setModalStatusFilter("进行中"); }}>查看活动</Button> },
                 ]}
               />
             )
@@ -1443,7 +1415,7 @@ export default function OperationsWorkbench() {
     // 风险待办 Tab
     sevFilter, setSevFilter,
     // 活动报名 Tab
-    actFiltered, actStatusCounts, actStatusFilter, actLoading, setEnrollProdKey, setSelActRows,
+    actProductView, actStatusCounts, actStatusFilter, actLoading, setEnrollProdKey, setSelActRows, setModalStatusFilter,
     // 流量 Tab
     flowView, flowColumns, flowLoading, flowSiteFilter, setFlowSiteFilter,
     flowDateFilter, setFlowDateFilter, flowDates,
@@ -1469,30 +1441,65 @@ export default function OperationsWorkbench() {
       <div style={{ display: "none" }}>
         <Image.PreviewGroup items={flawPreviewImages} preview={{ visible: flawPreviewVisible, onVisibleChange: (v) => setFlawPreviewVisible(v) }} />
       </div>
-      <Modal open={!!enrollProdKey} onCancel={() => { setEnrollProdKey(null); setSelActRows([]); }} width={1180} destroyOnClose
-        title={enrollProduct ? `报名活动 · ${enrollProduct.product_name || enrollProduct.sku_ext_code}` : ""}
-        footer={[
-          <Button key="cancel" size="small" onClick={() => { setEnrollProdKey(null); setSelActRows([]); }}>取消</Button>,
-          <Button key="submit" type="primary" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitViaExtension}>下发扩展报名 ({selActRows.length})</Button>,
-        ]}>
-        <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 12 }}>
-          {["全部", "进行中", "未开始"].map(s => (
-            <Button key={s} size="small" type={modalStatusFilter === s ? "primary" : "default"}
-              onClick={() => setModalStatusFilter(s)}>{s}{modalStatusCounts[s] ? ` (${modalStatusCounts[s]})` : ""}</Button>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-          <Button size="small" onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { const p = r.suggested_price ?? r.signup_price; if (p == null) continue; next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: p }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>按参考价填全部</Button>
-          <InputNumber size="small" min={0} step={0.01} precision={2} prefix="¥" placeholder="批量申报价" value={batchPrice ?? undefined} style={{ width: 120 }} onChange={v => setBatchPrice(v == null ? null : Number(v))} />
-          <Button size="small" disabled={batchPrice == null} onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), price: batchPrice! }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>填全部</Button>
-          <InputNumber size="small" min={0} precision={0} placeholder="批量库存" value={batchStock ?? undefined} style={{ width: 110 }} onChange={v => setBatchStock(v == null ? null : Number(v))} />
-          <Button size="small" disabled={batchStock == null} onClick={() => { setEnrollDraft(prev => { const next = { ...prev }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), stock: batchStock! }; } try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch {} return next; }); }}>填库存</Button>
-        </div>
-        <Table dataSource={modalFiltered} columns={enrollColumns} rowKey={r => String(r.__rk)} size="small"
-          rowSelection={{ selectedRowKeys: selActRows.map(r => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ModalActRow[]) }}
-          pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50], showTotal: t => `共 ${t} 条` }}
-          scroll={{ x: 1400 }} locale={{ emptyText: "暂无活动数据" }} />
-        {modalActRows.some(r => !r.activity_id) && <div style={{ fontSize: 12, color: "#d46b08", marginTop: 8 }}>另有 {modalActRows.filter(r => !r.activity_id).length} 个活动缺活动ID,暂时无法报名。</div>}
+      <Modal open={!!enrollProdKey} onCancel={() => { setEnrollProdKey(null); setSelActRows([]); }} width="92vw" destroyOnClose
+        title={null} closable={false} footer={null} centered
+        styles={{ body: { padding: "0 24px 16px", maxHeight: "70vh", overflowY: "auto" }, header: { padding: "12px 24px 0", borderBottom: "none" } }}>
+        {enrollProduct && (
+          <div>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "16px 0 12px", borderBottom: "1px solid #f0f0f0", marginBottom: 16 }}>
+              {enrollProduct.thumb && <img src={enrollProduct.thumb} style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: "1px solid #eee", flexShrink: 0 }} />}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: "#262626", lineHeight: 1.5, wordBreak: "break-word" }}>活动详情 · {enrollProduct.product_name || "—"}</div>
+                <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>货号: {enrollProduct.sku_ext_code || "—"}</div>
+              </div>
+              <Button type="primary" danger size="small" onClick={() => { setEnrollProdKey(null); setSelActRows([]); }} style={{ flexShrink: 0 }}>关闭</Button>
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 16 }}>
+              {["全部", "进行中", "未开始"].map(s => (
+                <Button key={s} size="small" type={modalStatusFilter === s ? "primary" : "default"}
+                  onClick={() => setModalStatusFilter(s)}>{s} ({modalStatusCounts[s] || 0})</Button>
+              ))}
+            </div>
+            <Table dataSource={modalFiltered} rowKey={r => String(r.__rk)} size="small"
+              pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50], showTotal: (t, range) => `共有 ${t} 条  每页 ${range[1] - range[0] + 1} 条` }}
+              scroll={{ x: 1100 }} locale={{ emptyText: "暂无可显示的筛信息" }}
+              columns={[
+                { title: "SKU属性集", key: "spec", width: 110, render: (_, r) => r.color_spec || <span style={{ color: "#bbb" }}>—</span> },
+                { title: "日常申报价", dataIndex: "suggested_price", width: 100, align: "right", render: (v) => v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
+                { title: "活动申报价", dataIndex: "signup_price", width: 100, align: "right", render: (v) => v != null ? <span>¥{v.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span> },
+                { title: "报名时间", key: "enroll_at", width: 150, render: (_, r) => r.enroll_at || <span style={{ color: "#bbb" }}>—</span> },
+                { title: "活动类型", key: "title", width: 280, ellipsis: true, render: (_, r) => {
+                  const typeLabel = (r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "";
+                  return <span>{typeLabel ? typeLabel + " " : ""}{r.title || <span style={{ color: "#bbb" }}>(未命名)</span>}</span>;
+                } },
+                { title: "报名场次", key: "sites", width: 280, render: (_, r) => {
+                  const s = r.sites || [];
+                  const startD = r.start_at?.slice(0, 10) || "";
+                  const endD = r.end_at?.slice(0, 10) || "";
+                  const dateRange = startD && endD ? `${startD}~${endD}` : startD || endD || "";
+                  const statusText = r.status === "进行中" ? ",进行中" : r.status === "未开始" ? ",报名成功待开始" : r.status ? `,${r.status}` : "";
+                  if (!s.length) {
+                    if (!dateRange) return <span style={{ color: "#bbb" }}>—</span>;
+                    return <div style={{ fontSize: 12, lineHeight: "18px" }}>{dateRange}{statusText}</div>;
+                  }
+                  const fmt = (name: string) => `${name}-${dateRange}${statusText}`;
+                  const show = s.slice(0, 3);
+                  const rest = s.length - 3;
+                  return (<div style={{ fontSize: 12, lineHeight: "18px" }}>
+                    {show.map((n, i) => <div key={i}>{fmt(n)}</div>)}
+                    {rest > 0 && <Popover trigger="click" title={`全部场次 (${s.length})`} content={<div style={{ maxHeight: 300, overflow: "auto", fontSize: 12, lineHeight: "22px" }}>{s.map((n, i) => <div key={i}>{fmt(n)}</div>)}</div>}><a style={{ fontSize: 12, color: "#1677ff" }}>更多</a></Popover>}
+                  </div>);
+                } },
+                { title: "提报数量", dataIndex: "activity_stock", width: 90, align: "right", render: (v: number) => v > 0 ? fmtNum(v) : <span style={{ color: "#bbb" }}>0</span> },
+                { title: "剩余数量", key: "remain", width: 90, align: "right", render: (_, r) => r.activity_stock > 0 ? fmtNum(r.activity_stock) : <span style={{ color: "#bbb" }}>0</span> },
+                { title: "活动状态", key: "status", width: 80, render: (_, r) => {
+                  const s = r.status; if (!s) return <span style={{ color: "#bbb" }}>—</span>;
+                  return <Tag color={s === "进行中" ? "green" : s === "已报名" ? "blue" : s === "未开始" ? "orange" : "default"} style={{ margin: 0 }}>{s}</Tag>;
+                } },
+              ]}
+            />
+          </div>
+        )}
       </Modal>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>

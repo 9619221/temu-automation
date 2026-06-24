@@ -256,9 +256,11 @@ async function backfillLabelCodes(db) {
     "UPDATE erp_temu_openapi_consign SET label_codes = @lc WHERE mall_id = @mall_id AND product_skc_id = @skc_id"
   );
   let filled = 0;
+  console.log(`[backfillLabelCodes] 开始: ${byMall.size} 店铺, ${rows.length} SKC`);
   for (const [mallId, skcSet] of byMall) {
     try {
       const map = await queryGoodsLabelCodes({ db, mallId, skcIds: [...skcSet] });
+      const cnt = Object.keys(map).length;
       const tx = db.transaction(() => {
         for (const [skcId, lc] of Object.entries(map)) {
           upd.run({ lc: String(lc), mall_id: mallId, skc_id: skcId });
@@ -266,10 +268,12 @@ async function backfillLabelCodes(db) {
         }
       });
       tx();
-    } catch {
-      // 单店 API 失败不阻塞其他店
+      if (cnt) console.log(`[backfillLabelCodes] mall=${mallId} skcs=${skcSet.size} filled=${cnt}`);
+    } catch (e) {
+      console.log(`[backfillLabelCodes] mall=${mallId} skcs=${skcSet.size} ERROR: ${e.message}`);
     }
   }
+  console.log(`[backfillLabelCodes] 完成: 共填充 ${filled} 条`);
   return filled;
 }
 

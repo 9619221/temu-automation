@@ -27,7 +27,6 @@ function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) 
 }
 
 const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
-const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
 const AfterSales = lazyWithPreload(() => import("./pages/AfterSales"));
 const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
 const ProductList = lazyWithPreload(() => import("./pages/ProductList.tsx"));
@@ -63,7 +62,6 @@ const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
 
 const LIGHT_ROUTE_PRELOADERS = [
   AppLayout.preload,
-  ShopOverview.preload,
   OperationsWorkbench.preload,
   AccountManager.preload,
   PurchaseCenter.preload,
@@ -335,7 +333,6 @@ function App() {
                 )}
               >
               <Route index element={<RoleHomeRedirect />} />
-              <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
               <Route path="multi-store-report" element={<RoleRoute path="/multi-store-report"><MultiStoreReport /></RoleRoute>} />
               <Route path="ops-workbench" element={<RoleRoute path="/ops-workbench"><OperationsWorkbench /></RoleRoute>} />
               <Route path="ops-workbench/store/:mallId" element={<RoleRoute path="/ops-workbench"><OperationStoreDetail /></RoleRoute>} />
@@ -375,10 +372,10 @@ function App() {
               <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
               <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
               {/* Legacy routes */}
-              <Route path="dashboard" element={<Navigate to="/shop" replace />} />
+              <Route path="dashboard" element={<Navigate to="/ops-workbench" replace />} />
               <Route path="sales" element={<Navigate to="/products" replace />} />
               <Route path="orders" element={<Navigate to="/products" replace />} />
-              <Route path="analytics" element={<Navigate to="/shop" replace />} />
+              <Route path="analytics" element={<Navigate to="/ops-workbench" replace />} />
             </Route>
             </Routes>
           </Suspense>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
-import { Button, Empty, Image, Input, Segmented, Select, Spin, Table, Tag, Tooltip } from "antd";
+import { Button, Empty, Image, Input, Pagination, Segmented, Select, Spin, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   RightOutlined, WarningOutlined, ShoppingCartOutlined,
@@ -254,6 +254,8 @@ export default function PipelineTab({ reloadSignal, isStoreInScope, onRiskTagCli
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("priority");
   const [view, setView] = useState<"card" | "table">("card");
+  const [cardPage, setCardPage] = useState(1);
+  const CARD_PAGE_SIZE = 60;
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -389,6 +391,13 @@ export default function PipelineTab({ reloadSignal, isStoreInScope, onRiskTagCli
     return list;
   }, [scoped, filter, stageFilter, search, sortBy]);
 
+  useEffect(() => { setCardPage(1); }, [filter, stageFilter, search, sortBy, storeFilter]);
+
+  const cardPageItems = useMemo(() => {
+    const start = (cardPage - 1) * CARD_PAGE_SIZE;
+    return displayed.slice(start, start + CARD_PAGE_SIZE);
+  }, [displayed, cardPage, CARD_PAGE_SIZE]);
+
   return (
     <div style={{ padding: "12px 16px" }}>
       {/* ── 顶部 KPI 条(扁平,36px) ── */}
@@ -480,13 +489,28 @@ export default function PipelineTab({ reloadSignal, isStoreInScope, onRiskTagCli
         ) : view === "card" ? (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
-              {displayed.map(item => (
+              {cardPageItems.map(item => (
                 <ProductCard key={item.id} item={item} navigate={navigate} onRiskTagClick={onRiskTagClick} />
               ))}
             </div>
-            <div style={{ textAlign: "right", color: "#bbb", fontSize: 11, marginTop: 8 }}>
-              共 {displayed.length} 个商品
-            </div>
+            {displayed.length > CARD_PAGE_SIZE && (
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+                <Pagination
+                  current={cardPage}
+                  pageSize={CARD_PAGE_SIZE}
+                  total={displayed.length}
+                  onChange={(p) => { setCardPage(p); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                  showTotal={(total) => `共 ${total} 个商品`}
+                  showSizeChanger={false}
+                  size="small"
+                />
+              </div>
+            )}
+            {displayed.length <= CARD_PAGE_SIZE && (
+              <div style={{ textAlign: "right", color: "#bbb", fontSize: 11, marginTop: 8 }}>
+                共 {displayed.length} 个商品
+              </div>
+            )}
           </>
         ) : (
           <ProductTable items={displayed} navigate={navigate} onRiskTagClick={onRiskTagClick} />

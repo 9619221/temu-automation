@@ -117,6 +117,24 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 追加活动库存:桌面端把任务下发到云端 addstock_task(扩展按店拉取执行)
+  ipcMain.handle("erp:addstock:create", async (_event, payload) => {
+    try {
+      const { createAddStockTasks } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: await createAddStockTasks(payload?.tasks || []) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  ipcMain.handle("erp:addstock:status", async (_event, payload) => {
+    try {
+      const { pollAddStockResults } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: await pollAddStockResults(payload?.taskIds || []) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 结算报表：独立端点，支持自定义时间段
   ipcMain.handle("erp:reports:settlement", async (_event, payload) => {
     try {
@@ -490,6 +508,41 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+  // 运营工作台：流量分析（商品级流量明细，完整字段，走 cloud.temu_product_flow_snapshot）
+  ipcMain.handle("erp:reports:flow-analysis", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      const statDate = payload?.statDate || "";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/flow-analysis?include_test=${includeTest}&stat_date=${encodeURIComponent(statDate)}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildFlowAnalysis } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildFlowAnalysis(erpState.db, { includeTest: payload?.includeTest, statDate, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  ipcMain.handle("erp:reports:flow-trend", async (_event, payload) => {
+    try {
+      const { mallId, productId, goodsId, site } = payload || {};
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        const qs = `mall_id=${encodeURIComponent(mallId || "")}&product_id=${encodeURIComponent(productId || "")}&goods_id=${encodeURIComponent(goodsId || "")}&site=${encodeURIComponent(site || "")}`;
+        return await remoteRequest(`/api/erp/reports/flow-trend?${qs}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildFlowTrend } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildFlowTrend(erpState.db, { mallId, productId, goodsId, site, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：SKU 站点绑定异常（扩展抓包 queryFullyOtherMessage → cloud snapshot → ERP 物化）
   ipcMain.handle("erp:reports:site-exceptions", async (_event, payload) => {
     try {

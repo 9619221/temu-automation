@@ -3898,7 +3898,8 @@ function buildActivityList(db, options = {}) {
       LEFT JOIN erp_temu_openapi_sku_sales oa
         ON oa.mall_id = a.mall_id AND (oa.product_sku_id = a.sku_id OR oa.ext_code = a.sku_ext_code)
      WHERE a.tenant_id = ?
-       AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
+       AND COALESCE(a.activity_status, '') <> '未参加活动'
+       AND (a.sku_ext_code IS NOT NULL OR a.signup_price_cents IS NOT NULL)
        ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
      ORDER BY a.mall_id, a.activity_kind
      LIMIT 50000
@@ -4029,7 +4030,7 @@ function buildActivityList(db, options = {}) {
     if (start && start > 1e12 && now >= start && (!end || now <= end)) return "进行中";
     return enrollStatusLabel(enrollStatus);
   };
-  const fmtEndTime = (v) => { if (!v) return null; const n = Number(v); if (n > 1e12) { const d = new Date(n); return d.toISOString().slice(0, 10); } return String(v).slice(0, 10); };
+  const fmtEndTime = (v) => { if (!v) return null; const n = Number(v); if (n > 1e12) { const d = new Date(n); const p = (x) => String(x).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; } return String(v).slice(0, 10); };
   const fmtDateTime = (v) => { if (!v) return null; const n = Number(v); if (n > 1e12) { const d = new Date(n); const p = (x) => String(x).padStart(2, "0"); return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; } return String(v); };
   const enrollMerged = new Set();
   for (const er of enrollDetails) {
@@ -4037,9 +4038,17 @@ function buildActivityList(db, options = {}) {
     const store = er.store_code || er.mall_id;
     const pid = er.spu_id || er.goods_id || er.product_id || er.sku_ext_code;
     const pkey = `${store}|${pid}`;
-    const e = pmap.get(pkey);
-    if (!e) continue;
-    const skuDedup = `${pkey}|${er.activity_thematic_id || er.activity_thematic_name || ""}|${er.sku_ext_code}`;
+    let e = pmap.get(pkey);
+    if (!e) {
+      e = { key: pkey, mall_id: er.mall_id, store_code: er.store_code || null, mall_name: null,
+        sku_ext_code: er.sku_ext_code || null, sku_ext_codes: er.sku_ext_code ? [er.sku_ext_code] : [],
+        product_id: er.product_id || null, skc_id: er.skc_id || null, color_spec: er.color_spec || null,
+        product_name: null, thumb: null,
+        act_count: 0, pending_count: 0, best_margin: null, best_profit: null,
+        enrolled_count: 0, kinds: [], activities: [] };
+      pmap.set(pkey, e);
+    }
+    const skuDedup = `${pkey}|${er.enroll_id || ""}|${er.sku_ext_code}`;
     if (enrollMerged.has(skuDedup)) continue; enrollMerged.add(skuDedup);
     const sp = er.activity_price_cents != null ? Number(er.activity_price_cents) / 100 : null;
     const sg = er.daily_price_cents != null ? Number(er.daily_price_cents) / 100 : null;
@@ -4047,7 +4056,7 @@ function buildActivityList(db, options = {}) {
     let sites = null;
     if (er.sites_json) { try { const arr = JSON.parse(er.sites_json); if (Array.isArray(arr)) sites = arr.map(s => s.name || s.siteName).filter(Boolean); } catch {} }
     const skuDetail = { sku_ext_code: er.sku_ext_code, spec_name: er.color_spec || null, signup_price: sp, suggested_price: sg, activity_stock: er.activity_stock != null ? Number(er.activity_stock) : 0, cost, enroll_at: fmtDateTime(er.enroll_time), enroll_id: er.enroll_id || null };
-    const existing = e.activities.find(a => a.activity_id && er.activity_thematic_id && a.activity_id === er.activity_thematic_id);
+    const existing = er.enroll_id ? e.activities.find(a => a.enroll_id === er.enroll_id) : null;
     if (existing) {
       if (sp != null && existing.signup_price == null) existing.signup_price = sp;
       if (sg != null && existing.suggested_price == null) existing.suggested_price = sg;
@@ -4067,7 +4076,7 @@ function buildActivityList(db, options = {}) {
         if (skuDetail.activity_stock > 0) prevSku.activity_stock = skuDetail.activity_stock;
       } else { existing.skus.push(skuDetail); }
     } else {
-      e.activities.push({ activity_id: er.activity_thematic_id || null, kind: "enrolled", title: er.activity_thematic_name || null,
+      e.activities.push({ enroll_id: er.enroll_id || null, activity_id: er.activity_thematic_id || null, kind: "enrolled", title: er.activity_thematic_name || null,
         status: computeStatus(er.enroll_status, er.session_start_time, er.session_end_time, er.session_status_tag), activity_type: er.activity_type != null ? Number(er.activity_type) : null,
         sku_id: null, sku_ext_code: er.sku_ext_code || null, signup_price: sp, suggested_price: sg, price_diff: sp != null && sg != null ? sp - sg : null,
         activity_stock: er.activity_stock != null ? Number(er.activity_stock) : 0, cost, start_at: fmtEndTime(er.session_start_time), end_at: fmtEndTime(er.session_end_time), enroll_at: fmtDateTime(er.enroll_time), sites: sites || [],

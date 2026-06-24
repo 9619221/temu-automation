@@ -33,7 +33,6 @@ import {
   SyncOutlined,
   WarningOutlined,
   ThunderboltOutlined,
-  DashboardOutlined,
   ExclamationCircleOutlined,
   KeyOutlined,
   SafetyCertificateOutlined,
@@ -1103,13 +1102,6 @@ export default function AccountManager() {
               disabled={selectedAccount.status !== "online"}
             >
               一键采集
-            </Button>
-            <Button
-              icon={<DashboardOutlined />}
-              onClick={() => navigate("/shop")}
-              style={{ borderRadius: 10 }}
-            >
-              查看店铺概览
             </Button>
             <Button
               icon={<ShoppingOutlined />}
