@@ -12347,7 +12347,7 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
     // 店铺共用同一仓库地址是常态；resolve1688AddressParam 的 cross-OAuth fallback 兜底
     // OAuth 维度的不一致。这里只要拿到地址行就返回，跨账号判断交给上游。
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
-    if (!row) throw new Error(`1688 delivery address not found: ${id}`);
+    if (!row) throw new Error(`找不到 1688 收货地址（${id}），请到「询盘设置」重新同步地址后再试`);
     return row;
   }
   // [OAuth 维度 2026-05-21] 默认地址查询：优先按 OAuth；OAuth 没传退回老的 account_id 路径。
@@ -22322,30 +22322,38 @@ function performInventoryAction(payload = {}, actorInput = {}) {
         : (eff.mallIds || []).filter(Boolean);
       if (mallIds && mallIds.length === 0) return { action, total: 0, overdueCount: 0, items: [] };
       const mallFilter = mallIds ? `AND c.mall_id IN (${mallIds.map(() => "?").join(",")})` : "";
-      const sql = `
-        SELECT c.mall_id, c.so_id, c.product_name, c.sku_ext_codes, c.demand_qty,
-               c.delivered_qty, c.temu_status, c.deliver_time, c.order_time,
-               m.mall_name AS store_name
-        FROM erp_temu_openapi_consign c
-        LEFT JOIN erp_consign_local_state ls ON ls.mall_id = c.mall_id AND ls.so_id = c.so_id
-        LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
-        WHERE c.temu_status = '已收货'
-          AND COALESCE(ls.inventory_deducted, 0) = 0
-          AND COALESCE(ls.deduction_ignored, 0) = 0
-          ${mallFilter}
-        ORDER BY c.deliver_time ASC
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+      const baseWhere = `
+        c.temu_status = '已收货'
+        AND NOT EXISTS (
+          SELECT 1 FROM erp_consign_local_state ls
+          WHERE ls.mall_id = c.mall_id AND ls.so_id = c.so_id
+            AND (ls.inventory_deducted = 1 OR ls.deduction_ignored = 1)
+        )
+        ${mallFilter}
       `;
       const params = mallIds || [];
-      const rows = db.prepare(sql).all(...params);
-      const now = Date.now();
-      const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-      const items = rows.map((r) => {
-        const deliverTs = r.deliver_time ? new Date(r.deliver_time).getTime() : (r.order_time ? new Date(r.order_time).getTime() : 0);
-        const overdue = deliverTs > 0 && (now - deliverTs) > THREE_DAYS_MS;
-        return { ...r, overdue };
-      });
-      const overdueCount = items.filter((i) => i.overdue).length;
-      return { action, total: items.length, overdueCount, items };
+      const countRow = db.prepare(`
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN COALESCE(c.deliver_time, c.order_time) < ? THEN 1 ELSE 0 END) AS overdue_count
+        FROM erp_temu_openapi_consign c
+        WHERE ${baseWhere}
+      `).get(threeDaysAgo, ...params);
+      const total = countRow?.total || 0;
+      const overdueCount = countRow?.overdue_count || 0;
+      if (total === 0) return { action, total: 0, overdueCount: 0, items: [] };
+      const items = db.prepare(`
+        SELECT c.mall_id, c.so_id, c.product_name, c.sku_ext_codes, c.demand_qty,
+               c.delivered_qty, c.temu_status, c.deliver_time, c.order_time,
+               CASE WHEN m.store_code IS NOT NULL AND m.store_code != '' THEN m.store_code || '店铺' ELSE m.mall_name END AS store_name,
+               CASE WHEN COALESCE(c.deliver_time, c.order_time) < ? THEN 1 ELSE 0 END AS overdue
+        FROM erp_temu_openapi_consign c
+        LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
+        WHERE ${baseWhere}
+        ORDER BY overdue DESC, c.deliver_time ASC
+        LIMIT 50
+      `).all(threeDaysAgo, ...params);
+      return { action, total, overdueCount, items };
     }
     case "ignore_consign_deduction": {
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
