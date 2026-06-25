@@ -5901,7 +5901,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
   };
 
-  const exportActiveQueue = () => {
+  const exportActiveQueue = async () => {
     if (activeQueue.kind === "mixed") {
       downloadCsv(`purchase-todos-${activeQueueKey}.csv`, [
         ["类型", "商品编码/采购单号", "商品名称", "规格", "商品图片", "状态", "数量", "商品金额/目标成本", "采购单价", "采购回填成本", "采购回填备注", "运费", "实付总金额", "负责人"],
@@ -5958,28 +5958,61 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       ]);
       return;
     }
-    downloadCsv(`purchase-orders-${activeQueueKey}.csv`, [
-      ["采购日期", "采购单号", "付款状态", "付款时间", "采购员", "供应商", "商品图片", "商品编码", "商品名称", "总数量", "已入库", "商品金额", "运费", "实付总金额", "1688订单号", "线上状态", "状态"],
-      ...activeOrderRows.map((row) => [
-        formatDateTime(row.createdAt || row.updatedAt),
-        row.poNo || row.id,
-        PAYMENT_STATUS_LABELS[row.paymentStatus || ""] || row.paymentStatus || "",
-        formatDateTime(row.paidAt),
-        row.createdByName || "",
-        row.supplierName || "",
-        row.skuImageUrl || "",
-        joinGroupedText(getPurchaseOrderSkuCodes(row)),
-        joinGroupedText(getPurchaseOrderProductNames(row)),
-        row.totalQty || 0,
-        row.receivedQty || 0,
-        row.totalAmount ?? "",
-        row.freightAmount ?? "",
-        row.paidAmount ?? "",
-        row.externalOrderId || "",
-        row.externalOrderStatus || "",
-        PO_STATUS_LABELS[row.status] || row.status,
-      ]),
-    ]);
+    if (!erp) return;
+    setActingKey("export");
+    try {
+      const exportParams = {
+        ...FAST_PURCHASE_WORKBENCH_PARAMS,
+        includePurchaseRequests: false,
+        purchaseOrderLimit: 100000,
+        purchaseOrderOffset: 0,
+        purchaseOrderQueue: purchaseOrderQueueForWorkbench(activeQueueKey),
+        purchaseOrderSearch: purchaseOrderFilters.keyword,
+        purchaseOrderNo: purchaseOrderFilters.poNo,
+        purchaseOrderDateFrom: purchaseOrderFilters.dateFrom,
+        purchaseOrderDateTo: purchaseOrderFilters.dateTo,
+        purchaseOrderPurchaser: purchaseOrderFilters.purchaser,
+        purchaseOrderAccountId: purchaseOrderFilters.accountId,
+        purchaseOrderSupplier: purchaseOrderFilters.supplier,
+        purchaseOrderPaymentState: purchaseOrderFilters.paymentState,
+        purchaseOrderSourceState: purchaseOrderFilters.sourceState,
+        purchaseOrderRiskState: purchaseOrderFilters.riskState,
+        purchaseOrderProductCode: purchaseOrderFilters.productCode,
+        purchaseOrderAmountMin: purchaseOrderFilters.amountMin,
+        purchaseOrderAmountMax: purchaseOrderFilters.amountMax,
+        purchaseOrderSortField: purchaseOrderSort.field,
+        purchaseOrderSortDirection: purchaseOrderSort.direction,
+      };
+      const workbench = await erp.purchase.workbench(exportParams);
+      const allOrders: PurchaseOrderRow[] = Array.isArray(workbench?.purchaseOrders) ? workbench.purchaseOrders : [];
+      downloadCsv(`purchase-orders-${activeQueueKey}.csv`, [
+        ["采购日期", "采购单号", "付款状态", "付款时间", "采购员", "供应商", "商品图片", "商品编码", "商品名称", "总数量", "已入库", "商品金额", "运费", "实付总金额", "1688订单号", "线上状态", "状态"],
+        ...allOrders.map((row) => [
+          formatDateTime(row.createdAt || row.updatedAt),
+          row.poNo || row.id,
+          PAYMENT_STATUS_LABELS[row.paymentStatus || ""] || row.paymentStatus || "",
+          formatDateTime(row.paidAt),
+          row.createdByName || "",
+          row.supplierName || "",
+          row.skuImageUrl || "",
+          joinGroupedText(getPurchaseOrderSkuCodes(row)),
+          joinGroupedText(getPurchaseOrderProductNames(row)),
+          row.totalQty || 0,
+          row.receivedQty || 0,
+          row.totalAmount ?? "",
+          row.freightAmount ?? "",
+          row.paidAmount ?? "",
+          row.externalOrderId || "",
+          row.externalOrderStatus || "",
+          PO_STATUS_LABELS[row.status] || row.status,
+        ]),
+      ]);
+      message.success(`已导出 ${allOrders.length} 条采购单`);
+    } catch (error: any) {
+      message.error(error?.message || "导出失败");
+    } finally {
+      setActingKey(null);
+    }
   };
 
   const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => {
@@ -7358,7 +7391,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         批量支付
       </Button>
     ) : null,
-    <Button key="export" icon={<DownloadOutlined />} onClick={exportActiveQueue}>
+    <Button key="export" icon={<DownloadOutlined />} loading={actingKey === "export"} onClick={() => void exportActiveQueue()}>
       导出
     </Button>,
     <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>

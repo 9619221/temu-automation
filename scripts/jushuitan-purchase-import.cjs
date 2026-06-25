@@ -158,7 +158,7 @@ function skuCodeForLine(poNo, line, index) {
   return text(line["商品编码"]) || `UNKNOWN-${poNo}-${index + 1}`;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sourceDir = args._[0]
     || process.env.JST_PURCHASE_EXPORT_DIR
@@ -200,7 +200,7 @@ function main() {
   db.pragma("busy_timeout = 60000");
 
   try {
-    runMigrations({ db });
+    await runMigrations({ db });
 
     const existingSkuCodes = new Set(
       db.prepare("SELECT internal_sku_code FROM erp_skus WHERE id LIKE 'jst:skuprofile:%'")

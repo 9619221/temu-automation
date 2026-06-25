@@ -30,8 +30,8 @@ function normalizeRedirectUri(value) {
   return parsed.toString();
 }
 
-function upsert1688Config({ appKey, appSecret, redirectUri, accessToken, companyId }) {
-  runMigrations({ backup: false });
+async function upsert1688Config({ appKey, appSecret, redirectUri, accessToken, companyId }) {
+  await runMigrations({ backup: false });
   const db = openErpDatabase();
   try {
     const now = new Date().toISOString();

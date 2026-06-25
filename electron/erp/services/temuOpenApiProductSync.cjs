@@ -16,6 +16,7 @@
 "use strict";
 
 const { callOpenApi, resolveTemuAppCredentials } = require("../temuOpenApiClient.cjs");
+const { queryAll, execute, withTransaction} = require("../../db/connection.cjs");
 
 const GOODS_LIST_TYPE = "bg.glo.goods.list.get";
 const GOODS_LIST_REGION = "PA"; // 已迁移接口固定走 PA 网关（与店铺绑定 region 无关）
@@ -34,25 +35,25 @@ async function fetchGoodsPage(creds, page) {
     appSecret: creds.appSecret,
     accessToken: creds.accessToken,
     region: GOODS_LIST_REGION,
-    bizParams: { page, pageSize: PAGE_SIZE },
+    bizParams: { page, pageSize: PAGE_SIZE }
   });
   if (!ok || !response || response.success === false) {
     const msg = response?.errorMsg || `errorCode=${response?.errorCode ?? "?"}`;
     throw new Error(`${GOODS_LIST_TYPE} 调用失败: ${msg}`);
   }
   const result = response.result || {};
-  const items = Array.isArray(result.data)
-    ? result.data
-    : (Array.isArray(result.list) ? result.list : []);
+  const items = Array.isArray(result.data) ?
+  result.data :
+  Array.isArray(result.list) ? result.list : [];
   return { items };
 }
 
-function upsertProductWithSkus(db, mallId, item, now) {
+async function upsertProductWithSkus(db, mallId, item, now) {
   const productId = item.productId != null ? String(item.productId) : "";
   if (!productId) return 0;
   const skus = Array.isArray(item.productSkuSummaries) ? item.productSkuSummaries : [];
 
-  db.prepare(`
+  await execute(db, `
     INSERT INTO erp_temu_openapi_products
       (mall_id, product_id, product_name, jit_mode, product_properties_json,
        sku_count, raw_json, last_synced_at, created_at, updated_at)
@@ -65,7 +66,7 @@ function upsertProductWithSkus(db, mallId, item, now) {
       raw_json=excluded.raw_json,
       last_synced_at=excluded.last_synced_at,
       updated_at=excluded.updated_at
-  `).run({
+  `, {
     mall_id: mallId,
     product_id: productId,
     product_name: item.productName ?? item.goodsName ?? null,
@@ -73,10 +74,32 @@ function upsertProductWithSkus(db, mallId, item, now) {
     props: JSON.stringify(item.productProperties || []),
     sku_count: skus.length,
     raw: JSON.stringify(item),
-    now,
+    now
   });
 
-  const upSku = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  for (const s of skus) {
+    const vol = s.productSkuVolume || {};
+    const wt = s.productSkuWhExtAttr && s.productSkuWhExtAttr.productSkuWeight || {};
+    await execute(db, `
     INSERT INTO erp_temu_openapi_skus
       (mall_id, product_sku_id, product_id, ext_code, weight_value, weight_unit,
        volume_len, volume_width, volume_height, sensitive_json, raw_json,
@@ -94,29 +117,7 @@ function upsertProductWithSkus(db, mallId, item, now) {
       raw_json=excluded.raw_json,
       last_synced_at=excluded.last_synced_at,
       updated_at=excluded.updated_at
-  `);
-  for (const s of skus) {
-    const vol = s.productSkuVolume || {};
-    const wt = (s.productSkuWhExtAttr && s.productSkuWhExtAttr.productSkuWeight) || {};
-    upSku.run({
-      mall_id: mallId,
-      sku_id: s.productSkuId != null ? String(s.productSkuId) : "",
-      product_id: productId,
-      ext_code: s.extCode ?? null,
-      w: wt.value ?? null,
-      wu: wt.unit ?? null,
-      l: vol.len ?? null,
-      wd: vol.width ?? null,
-      h: vol.height ?? null,
-      sens: JSON.stringify(s.productSkuNewSensitiveAttr || {}),
-      raw: JSON.stringify(s),
-      now,
-    });
-  }
-  return 1 + skus.length;
-}
-
-/**
+  `, { mall_id: mallId, sku_id: s.productSkuId != null ? String(s.productSkuId) : "", product_id: productId, ext_code: s.extCode ?? null, w: wt.value ?? null, wu: wt.unit ?? null, l: vol.len ?? null, wd: vol.width ?? null, h: vol.height ?? null, sens: JSON.stringify(s.productSkuNewSensitiveAttr || {}), raw: JSON.stringify(s), now });}return 1 + skus.length;} /**
  * 采集单店全部商品。成功后回写 erp_temu_openapi_auth 的采集状态列。
  * @returns {Promise<{mallId,productCount,rowCount,pages}>}
  */
@@ -126,7 +127,7 @@ async function syncOneMall(db, mallRow) {
   if (!accessToken) throw new Error(`店铺 ${mallId} 无 access_token`);
   const { appKey, appSecret } = resolveTemuAppCredentials({
     appKey: mallRow.app_key,
-    appSecret: mallRow.app_secret,
+    appSecret: mallRow.app_secret
   });
   const creds = { appKey, appSecret, accessToken };
 
@@ -143,16 +144,16 @@ async function syncOneMall(db, mallRow) {
 
   const now = nowIso();
   let productCount = 0;
-  let rowCount = 0;
-  const tx = db.transaction((items) => {
-    for (const it of items) {
-      rowCount += upsertProductWithSkus(db, mallId, it, now);
-      productCount += 1;
-    }
-  });
-  tx(allItems);
+  let rowCount = 0;await withTransaction(db,
+    async (txDb) => {const items =
 
-  db.prepare(`
+
+
+
+
+      allItems;for (const it of items) {rowCount += await upsertProductWithSkus(db, mallId, it, now);productCount += 1;}});
+
+  await execute(db, `
     UPDATE erp_temu_openapi_auth
     SET last_product_sync_at=@now,
         product_sync_count=@cnt,
@@ -160,7 +161,7 @@ async function syncOneMall(db, mallRow) {
         last_product_sync_error=NULL,
         updated_at=@now
     WHERE mall_id=@mall_id
-  `).run({ now, cnt: productCount, mall_id: mallId });
+  `, { now, cnt: productCount, mall_id: mallId });
 
   return { mallId, productCount, rowCount, pages };
 }
@@ -170,24 +171,24 @@ async function syncOneMall(db, mallRow) {
  * @returns {Promise<{malls:number, results:Array}>}
  */
 async function syncAllMalls(db) {
-  const malls = db.prepare(`
+  const malls = await queryAll(db, `
     SELECT * FROM erp_temu_openapi_auth
     WHERE status='active' AND access_token IS NOT NULL AND access_token <> ''
     ORDER BY updated_at DESC
-  `).all();
+  `);
   const results = [];
   for (const m of malls) {
     try {
       results.push({ ok: true, ...(await syncOneMall(db, m)) });
     } catch (e) {
-      const msg = String((e && e.message) || e).slice(0, 1000);
+      const msg = String(e && e.message || e).slice(0, 1000);
       try {
-        db.prepare(`
+        await execute(db, `
           UPDATE erp_temu_openapi_auth
           SET last_product_sync_status='error', last_product_sync_error=@err, updated_at=@now
           WHERE mall_id=@mall_id
-        `).run({ err: msg, now: nowIso(), mall_id: m.mall_id });
-      } catch { /* 状态回写失败不致命 */ }
+        `, { err: msg, now: nowIso(), mall_id: m.mall_id });
+      } catch {/* 状态回写失败不致命 */}
       results.push({ ok: false, mallId: m.mall_id, error: msg });
     }
   }

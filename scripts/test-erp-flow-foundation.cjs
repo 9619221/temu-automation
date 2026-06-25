@@ -207,12 +207,12 @@ function assertQcThresholds() {
   );
 }
 
-function runFlow() {
+async function runFlow() {
   const tempUserData = fs.mkdtempSync(path.join(os.tmpdir(), "temu-erp-flow-"));
   let db;
 
   try {
-    const migrationResult = runMigrations({
+    const migrationResult = await runMigrations({
       userDataDir: tempUserData,
       backup: false,
     });

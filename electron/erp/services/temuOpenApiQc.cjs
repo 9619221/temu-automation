@@ -12,15 +12,16 @@
 "use strict";
 
 const { callOpenApi } = require("../temuOpenApiClient.cjs");
+const { queryAll, execute, withTransaction } = require("../../db/connection.cjs");
 
-const PAGE_SIZE = 50;            // 质检列表 pageSize
-const MAX_PAGES = 400;           // 分页上限(防 runaway)
-const MIN_INTERVAL_MS = 500;     // 全局节流
+const PAGE_SIZE = 50; // 质检列表 pageSize
+const MAX_PAGES = 400; // 分页上限(防 runaway)
+const MIN_INTERVAL_MS = 500; // 全局节流
 const MAX_RETRIES = 4;
 
-function s(v) { return v == null ? null : String(v); }
-function num(v) { if (v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function s(v) {return v == null ? null : String(v);}
+function num(v) {if (v == null) return null;const n = Number(v);return Number.isFinite(n) ? n : null;}
+function sleep(ms) {return new Promise((r) => setTimeout(r, ms));}
 
 let lastCallAt = 0;
 async function throttle() {
@@ -35,12 +36,12 @@ async function callRetry(params) {
   for (let i = 0; i <= MAX_RETRIES; i += 1) {
     await throttle();
     let response = null;
-    try { ({ response } = await callOpenApi(params)); } catch (e) { response = { errorMsg: String((e && e.message) || e) }; }
+    try {({ response } = await callOpenApi(params));} catch (e) {response = { errorMsg: String(e && e.message || e) };}
     if (response && response.success === true) return response;
     const code = response && response.errorCode;
-    lastMsg = (response && response.errorMsg) || `errorCode=${code}`;
+    lastMsg = response && response.errorMsg || `errorCode=${code}`;
     const retriable = code === 4000000 || /SYSTEM_EXCEPTION|limit|frequent|频繁|rate|timeout|超时/i.test(lastMsg);
-    if (i < MAX_RETRIES && retriable) { await sleep(1000 * (i + 1)); continue; }
+    if (i < MAX_RETRIES && retriable) {await sleep(1000 * (i + 1));continue;}
     throw new Error(`${params.type} 失败: ${lastMsg}`);
   }
   throw new Error(`${params.type} 重试失败: ${lastMsg}`);
@@ -49,7 +50,7 @@ async function callRetry(params) {
 // 疵点列表 → 摘要文本 + 完整 JSON + 图片数。导出供测试。
 function summarizeFlaws(flawList) {
   const flaws = Array.isArray(flawList) ? flawList : [];
-  const parts = []; let imgs = 0; const json = [];
+  const parts = [];let imgs = 0;const json = [];
   for (const f of flaws) {
     const name = f.flawNameDesc || f.flawDesc || "";
     const deg = f.flawDegreeDesc || "";
@@ -66,7 +67,7 @@ function parseQcDetail(resp) {
   const hist = resp && resp.result && Array.isArray(resp.result.historyVOS) ? resp.result.historyVOS : [];
   if (!hist.length) return null;
   const h = hist[0]; // historyVOS 按时间倒序,取最新
-  const qd = (h && h.qcDetail && typeof h.qcDetail === "object") ? h.qcDetail : {};
+  const qd = h && h.qcDetail && typeof h.qcDetail === "object" ? h.qcDetail : {};
   const fl = summarizeFlaws(qd.flawDTOList);
   return {
     qc_result: num(h.qcResult),
@@ -77,7 +78,7 @@ function parseQcDetail(resp) {
     receipt_no: s(qd.receiptNo),
     flaw_summary: fl.summary,
     flaws_json: fl.json,
-    flaw_image_count: fl.imageCount,
+    flaw_image_count: fl.imageCount
   };
 }
 
@@ -88,13 +89,13 @@ function parseQcListItem(it) {
     product_sku_id: s(it.productSkuId),
     product_skc_id: s(it.productSkcId),
     spu_id: s(it.spuId),
-    ext_code: (it.skuExtCode != null && String(it.skuExtCode).trim() !== "") ? String(it.skuExtCode) : null,
+    ext_code: it.skuExtCode != null && String(it.skuExtCode).trim() !== "" ? String(it.skuExtCode) : null,
     sku_name: s(it.skuName),
     spec: s(it.spec),
     cat_name: s(it.catName),
     purchase_no: s(it.purchaseNo),
     thumb_url: s(it.thumbUrl),
-    qc_result_update_time: s(it.qcResultUpdateTime),
+    qc_result_update_time: s(it.qcResultUpdateTime)
   };
 }
 
@@ -109,7 +110,7 @@ async function collectQcForMall(db, mall, opts = {}) {
     if (onlyBad) biz.skuQcResult = 2;
     if (opts.sinceMs) biz.qcResultUpdateTimeBegin = opts.sinceMs;
     const resp = await callRetry({ type: "bg.goods.qualityinspection.get", ...cred, bizParams: biz, timeoutMs: 20000 });
-    const list = (resp.result && Array.isArray(resp.result.skuList)) ? resp.result.skuList : [];
+    const list = resp.result && Array.isArray(resp.result.skuList) ? resp.result.skuList : [];
     for (const it of list) base.push(parseQcListItem(it));
     const total = num(resp.result && resp.result.total) || 0;
     if (list.length === 0 || page * PAGE_SIZE >= total) break;
@@ -121,12 +122,12 @@ async function collectQcForMall(db, mall, opts = {}) {
       try {
         const d = await callRetry({ type: "bg.goods.qualityinspectiondetail.get", ...cred, bizParams: { qcBillId: Number(r.qc_bill_id) }, timeoutMs: 20000 });
         detail = parseQcDetail(d);
-      } catch (e) { /* 详情失败不致命:保留列表行,详情字段留空 */ }
+      } catch (e) {/* 详情失败不致命:保留列表行,详情字段留空 */}
     }
     out.push({
       ...r,
       mall_id: mall.mall_id,
-      qc_result: (detail && detail.qc_result != null) ? detail.qc_result : (onlyBad ? 2 : null),
+      qc_result: detail && detail.qc_result != null ? detail.qc_result : onlyBad ? 2 : null,
       finish_time: detail ? detail.finish_time : null,
       expect_qty: detail ? detail.expect_qty : null,
       defective_qty: detail ? detail.defective_qty : null,
@@ -134,7 +135,7 @@ async function collectQcForMall(db, mall, opts = {}) {
       receipt_no: detail ? detail.receipt_no : null,
       flaw_summary: detail ? detail.flaw_summary : null,
       flaws_json: detail ? detail.flaws_json : null,
-      flaw_image_count: detail ? detail.flaw_image_count : null,
+      flaw_image_count: detail ? detail.flaw_image_count : null
     });
   }
   return out;
@@ -151,31 +152,31 @@ const UPSERT_SQL = `INSERT INTO erp_temu_openapi_qc
     flaw_summary=excluded.flaw_summary, flaws_json=excluded.flaws_json, flaw_image_count=excluded.flaw_image_count, synced_at=excluded.synced_at`;
 
 // upsert 一批行(同店内 mall_id+qc_bill_id 唯一)。返回写入行数。
-function upsertQc(db, rows) {
+async function upsertQc(db, rows) {
   if (!rows.length) return 0;
-  const now = new Date().toISOString();
-  const stmt = db.prepare(UPSERT_SQL);
-  const tx = db.transaction((list) => { for (const r of list) stmt.run({ ...r, synced_at: now }); });
-  tx(rows);
+  const now = new Date().toISOString();await withTransaction(db,
+
+    async (txDb) => {const list =
+      rows;for (const r of list) await execute(txDb, UPSERT_SQL, { ...r, synced_at: now });});
   return rows.length;
 }
 
 // 刷新所有全托管 active 店铺的质检(不合格)。返回汇总。
 async function refreshQcAll(db, opts = {}) {
-  const malls = db.prepare(
-    "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0"
-  ).all();
+  const malls = await queryAll(db,
+  "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0");
+
   let totalRows = 0;
   const perMall = [];
   const errors = [];
   for (const m of malls) {
     try {
       const rows = await collectQcForMall(db, m, opts);
-      const n = upsertQc(db, rows);
+      const n = await upsertQc(db, rows);
       totalRows += n;
       perMall.push({ mall: m.mall_id, rows: n });
     } catch (e) {
-      errors.push({ mall: m.mall_id, error: (e && e.message) || String(e) });
+      errors.push({ mall: m.mall_id, error: e && e.message || String(e) });
     }
   }
   return { malls: malls.length, rows: totalRows, perMall, errors };

@@ -3,13 +3,11 @@
 // 用法(crontab,建议每 30 分钟刷当天):
 //   11,41 * * * * cd /opt/temu-automation && node scripts/refresh-openapi-goods-created.cjs >> /var/log/temu-openapi-goods-created.log 2>&1
 "use strict";
-const Database = require("better-sqlite3");
-const ERP_DB = process.env.ERP_DB || "/opt/temu-erp-data/erp.sqlite";
-const db = new Database(ERP_DB);
-db.pragma("busy_timeout=60000");
+const { openErpDatabase, closePgPool, USE_PG } = require("../electron/db/connection.cjs");
 const { refreshGoodsCreatedAll } = require("../electron/erp/services/temuOpenApiGoodsCreated.cjs");
 
 (async () => {
+  const db = openErpDatabase();
   const t0 = Date.now();
   try {
     const dayOffset = Number(process.env.GOODS_CREATED_DAY_OFFSET) || 0;
@@ -20,6 +18,6 @@ const { refreshGoodsCreatedAll } = require("../electron/erp/services/temuOpenApi
     console.error(new Date().toISOString(), "goods-created refresh failed:", (e && e.message) || e);
     process.exitCode = 1;
   } finally {
-    db.close();
+    if (USE_PG) await closePgPool(); else db.close();
   }
 })();

@@ -20,8 +20,9 @@ console.log("CLOUD db:", process.env.TEMU_CLOUD_DB_PATH);
 const { openErpDatabase } = require(path.join(ROOT, "electron/db/connection.cjs"));
 const { runMigrations } = require(path.join(ROOT, "electron/db/migrate.cjs"));
 
+(async () => {
 const db = openErpDatabase({ dataDir: tmpDir });
-const result = runMigrations({ db });
+const result = await runMigrations({ db });
 const okCount = result?.success?.length || 0;
 const failCount = result?.failure?.length || 0;
 console.log(`Migrations: ${okCount} ok, ${failCount} failed`);
@@ -64,3 +65,5 @@ console.log(`  erp_temu_robot_sync_runs:${tableCount("erp_temu_robot_sync_runs")
 db.close();
 fs.rmSync(tmpDir, { recursive: true, force: true });
 console.log("CLEANUP OK");
+
+})().catch(e => { console.error(e); process.exit(1); });

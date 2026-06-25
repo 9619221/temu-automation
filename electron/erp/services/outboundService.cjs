@@ -1,4 +1,5 @@
 const { OUTBOUND_SHIPMENT_STATUS: OS } = require("../workflow/enums.cjs");
+const { queryOne } = require("../../db/connection.cjs");
 const { nowIso } = require("./utils.cjs");
 
 class OutboundService {
@@ -11,47 +12,47 @@ class OutboundService {
     this.inventory = inventory;
   }
 
-  getShipment(id) {
-    const row = this.db.prepare("SELECT * FROM erp_outbound_shipments WHERE id = ?").get(id);
+  async getShipment(id) {
+    const row = await queryOne(this.db, "SELECT * FROM erp_outbound_shipments WHERE id = ?", [id]);
     if (!row) throw new Error(`Outbound shipment not found: ${id}`);
     return row;
   }
 
-  submitOutbound(id, actor) {
-    const shipment = this.getShipment(id);
+  async submitOutbound(id, actor) {
+    const shipment = await this.getShipment(id);
     if (shipment.batch_id) {
-      this.inventory.assertCanReserve(shipment.batch_id, shipment.qty);
+      await this.inventory.assertCanReserve(shipment.batch_id, shipment.qty);
     }
-    const transition = this.workflow.transition({
+    const transition = await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "submit_outbound",
       toStatus: OS.PENDING_WAREHOUSE,
-      actor,
+      actor
     });
     if (shipment.batch_id) {
-      this.inventory.reserveForOutbound({
+      await this.inventory.reserveForOutbound({
         batchId: shipment.batch_id,
         qty: shipment.qty,
         outboundId: shipment.id,
-        actor,
+        actor
       });
     }
     return transition;
   }
 
-  startPicking(id, actor) {
-    return this.workflow.transition({
+  async startPicking(id, actor) {
+    return await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "start_picking",
       toStatus: OS.PICKING,
-      actor,
+      actor
     });
   }
 
-  markPacked(id, actor, patch = {}) {
-    return this.workflow.transition({
+  async markPacked(id, actor, patch = {}) {
+    return await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "mark_packed",
@@ -60,17 +61,17 @@ class OutboundService {
       patch: {
         boxes: patch.boxes ?? null,
         photos_json: JSON.stringify(patch.photos || []),
-        warehouse_operator_id: actor?.id || null,
-      },
+        warehouse_operator_id: actor?.id || null
+      }
     });
   }
 
-  confirmShippedOut(id, actor, patch = {}) {
-    const shipment = this.getShipment(id);
+  async confirmShippedOut(id, actor, patch = {}) {
+    const shipment = await this.getShipment(id);
     if (shipment.batch_id) {
-      this.inventory.assertCanShipReserved(shipment.batch_id, shipment.qty);
+      await this.inventory.assertCanShipReserved(shipment.batch_id, shipment.qty);
     }
-    const transition = this.workflow.transition({
+    const transition = await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "confirm_shipped_out",
@@ -80,32 +81,32 @@ class OutboundService {
         logistics_provider: patch.logisticsProvider || shipment.logistics_provider || null,
         tracking_no: patch.trackingNo || shipment.tracking_no || null,
         warehouse_operator_id: actor?.id || shipment.warehouse_operator_id || null,
-        shipped_at: patch.shippedAt || nowIso(),
-      },
+        shipped_at: patch.shippedAt || nowIso()
+      }
     });
     if (shipment.batch_id) {
-      this.inventory.shipReserved({
+      await this.inventory.shipReserved({
         batchId: shipment.batch_id,
         qty: shipment.qty,
         outboundId: shipment.id,
-        actor,
+        actor
       });
     }
     return transition;
   }
 
-  requestOperationsConfirm(id, actor) {
-    return this.workflow.transition({
+  async requestOperationsConfirm(id, actor) {
+    return await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "request_ops_confirm",
       toStatus: OS.PENDING_OPS_CONFIRM,
-      actor,
+      actor
     });
   }
 
-  confirmDone(id, actor) {
-    return this.workflow.transition({
+  async confirmDone(id, actor) {
+    return await this.workflow.transition({
       entityType: "outbound_shipment",
       id,
       action: "confirm_outbound_done",
@@ -113,12 +114,12 @@ class OutboundService {
       actor,
       patch: {
         confirmed_by: actor?.id || null,
-        confirmed_at: nowIso(),
-      },
+        confirmed_at: nowIso()
+      }
     });
   }
 }
 
 module.exports = {
-  OutboundService,
+  OutboundService
 };

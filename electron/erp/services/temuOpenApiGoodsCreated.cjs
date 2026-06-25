@@ -10,15 +10,16 @@
 "use strict";
 
 const { callOpenApi } = require("../temuOpenApiClient.cjs");
+const { queryAll, withTransaction} = require("../../db/connection.cjs");
 
 const PAGE_SIZE = 100;
-const MAX_PAGES = 100;            // 今天创建的量小,分页上限防 runaway
+const MAX_PAGES = 100; // 今天创建的量小,分页上限防 runaway
 const MIN_INTERVAL_MS = 400;
 const MAX_RETRIES = 4;
-const BJ = 8 * 3600000, DAY = 86400000;
+const BJ = 8 * 3600000,DAY = 86400000;
 
-function s(v) { return v == null ? null : String(v); }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function s(v) {return v == null ? null : String(v);}
+function sleep(ms) {return new Promise((r) => setTimeout(r, ms));}
 
 let lastCallAt = 0;
 async function throttle() {
@@ -32,19 +33,19 @@ async function callRetry(params) {
   for (let i = 0; i <= MAX_RETRIES; i += 1) {
     await throttle();
     let response = null;
-    try { ({ response } = await callOpenApi(params)); } catch (e) { response = { errorMsg: String((e && e.message) || e) }; }
+    try {({ response } = await callOpenApi(params));} catch (e) {response = { errorMsg: String(e && e.message || e) };}
     if (response && response.success === true) return response;
     const code = response && response.errorCode;
-    lastMsg = (response && response.errorMsg) || `errorCode=${code}`;
+    lastMsg = response && response.errorMsg || `errorCode=${code}`;
     const retriable = !response || code === 4000000 || /SYSTEM_EXCEPTION|limit|frequent|频繁|rate|timeout|超时|null|empty/i.test(lastMsg);
-    if (i < MAX_RETRIES && retriable) { await sleep(1000 * (i + 1)); continue; }
+    if (i < MAX_RETRIES && retriable) {await sleep(1000 * (i + 1));continue;}
     throw new Error(`${params.type} 失败: ${lastMsg}`);
   }
   throw new Error(`${params.type} 重试失败: ${lastMsg}`);
 }
 
-function bjDayStart(dayOffset = 0) { const todayStart = Math.floor((Date.now() + BJ) / DAY) * DAY - BJ; return todayStart + dayOffset * DAY; }
-function bjDateStr(ms) { return new Date(ms + BJ).toISOString().slice(0, 10); }
+function bjDayStart(dayOffset = 0) {const todayStart = Math.floor((Date.now() + BJ) / DAY) * DAY - BJ;return todayStart + dayOffset * DAY;}
+function bjDateStr(ms) {return new Date(ms + BJ).toISOString().slice(0, 10);}
 
 // 采集单店「指定日创建的商品」(按 SKC 去重)。导出供测试。
 async function collectGoodsCreatedForMall(db, mall, opts = {}) {
@@ -60,7 +61,7 @@ async function collectGoodsCreatedForMall(db, mall, opts = {}) {
     const resp = await callRetry({
       type: "bg.glo.goods.list.get", ...cred,
       bizParams: { createdAtStart: from, createdAtEnd: to, pageSize: PAGE_SIZE, page },
-      timeoutMs: 30000,
+      timeoutMs: 30000
     });
     const result = resp.result || {};
     const list = Array.isArray(result.data) ? result.data : [];
@@ -71,7 +72,7 @@ async function collectGoodsCreatedForMall(db, mall, opts = {}) {
         mall_id: mall.mall_id, stat_date: statDate, product_skc_id: skc,
         product_id: s(it.productId),
         skc_site_status: it.skcSiteStatus != null ? Number(it.skcSiteStatus) : null,
-        created_at: it.createdAt != null ? Number(it.createdAt) : null,
+        created_at: it.createdAt != null ? Number(it.createdAt) : null
       });
     }
     if (list.length < PAGE_SIZE) break;
@@ -85,30 +86,30 @@ const UPSERT_SQL = `INSERT INTO erp_temu_goods_created_daily
   ON CONFLICT(mall_id,stat_date,product_skc_id) DO UPDATE SET
     product_id=excluded.product_id, skc_site_status=excluded.skc_site_status, created_at=excluded.created_at, synced_at=excluded.synced_at`;
 
-function upsertGoodsCreated(db, rows) {
+async function upsertGoodsCreated(db, rows) {
   if (!rows.length) return 0;
-  const now = new Date().toISOString();
-  const stmt = db.prepare(UPSERT_SQL);
-  const tx = db.transaction((list) => { for (const r of list) stmt.run({ ...r, synced_at: now }); });
-  tx(rows);
+  const now = new Date().toISOString();await withTransaction(db,
+
+    async (txDb) => {const list =
+      rows;for (const r of list) await execute(txDb, UPSERT_SQL, { ...r, synced_at: now });});
   return rows.length;
 }
 
 async function refreshGoodsCreatedAll(db, opts = {}) {
-  const malls = db.prepare(
-    "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0"
-  ).all();
+  const malls = await queryAll(db,
+  "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0");
+
   let total = 0;
   const perMall = [];
   const errors = [];
   for (const m of malls) {
     try {
       const rows = await collectGoodsCreatedForMall(db, m, opts);
-      const n = upsertGoodsCreated(db, rows);
+      const n = await upsertGoodsCreated(db, rows);
       total += n;
       if (n > 0) perMall.push({ mall: m.mall_id, created: n });
     } catch (e) {
-      errors.push({ mall: m.mall_id, error: (e && e.message) || String(e) });
+      errors.push({ mall: m.mall_id, error: e && e.message || String(e) });
     }
   }
   return { malls: malls.length, created: total, perMall, errors };

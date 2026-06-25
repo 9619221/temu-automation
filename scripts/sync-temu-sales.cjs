@@ -20,50 +20,52 @@ function parseArgs(argv) {
   return options;
 }
 
-const options = parseArgs(process.argv.slice(2));
-const companyId = options.companyId || process.env.COMPANY_ID || "company_default";
-const db = openErpDatabase();
+(async () => {
+  const options = parseArgs(process.argv.slice(2));
+  const companyId = options.companyId || process.env.COMPANY_ID || "company_default";
+  const db = openErpDatabase();
 
-try {
-  runMigrations({ db });
-  const bridge = new TemuSalesBridge({ db });
-  const result = bridge.sync({
-    companyId,
-    accountId: options.accountId,
-    shopId: options.shopId,
-    shopName: options.shopName,
-    statDate: options.statDate,
-    salesJsonPath: options.salesJsonPath,
-  });
+  try {
+    await runMigrations({ db });
+    const bridge = new TemuSalesBridge({ db });
+    const result = bridge.sync({
+      companyId,
+      accountId: options.accountId,
+      shopId: options.shopId,
+      shopName: options.shopName,
+      statDate: options.statDate,
+      salesJsonPath: options.salesJsonPath,
+    });
 
-  const counts = {
-    shop: db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM erp_temu_sales_shop
-      WHERE company_id = ? AND platform_shop_id = ? AND stat_date = ?
-    `).get(result.companyId, result.platformShopId, result.statDate).count,
-    sku: db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM erp_temu_sales_sku
-      WHERE company_id = ? AND platform_shop_id = ?
-        AND stat_date_start = ? AND stat_date_end = ?
-    `).get(result.companyId, result.platformShopId, result.statDate, result.statDate).count,
-    priceLog: db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM erp_temu_price_log
-      WHERE company_id = ? AND platform_shop_id = ?
-    `).get(result.companyId, result.platformShopId).count,
-    runs: db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM erp_temu_robot_sync_runs
-      WHERE id = ?
-    `).get(result.runId).count,
-  };
+    const counts = {
+      shop: db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM erp_temu_sales_shop
+        WHERE company_id = ? AND platform_shop_id = ? AND stat_date = ?
+      `).get(result.companyId, result.platformShopId, result.statDate).count,
+      sku: db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM erp_temu_sales_sku
+        WHERE company_id = ? AND platform_shop_id = ?
+          AND stat_date_start = ? AND stat_date_end = ?
+      `).get(result.companyId, result.platformShopId, result.statDate, result.statDate).count,
+      priceLog: db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM erp_temu_price_log
+        WHERE company_id = ? AND platform_shop_id = ?
+      `).get(result.companyId, result.platformShopId).count,
+      runs: db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM erp_temu_robot_sync_runs
+        WHERE id = ?
+      `).get(result.runId).count,
+    };
 
-  console.log(JSON.stringify({ ok: true, result, counts }, null, 2));
-} catch (error) {
-  console.error(JSON.stringify({ ok: false, error: error?.message || String(error) }, null, 2));
-  process.exitCode = 1;
-} finally {
-  db.close();
-}
+    console.log(JSON.stringify({ ok: true, result, counts }, null, 2));
+  } catch (error) {
+    console.error(JSON.stringify({ ok: false, error: error?.message || String(error) }, null, 2));
+    process.exitCode = 1;
+  } finally {
+    db.close();
+  }
+})().catch(e => { console.error(e); process.exit(1); });

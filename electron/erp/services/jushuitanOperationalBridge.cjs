@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 const { createId, nowIso } = require("./utils.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
@@ -20,11 +21,11 @@ function hashText(value, length = 14) {
 
 function stableId(prefix, value) {
   const text = optionalString(value) || "default";
-  const slug = text
-    .replace(/https?:\/\//gi, "")
-    .replace(/[^\w.-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 54);
+  const slug = text.
+  replace(/https?:\/\//gi, "").
+  replace(/[^\w.-]+/g, "_").
+  replace(/^_+|_+$/g, "").
+  slice(0, 54);
   return `jst:${prefix}:${slug || "x"}:${hashText(text, 10)}`;
 }
 
@@ -66,19 +67,19 @@ function firstText(record, keys) {
 
 function joinAddress(record) {
   const parts = [
-    firstText(record, ["state", "province", "receiver_state"]),
-    firstText(record, ["city", "receiver_city"]),
-    firstText(record, ["district", "area", "receiver_district"]),
-    firstText(record, ["street", "address", "receiver_address", "send_address"]),
-  ].filter(Boolean);
+  firstText(record, ["state", "province", "receiver_state"]),
+  firstText(record, ["city", "receiver_city"]),
+  firstText(record, ["district", "area", "receiver_district"]),
+  firstText(record, ["street", "address", "receiver_address", "send_address"])].
+  filter(Boolean);
   return [...new Set(parts)].join(" ");
 }
 
 function isInactive(record) {
   const status = [
-    firstText(record, ["status", "statusText", "enabled", "isNotEnabled"]),
-    firstText(record, ["status_v"]),
-  ].join(" ");
+  firstText(record, ["status", "statusText", "enabled", "isNotEnabled"]),
+  firstText(record, ["status_v"])].
+  join(" ");
   if (record?.enabled === false || record?.enabled === 0 || record?.isNotEnabled === true) return true;
   return /停用|禁用|失效|删除|作废|disabled|inactive/i.test(status);
 }
@@ -125,7 +126,7 @@ function sourceBusinessNo(record, sourceKey, externalId) {
     orders: ["o_id", "oId", "so_id", "soId"],
     sales_out: ["io_id", "ioId", "o_id", "oId", "so_id", "soId"],
     refunds: ["as_id", "asId", "refund_id", "refundId", "o_id", "oId", "so_id", "soId"],
-    logistics: ["l_id", "lId", "logistics_no", "tracking_no", "o_id", "oId", "so_id", "soId"],
+    logistics: ["l_id", "lId", "logistics_no", "tracking_no", "o_id", "oId", "so_id", "soId"]
   };
   return firstText(record, keysBySource[sourceKey] || []) || externalId;
 }
@@ -135,19 +136,19 @@ function normalizeBusinessRecord({ companyId, sourceKey, rawRow, raw, now }) {
   const firstItem = items[0] && typeof items[0] === "object" ? items[0] : {};
   const externalId = optionalString(rawRow.external_id) || hashText(rawRow.raw_json);
   const businessNo = sourceBusinessNo(raw, sourceKey, externalId);
-  const qty = toNumber(first(raw, ["qty", "qty_count", "total_qty", "total_r_qty", "unlock_qty", "sale_qty"]))
-    ?? sumItems(items, "qty");
+  const qty = toNumber(first(raw, ["qty", "qty_count", "total_qty", "total_r_qty", "unlock_qty", "sale_qty"])) ??
+  sumItems(items, "qty");
   const amount = toNumber(first(raw, [
-    "amount", "total_amount", "plat_total_amount", "sku_amount", "total_sale_amount",
-    "total_sale_base_amount", "cost_price", "free_amount",
-  ])) ?? sumItems(items, "amount");
-  const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"])
-    || firstText(firstItem, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
-  const productName = firstText(raw, ["name", "product_name", "title"])
-    || firstText(firstItem, ["name", "product_name", "title"]);
-  const accountId = firstText(raw, ["shop_id", "shopId"])
-    ? stableId("shop", firstText(raw, ["shop_id", "shopId"]))
-    : null;
+  "amount", "total_amount", "plat_total_amount", "sku_amount", "total_sale_amount",
+  "total_sale_base_amount", "cost_price", "free_amount"]
+  )) ?? sumItems(items, "amount");
+  const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]) ||
+  firstText(firstItem, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
+  const productName = firstText(raw, ["name", "product_name", "title"]) ||
+  firstText(firstItem, ["name", "product_name", "title"]);
+  const accountId = firstText(raw, ["shop_id", "shopId"]) ?
+  stableId("shop", firstText(raw, ["shop_id", "shopId"])) :
+  null;
   const supplierIdValue = firstText(raw, ["supplier_id", "supplierId", "seller_id", "sellerId"]);
   const warehouseIdValue = firstText(raw, ["wh_id", "whId", "wms_co_id", "wmsCoId", "coId2", "co_id"]);
 
@@ -159,18 +160,18 @@ function normalizeBusinessRecord({ companyId, sourceKey, rawRow, raw, now }) {
     external_id: externalId,
     business_no: businessNo,
     business_time: normalizeDate(first(raw, [
-      "order_date", "pay_date", "io_date", "po_date", "created", "modified", "date",
-      "fetched_at", "__jst_web_collected_at",
-    ])),
+    "order_date", "pay_date", "io_date", "po_date", "created", "modified", "date",
+    "fetched_at", "__jst_web_collected_at"]
+    )),
     status: [
-      firstText(raw, ["status", "f_status", "statusText", "outer_status_1688"]),
-      firstText(raw, ["receive_status", "delivery_status", "logistics_status"]),
-    ].filter(Boolean).join(" / ") || null,
+    firstText(raw, ["status", "f_status", "statusText", "outer_status_1688"]),
+    firstText(raw, ["receive_status", "delivery_status", "logistics_status"])].
+    filter(Boolean).join(" / ") || null,
     related_no: firstText(raw, ["o_id", "oId", "so_id", "soId", "outer_po_id_1688", "outer_po_id", "out_io_id"]) || null,
     party_name: firstText(raw, [
-      "seller", "supplier_name", "member_name_1688", "receiver_name", "buyer_name",
-      "partnerName", "name", "contacts",
-    ]) || null,
+    "seller", "supplier_name", "member_name_1688", "receiver_name", "buyer_name",
+    "partnerName", "name", "contacts"]
+    ) || null,
     shop_name: firstText(raw, ["shop_name", "shopName", "source_shop_name", "col_3"]) || null,
     account_id: accountId,
     supplier_id: supplierIdValue ? stableId("supplier", supplierIdValue) : null,
@@ -186,7 +187,7 @@ function normalizeBusinessRecord({ companyId, sourceKey, rawRow, raw, now }) {
     raw_record_id: rawRow.id,
     raw_json: stringify(raw),
     created_at: now,
-    updated_at: now,
+    updated_at: now
   };
 }
 
@@ -228,28 +229,28 @@ function normalizeBusinessItemRecords({ companyId, sourceKey, rawRow, raw, now }
       tracking_no: firstText(raw, ["l_id", "lId", "logistics_no", "tracking_no", "express_no"]) || null,
       raw_record_id: rawRow.id,
       raw_json: stringify({ parentExternalId, itemIndex: index + 1, item, header: {
-        o_id: raw.o_id,
-        so_id: raw.so_id,
-        io_id: raw.io_id,
-        po_id: raw.po_id,
-      } }),
+          o_id: raw.o_id,
+          so_id: raw.so_id,
+          io_id: raw.io_id,
+          po_id: raw.po_id
+        } }),
       created_at: now,
-      updated_at: now,
+      updated_at: now
     };
   });
 }
 
 function mapPurchaseStatus(raw) {
   const text = [
-    firstText(raw, ["status"]),
-    firstText(raw, ["f_status"]),
-    firstText(raw, ["status_v"]),
-    firstText(raw, ["outer_status_1688"]),
-    firstText(raw, ["outer_status"]),
-    firstText(raw, ["receive_status"]),
-    firstText(raw, ["delivery_status"]),
-    firstText(raw, ["logistics_status"]),
-  ].join(" ");
+  firstText(raw, ["status"]),
+  firstText(raw, ["f_status"]),
+  firstText(raw, ["status_v"]),
+  firstText(raw, ["outer_status_1688"]),
+  firstText(raw, ["outer_status"]),
+  firstText(raw, ["receive_status"]),
+  firstText(raw, ["delivery_status"]),
+  firstText(raw, ["logistics_status"])].
+  join(" ");
   if (/作废|取消|关闭|cancel/i.test(text)) return "cancelled";
   if (/已入库|全部入库|入库完成|完成/i.test(text)) return "inbounded";
   if (/交易成功|交易完成|success/i.test(text)) return "trade_completed";
@@ -266,12 +267,12 @@ function mapPurchaseStatus(raw) {
 
 function mapPaymentStatus(raw) {
   const text = [
-    firstText(raw, ["outer_status_1688"]),
-    firstText(raw, ["outer_status"]),
-    firstText(raw, ["payment_status"]),
-    firstText(raw, ["status"]),
-    firstText(raw, ["plat_pay_date"]),
-  ].join(" ");
+  firstText(raw, ["outer_status_1688"]),
+  firstText(raw, ["outer_status"]),
+  firstText(raw, ["payment_status"]),
+  firstText(raw, ["status"]),
+  firstText(raw, ["plat_pay_date"])].
+  join(" ");
   if (/等待买家付款|待付款|待支付|waitbuyerpay/i.test(text)) return "unpaid";
   if (/已付款|已支付|待卖家发货|已发货|已完成|paid|payed|success/i.test(text)) return "paid";
   if (firstText(raw, ["plat_pay_date"])) return "paid";
@@ -280,10 +281,10 @@ function mapPaymentStatus(raw) {
 
 function mapInboundStatus(raw) {
   const text = [
-    firstText(raw, ["status"]),
-    firstText(raw, ["f_status"]),
-    firstText(raw, ["archived"]),
-  ].join(" ");
+  firstText(raw, ["status"]),
+  firstText(raw, ["f_status"]),
+  firstText(raw, ["archived"])].
+  join(" ");
   if (/取消|作废|cancel/i.test(text)) return "cancelled";
   if (/待入库/i.test(text)) return "jst_pending_inbound";
   if (/已审核|已入库|归档|archived/i.test(text)) return "inbounded_pending_qc";
@@ -301,11 +302,11 @@ class JushuitanOperationalBridge {
   constructor({ db }) {
     if (!db) throw new Error("JushuitanOperationalBridge requires db");
     this.db = db;
-    this.prepareStatements();
+    this.prepareSqlStrings();
   }
 
-  prepareStatements() {
-    this.upsertAccountStmt = this.db.prepare(`
+  prepareSqlStrings() {
+    this.upsertAccountSql = `
       INSERT INTO erp_accounts (id, company_id, name, phone, status, source, created_at, updated_at)
       VALUES (@id, @company_id, @name, @phone, @status, @source, @created_at, @updated_at)
       ON CONFLICT(id) DO UPDATE SET
@@ -315,8 +316,8 @@ class JushuitanOperationalBridge {
         status = CASE WHEN erp_accounts.status = 'deleted' THEN erp_accounts.status ELSE excluded.status END,
         source = excluded.source,
         updated_at = excluded.updated_at
-    `);
-    this.upsertSupplierStmt = this.db.prepare(`
+    `;
+    this.upsertSupplierSql = `
       INSERT INTO erp_suppliers (
         id, company_id, name, contact_name, phone, wechat, address,
         categories_json, status, created_at, updated_at
@@ -335,16 +336,16 @@ class JushuitanOperationalBridge {
         categories_json = excluded.categories_json,
         status = excluded.status,
         updated_at = excluded.updated_at
-    `);
-    this.upsertWarehouseStmt = this.db.prepare(`
+    `;
+    this.upsertWarehouseSql = `
       INSERT INTO erp_warehouses (id, company_id, name, code, status, created_at, updated_at)
       VALUES (@id, @company_id, @name, @code, @status, @created_at, @updated_at)
       ON CONFLICT(company_id, code) DO UPDATE SET
         name = excluded.name,
         status = excluded.status,
         updated_at = excluded.updated_at
-    `);
-    this.upsertSkuStmt = this.db.prepare(`
+    `;
+    this.upsertSkuSql = `
       INSERT INTO erp_skus (
         id, company_id, account_id, internal_sku_code, temu_sku_id, temu_product_id,
         temu_skc_id, product_name, category, image_url, supplier_id, status,
@@ -366,8 +367,8 @@ class JushuitanOperationalBridge {
         status = excluded.status,
         color_spec = COALESCE(NULLIF(excluded.color_spec, ''), erp_skus.color_spec),
         updated_at = excluded.updated_at
-    `);
-    this.upsertSku1688SourceStmt = this.db.prepare(`
+    `;
+    this.upsertSku1688SourceSql = `
       INSERT INTO erp_sku_1688_sources (
         id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
         supplier_name, product_title, product_url, image_url, unit_price, moq,
@@ -398,8 +399,8 @@ class JushuitanOperationalBridge {
         platform_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.platform_qty ELSE erp_sku_1688_sources.platform_qty END,
         remark = COALESCE(NULLIF(excluded.remark, ''), erp_sku_1688_sources.remark),
         updated_at = excluded.updated_at
-    `);
-    this.upsertPurchaseOrderStmt = this.db.prepare(`
+    `;
+    this.upsertPurchaseOrderSql = `
       INSERT INTO erp_purchase_orders (
         id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
         status, payment_status, expected_delivery_date, actual_delivery_date,
@@ -434,8 +435,8 @@ class JushuitanOperationalBridge {
         external_order_detail_synced_at = excluded.external_order_detail_synced_at,
         external_logistics_json = excluded.external_logistics_json,
         external_logistics_synced_at = excluded.external_logistics_synced_at
-    `);
-    this.upsertInboundReceiptStmt = this.db.prepare(`
+    `;
+    this.upsertInboundReceiptSql = `
       INSERT INTO erp_inbound_receipts (
         id, account_id, po_id, receipt_no, status, received_at,
         operator_id, remark, created_at, updated_at
@@ -450,8 +451,8 @@ class JushuitanOperationalBridge {
         received_at = excluded.received_at,
         remark = excluded.remark,
         updated_at = excluded.updated_at
-    `);
-    this.upsertInventoryBatchStmt = this.db.prepare(`
+    `;
+    this.upsertInventoryBatchSql = `
       INSERT INTO erp_inventory_batches (
         id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
         received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
@@ -477,8 +478,8 @@ class JushuitanOperationalBridge {
         location_code = COALESCE(NULLIF(excluded.location_code, ''), erp_inventory_batches.location_code),
         received_at = excluded.received_at,
         updated_at = excluded.updated_at
-    `);
-    this.upsertBusinessRecordStmt = this.db.prepare(`
+    `;
+    this.upsertBusinessRecordSql = `
       INSERT INTO erp_jst_business_records (
         id, company_id, source_key, record_type, external_id, business_no,
         business_time, status, related_no, party_name, shop_name, account_id,
@@ -514,11 +515,11 @@ class JushuitanOperationalBridge {
         raw_record_id = excluded.raw_record_id,
         raw_json = excluded.raw_json,
         updated_at = excluded.updated_at
-    `);
+    `;
   }
 
-  ensureDefaultAccount(companyId, now) {
-    this.upsertAccountStmt.run({
+  async ensureDefaultAccount(companyId, now) {
+    await execute(this.db, this.upsertAccountSql, {
       id: DEFAULT_ACCOUNT_ID,
       company_id: companyId,
       name: "聚水潭",
@@ -526,16 +527,16 @@ class JushuitanOperationalBridge {
       status: "offline",
       source: "jushuitan",
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
   }
 
-  upsertShop(companyId, raw, now) {
+  async upsertShop(companyId, raw, now) {
     const shopName = firstText(raw, ["shop_name", "shopName", "col_3", "name"]);
     if (!shopName) return false;
     const shopId = firstText(raw, ["shop_id", "shopId", "col_2"]) || shopName;
     const statusText = firstText(raw, ["status", "auth_status", "col_6"]);
-    this.upsertAccountStmt.run({
+    await execute(this.db, this.upsertAccountSql, {
       id: stableId("shop", shopId),
       company_id: companyId,
       name: shopName,
@@ -543,16 +544,16 @@ class JushuitanOperationalBridge {
       status: /已授权|online|active/i.test(statusText) ? "online" : "offline",
       source: "jushuitan",
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
     return true;
   }
 
-  upsertBrandAccount(companyId, raw, now) {
+  async upsertBrandAccount(companyId, raw, now) {
     const brandName = firstText(raw, ["brand", "category"]);
     if (!brandName) return null;
     const id = stableId("brand", brandName);
-    this.upsertAccountStmt.run({
+    await execute(this.db, this.upsertAccountSql, {
       id,
       company_id: companyId,
       name: brandName,
@@ -560,29 +561,29 @@ class JushuitanOperationalBridge {
       status: "online",
       source: "jushuitan_brand",
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
     return id;
   }
 
-  resolveSkuAccountId(companyId, raw, now) {
-    const brandAccountId = this.upsertBrandAccount(companyId, raw, now);
+  async resolveSkuAccountId(companyId, raw, now) {
+    const brandAccountId = await this.upsertBrandAccount(companyId, raw, now);
     if (brandAccountId) return brandAccountId;
     const shopId = firstText(raw, ["shop_id", "shopId"]);
     if (shopId) return stableId("shop", shopId);
     return DEFAULT_ACCOUNT_ID;
   }
 
-  upsertSupplier(companyId, raw, now, fallback = {}) {
+  async upsertSupplier(companyId, raw, now, fallback = {}) {
     const supplierIdValue = firstText(raw, ["supplier_id", "supplierId", "seller_id", "sellerId"]) || fallback.id || "";
     const name = firstText(raw, ["name", "supplier_name", "seller", "member_name_1688", "contacts"]) || fallback.name || "";
     if (!name && !supplierIdValue) return null;
     const id = stableId("supplier", supplierIdValue || name);
     const categories = [
-      firstText(raw, ["group", "supplier_group", "sellerGroup"]),
-      fallback.category,
-    ].filter(Boolean);
-    this.upsertSupplierStmt.run({
+    firstText(raw, ["group", "supplier_group", "sellerGroup"]),
+    fallback.category].
+    filter(Boolean);
+    await execute(this.db, this.upsertSupplierSql, {
       id,
       company_id: companyId,
       name: name || supplierIdValue,
@@ -593,29 +594,29 @@ class JushuitanOperationalBridge {
       categories_json: stringify([...new Set(categories)]),
       status: isInactive(raw) ? "disabled" : "active",
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
     return id;
   }
 
-  upsertWarehouse(companyId, raw, now) {
+  async upsertWarehouse(companyId, raw, now) {
     const code = firstText(raw, ["coId2", "co_id", "wms_co_id", "wh_id", "warehouse_id", "wmsCoId", "partnerName"]);
     const name = firstText(raw, ["partnerName", "warehouse", "wms_co_name", "wh_name", "lwh_name"]) || code;
     if (!name) return null;
     const id = stableId("warehouse", code || name);
-    this.upsertWarehouseStmt.run({
+    await execute(this.db, this.upsertWarehouseSql, {
       id,
       company_id: companyId,
       name,
       code: code || id,
       status: isInactive(raw) ? "disabled" : "active",
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
     return id;
   }
 
-  upsertSku(companyId, raw, now) {
+  async upsertSku(companyId, raw, now) {
     const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
     const productName = firstText(raw, ["name", "product_name", "title"]);
     // 硬护栏：缺少 sku_code/sku_id/i_id 的 raw 一律拒绝。
@@ -624,14 +625,14 @@ class JushuitanOperationalBridge {
     // 走 stableId fallback "x" 就会灌出 jst:sku:x:<hash> 这种伪 SKU 污染 erp_skus 与 erp_inventory_batches。
     // 合法 SKU 永远来自 jushuitan-sku-profile-import.cjs（id 前缀 jst:skuprofile:），该路径不经过本函数。
     if (!skuCode) return null;
-    const supplierId = firstText(raw, ["supplier_id", "supplierId"])
-      ? this.upsertSupplier(companyId, raw, now)
-      : null;
+    const supplierId = firstText(raw, ["supplier_id", "supplierId"]) ?
+    await this.upsertSupplier(companyId, raw, now) :
+    null;
     const id = stableId("sku", skuCode || productName);
-    this.upsertSkuStmt.run({
+    await execute(this.db, this.upsertSkuSql, {
       id,
       company_id: companyId,
-      account_id: this.resolveSkuAccountId(companyId, raw, now),
+      account_id: await this.resolveSkuAccountId(companyId, raw, now),
       internal_sku_code: skuCode || id,
       temu_sku_id: null,
       temu_product_id: null,
@@ -644,17 +645,17 @@ class JushuitanOperationalBridge {
       created_at: now,
       updated_at: now,
       color_spec: firstText(raw, ["properties_value", "sku_type"]) || null,
-      created_by: null,
+      created_by: null
     });
     return id;
   }
 
-  upsertSku1688Source(companyId, raw, now) {
+  async upsertSku1688Source(companyId, raw, now) {
     const offerId = extractOfferId(raw);
     if (!offerId) return false;
-    const skuId = this.upsertSku(companyId, raw, now);
+    const skuId = await this.upsertSku(companyId, raw, now);
     if (!skuId) return false;
-    const accountId = this.resolveSkuAccountId(companyId, raw, now);
+    const accountId = await this.resolveSkuAccountId(companyId, raw, now);
     // 聚水潭对很多行没有比例字段(base_qty/pack_qty/plat_map_qty 全空)。这些行兜底成 1:1,
     // 但绝不能用兜底值无条件覆盖用户在供应商管理里手改的比例(见下方 DO UPDATE 的 CASE)。
     const jstOurQty = toNumber(first(raw, ["base_qty", "our_qty"]));
@@ -666,7 +667,7 @@ class JushuitanOperationalBridge {
     // plat_spec_id 为空(单规格/无 SKU 商品)也按无规格处理。否则下单时 noSpec=false 会对空 spec 抛「缺少 1688 规格」、
     // 或被「specId 与 skuId 同值」护栏拦下。is_no_spec 由 external_spec_id 是否为空反推,与 7229 自洽。
     if (jstExternalSpecId && jstExternalSkuId && jstExternalSpecId === jstExternalSkuId) jstExternalSpecId = "";
-    this.upsertSku1688SourceStmt.run({
+    await execute(this.db, this.upsertSku1688SourceSql, {
       id: stableId("sku1688", `${skuId}:${offerId}:${firstText(raw, ["plat_sku_id"])}:${firstText(raw, ["plat_spec_id"])}`),
       account_id: accountId,
       sku_id: skuId,
@@ -695,21 +696,21 @@ class JushuitanOperationalBridge {
       our_qty: jstOurQty != null ? Math.max(1, Math.floor(jstOurQty)) : 1,
       platform_qty: jstPlatformQty != null ? Math.max(1, Math.floor(jstPlatformQty)) : 1,
       ratio_from_jst: ratioFromJst,
-      remark: firstText(raw, ["plat_supplier_remark", "pack_qty_remark", "healthCheckResult"]) || null,
+      remark: firstText(raw, ["plat_supplier_remark", "pack_qty_remark", "healthCheckResult"]) || null
     });
     return true;
   }
 
-  upsertPurchaseOrder(companyId, raw, now) {
+  async upsertPurchaseOrder(companyId, raw, now) {
     const poNo = firstText(raw, ["po_id", "poId", "po_no"]);
     if (!poNo) return false;
-    const supplierId = this.upsertSupplier(companyId, raw, now, {
+    const supplierId = await this.upsertSupplier(companyId, raw, now, {
       id: firstText(raw, ["seller_id", "sellerId"]),
       name: firstText(raw, ["seller", "supplier_name", "member_name_1688"]),
-      category: "jushuitan_purchase",
+      category: "jushuitan_purchase"
     });
     const externalOrderId = firstText(raw, ["outer_po_id_1688", "outer_po_id"]);
-    this.upsertPurchaseOrderStmt.run({
+    await execute(this.db, this.upsertPurchaseOrderSql, {
       id: stableId("po", poNo),
       account_id: DEFAULT_ACCOUNT_ID,
       pr_id: null,
@@ -732,7 +733,7 @@ class JushuitanOperationalBridge {
         source: "jushuitan",
         seller: firstText(raw, ["seller", "member_name_1688"]),
         qty: toNumber(first(raw, ["qty_count"])),
-        labels: firstText(raw, ["labels"]),
+        labels: firstText(raw, ["labels"])
       }),
       external_order_previewed_at: now,
       external_payment_url: null,
@@ -743,30 +744,30 @@ class JushuitanOperationalBridge {
         l_id: firstText(raw, ["l_id", "lId"]),
         logistics_company: firstText(raw, ["logistics_company"]),
         logistics_status: firstText(raw, ["logistics_status"]),
-        address: firstText(raw, ["address", "send_address"]),
+        address: firstText(raw, ["address", "send_address"])
       }),
-      external_logistics_synced_at: now,
+      external_logistics_synced_at: now
     });
     return true;
   }
 
-  getPurchaseOrderIdByNo(poNo) {
+  async getPurchaseOrderIdByNo(poNo) {
     const text = optionalString(poNo);
     if (!text) return null;
     const id = stableId("po", text);
-    return this.db.prepare("SELECT id FROM erp_purchase_orders WHERE id = ?").get(id)?.id || null;
+    return (await queryOne(this.db, "SELECT id FROM erp_purchase_orders WHERE id = ?", [id]))?.id || null;
   }
 
-  upsertInboundReceipt(companyId, raw, now) {
+  async upsertInboundReceipt(companyId, raw, now) {
     const receiptNo = firstText(raw, ["io_id", "ioId"]);
     if (!receiptNo) return false;
     const poNo = firstText(raw, ["o_id", "oId", "po_id", "poId"]);
     const totalQty = toNumber(first(raw, ["total_qty", "total_r_qty"]));
     const totalAmount = toNumber(first(raw, ["total_amount"]));
-    this.upsertInboundReceiptStmt.run({
+    await execute(this.db, this.upsertInboundReceiptSql, {
       id: stableId("inbound", receiptNo),
       account_id: DEFAULT_ACCOUNT_ID,
-      po_id: this.getPurchaseOrderIdByNo(poNo),
+      po_id: await this.getPurchaseOrderIdByNo(poNo),
       receipt_no: receiptNo,
       status: mapInboundStatus(raw),
       received_at: normalizeDate(first(raw, ["io_date", "入库日期"])),
@@ -786,20 +787,20 @@ class JushuitanOperationalBridge {
         sourceTotalQty: totalQty,
         totalAmount,
         logisticsCompany: firstText(raw, ["logistics_company"]),
-        trackingNo: firstText(raw, ["l_id", "lId"]),
+        trackingNo: firstText(raw, ["l_id", "lId"])
       }),
       created_at: normalizeDate(first(raw, ["created", "io_date"])) || now,
-      updated_at: normalizeDate(first(raw, ["modified", "archived", "io_date"])) || now,
+      updated_at: normalizeDate(first(raw, ["modified", "archived", "io_date"])) || now
     });
     return true;
   }
 
-  upsertInventoryBatch(companyId, raw, now) {
+  async upsertInventoryBatch(companyId, raw, now) {
     // 硬护栏：跟 upsertSku 同源 —— inventory 源里的字段定义 schema / 菜单条目 没有 sku_code 也没有 qty，
     // 不是真库存数据，直接放行。
     const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
     if (!skuCode) return false;
-    const skuId = this.upsertSku(companyId, raw, now);
+    const skuId = await this.upsertSku(companyId, raw, now);
     if (!skuId) return false;
     const warehouseCode = firstText(raw, ["wh_id", "warehouse_id", "wms_co_id", "warehouse", "bin"]) || "default";
     const rawTotalQty = first(raw, ["qty", "stock_qty", "actual_qty", "unlock_qty"]);
@@ -810,7 +811,7 @@ class JushuitanOperationalBridge {
     const lockedQty = integerQty(rawLockedQty);
     const availableQty = integerQty(rawAvailableQty, Math.max(0, totalQty - lockedQty));
     const batchCode = `JST-STOCK-${String(warehouseCode).slice(0, 36)}-${String(skuCode).slice(0, 48)}`;
-    this.upsertInventoryBatchStmt.run({
+    await execute(this.db, this.upsertInventoryBatchSql, {
       id: stableId("batch", batchCode),
       account_id: DEFAULT_ACCOUNT_ID,
       batch_code: batchCode,
@@ -828,27 +829,27 @@ class JushuitanOperationalBridge {
       location_code: firstText(raw, ["bin", "warehouse", "wms_co_name"]) || null,
       received_at: normalizeDate(first(raw, ["modified", "created", "__jst_web_collected_at"])) || now,
       created_at: now,
-      updated_at: now,
+      updated_at: now
     });
     return true;
   }
 
-  upsertBusinessRecords(companyId, sourceKey, rawRow, raw, now) {
+  async upsertBusinessRecords(companyId, sourceKey, rawRow, raw, now) {
     const header = normalizeBusinessRecord({ companyId, sourceKey, rawRow, raw, now });
-    this.upsertBusinessRecordStmt.run(header);
+    await execute(this.db, this.upsertBusinessRecordSql, header);
     let count = 1;
     for (const line of normalizeBusinessItemRecords({ companyId, sourceKey, rawRow, raw, now })) {
-      this.upsertBusinessRecordStmt.run(line);
+      await execute(this.db, this.upsertBusinessRecordSql, line);
       count += 1;
     }
     return count;
   }
 
-  sync(payload = {}, actor = {}) {
+  async sync(payload = {}, actor = {}) {
     const companyId = normalizeCompanyId(payload.companyId || payload.company_id || actor.companyId || actor.company_id);
-    const sourceKeys = Array.isArray(payload.sourceKeys || payload.source_keys)
-      ? (payload.sourceKeys || payload.source_keys).map(optionalString).filter(Boolean)
-      : [];
+    const sourceKeys = Array.isArray(payload.sourceKeys || payload.source_keys) ?
+    (payload.sourceKeys || payload.source_keys).map(optionalString).filter(Boolean) :
+    [];
     for (const sourceKey of sourceKeys) {
       if (!/^[a-zA-Z0-9_.-]+$/.test(sourceKey)) throw new Error(`Unsafe Jushuitan sourceKey: ${sourceKey}`);
     }
@@ -871,7 +872,7 @@ class JushuitanOperationalBridge {
       inventoryBatchCount: 0,
       bySource: {},
       startedAt: now,
-      finishedAt: null,
+      finishedAt: null
     };
 
     const where = ["company_id = @company_id"];
@@ -883,14 +884,82 @@ class JushuitanOperationalBridge {
         bind[`source_${index}`] = key;
       });
     }
-    const rawRows = this.db.prepare(`
+    const rawRows = await queryAll(this.db, `
       SELECT * FROM erp_jst_raw_records
       WHERE ${where.join(" AND ")}
       ORDER BY source_key, updated_at
-    `).all(bind);
+    `, [bind]);
 
-    const run = this.db.transaction(() => {
-      this.db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    try {await withTransaction(this.db, async (txDb) => {await execute(txDb, `
         INSERT INTO erp_jst_business_sync_runs (
           id, company_id, source_keys_json, raw_count, business_count,
           account_count, supplier_count, sku_count, warehouse_count,
@@ -900,37 +969,7 @@ class JushuitanOperationalBridge {
           @id, @company_id, @source_keys_json, 0, 0,
           0, 0, 0, 0, 0, 0, 'running', NULL, @started_at, NULL
         )
-      `).run({
-        id: runId,
-        company_id: companyId,
-        source_keys_json: stringify(sourceKeys),
-        started_at: now,
-      });
-
-      this.ensureDefaultAccount(companyId, now);
-      stats.accountCount += 1;
-
-      for (const rawRow of rawRows) {
-        const raw = parseJsonObject(rawRow.raw_json, null);
-        if (!raw) continue;
-        const sourceKey = rawRow.source_key;
-        stats.rawCount += 1;
-        stats.bySource[sourceKey] = (stats.bySource[sourceKey] || 0) + 1;
-
-        if (sourceKey === "shops" && this.upsertShop(companyId, raw, now)) stats.accountCount += 1;
-        if (sourceKey === "suppliers" && this.upsertSupplier(companyId, raw, now)) stats.supplierCount += 1;
-        if (sourceKey === "warehouses" && this.upsertWarehouse(companyId, raw, now)) stats.warehouseCount += 1;
-        if ((sourceKey === "sku" || sourceKey === "inventory" || sourceKey === "skumap") && this.upsertSku(companyId, raw, now)) stats.skuCount += 1;
-        if (sourceKey === "skumap" && this.upsertSku1688Source(companyId, raw, now)) stats.skuSourceCount += 1;
-        if (sourceKey === "purchase" && this.upsertPurchaseOrder(companyId, raw, now)) stats.purchaseOrderCount += 1;
-        if (sourceKey === "purchase_in" && this.upsertInboundReceipt(companyId, raw, now)) stats.inboundReceiptCount += 1;
-        if (sourceKey === "inventory" && this.upsertInventoryBatch(companyId, raw, now)) stats.inventoryBatchCount += 1;
-
-        stats.businessCount += this.upsertBusinessRecords(companyId, sourceKey, rawRow, raw, now);
-      }
-
-      stats.finishedAt = nowIso();
-      this.db.prepare(`
+      `, { id: runId, company_id: companyId, source_keys_json: stringify(sourceKeys), started_at: now });await this.ensureDefaultAccount(companyId, now);stats.accountCount += 1;for (const rawRow of rawRows) {const raw = parseJsonObject(rawRow.raw_json, null);if (!raw) continue;const sourceKey = rawRow.source_key;stats.rawCount += 1;stats.bySource[sourceKey] = (stats.bySource[sourceKey] || 0) + 1;if (sourceKey === "shops" && await this.upsertShop(companyId, raw, now)) stats.accountCount += 1;if (sourceKey === "suppliers" && await this.upsertSupplier(companyId, raw, now)) stats.supplierCount += 1;if (sourceKey === "warehouses" && await this.upsertWarehouse(companyId, raw, now)) stats.warehouseCount += 1;if ((sourceKey === "sku" || sourceKey === "inventory" || sourceKey === "skumap") && await this.upsertSku(companyId, raw, now)) stats.skuCount += 1;if (sourceKey === "skumap" && await this.upsertSku1688Source(companyId, raw, now)) stats.skuSourceCount += 1;if (sourceKey === "purchase" && await this.upsertPurchaseOrder(companyId, raw, now)) stats.purchaseOrderCount += 1;if (sourceKey === "purchase_in" && await this.upsertInboundReceipt(companyId, raw, now)) stats.inboundReceiptCount += 1;if (sourceKey === "inventory" && await this.upsertInventoryBatch(companyId, raw, now)) stats.inventoryBatchCount += 1;stats.businessCount += await this.upsertBusinessRecords(companyId, sourceKey, rawRow, raw, now);}stats.finishedAt = nowIso();await execute(txDb, `
         UPDATE erp_jst_business_sync_runs
         SET raw_count = @raw_count,
             business_count = @business_count,
@@ -944,38 +983,8 @@ class JushuitanOperationalBridge {
             error = NULL,
             finished_at = @finished_at
         WHERE id = @id
-      `).run({
-        id: runId,
-        raw_count: stats.rawCount,
-        business_count: stats.businessCount,
-        account_count: stats.accountCount,
-        supplier_count: stats.supplierCount,
-        sku_count: stats.skuCount,
-        warehouse_count: stats.warehouseCount,
-        sku_source_count: stats.skuSourceCount,
-        purchase_order_count: stats.purchaseOrderCount,
-        finished_at: stats.finishedAt,
-      });
-    });
-
-    try {
-      run();
-      return stats;
-    } catch (error) {
-      const message = error?.message || String(error);
-      try {
-        this.db.prepare(`
+      `, { id: runId, raw_count: stats.rawCount, business_count: stats.businessCount, account_count: stats.accountCount, supplier_count: stats.supplierCount, sku_count: stats.skuCount, warehouse_count: stats.warehouseCount, sku_source_count: stats.skuSourceCount, purchase_order_count: stats.purchaseOrderCount, finished_at: stats.finishedAt });});return stats;} catch (error) {const message = error?.message || String(error);try {await execute(this.db, `
           UPDATE erp_jst_business_sync_runs
           SET status = 'failed', error = @error, finished_at = @finished_at
           WHERE id = @id
-        `).run({ id: runId, error: message, finished_at: nowIso() });
-      } catch {}
-      throw error;
-    }
-  }
-}
-
-module.exports = {
-  JushuitanOperationalBridge,
-  DEFAULT_ACCOUNT_ID,
-};
+        `, { id: runId, error: message, finished_at: nowIso() });} catch {}throw error;}}}module.exports = { JushuitanOperationalBridge, DEFAULT_ACCOUNT_ID };

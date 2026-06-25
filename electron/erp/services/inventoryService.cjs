@@ -1,8 +1,9 @@
 const {
   BATCH_QC_STATUS,
   INBOUND_RECEIPT_STATUS: IR,
-  INVENTORY_LEDGER_TYPE,
+  INVENTORY_LEDGER_TYPE
 } = require("../workflow/enums.cjs");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 const { createId, ensurePositiveInteger, nowIso } = require("./utils.cjs");
 
 class InventoryService {
@@ -13,23 +14,23 @@ class InventoryService {
     this.workflow = workflow;
   }
 
-  runOptionalCostTrace(sql, params = {}) {
+  async runOptionalCostTrace(sql, params = {}) {
     try {
-      return this.db.prepare(sql).run(params);
+      return await execute(this.db, sql, [params]);
     } catch (error) {
       if (/no such table|no such column/i.test(String(error?.message || ""))) return null;
       throw error;
     }
   }
 
-  recordCostEvent(input = {}) {
+  async recordCostEvent(input = {}) {
     if (!input.skuId) return null;
     const eventTime = input.eventTime || nowIso();
     const id = input.id || createId("costevt");
     const unitCost = input.unitCost == null ? null : Number(input.unitCost);
     const oldAvg = input.oldAvg == null ? null : Number(input.oldAvg);
     const newAvg = input.newAvg == null ? null : Number(input.newAvg);
-    this.runOptionalCostTrace(`
+    await this.runOptionalCostTrace(`
       INSERT INTO erp_inventory_cost_events (
         id, sku_id, event_type, event_time, qty_delta, old_qty, new_qty,
         unit_cost, old_weighted_avg_cost, new_weighted_avg_cost,
@@ -56,15 +57,15 @@ class InventoryService {
       status: input.status || "recorded",
       message: input.message || null,
       raw_json: JSON.stringify(input.raw || {}),
-      created_at: nowIso(),
+      created_at: nowIso()
     });
     return id;
   }
 
-  upsertDailyCostSnapshot(input = {}) {
+  async upsertDailyCostSnapshot(input = {}) {
     if (!input.skuId || !Number.isFinite(Number(input.weightedAvgCost))) return;
     const eventTime = input.eventTime || nowIso();
-    this.runOptionalCostTrace(`
+    await this.runOptionalCostTrace(`
       INSERT INTO erp_sku_cost_daily_snapshot (
         sku_id, stat_date, weighted_avg_cost, cost_balance_qty,
         source_event_id, created_at, updated_at
@@ -83,7 +84,7 @@ class InventoryService {
       weighted_avg_cost: Number(input.weightedAvgCost),
       cost_balance_qty: Number(input.costBalanceQty || 0),
       source_event_id: input.sourceEventId || null,
-      now: nowIso(),
+      now: nowIso()
     });
   }
 
@@ -96,8 +97,8 @@ class InventoryService {
       actor,
       patch: {
         received_at: nowIso(),
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -109,8 +110,8 @@ class InventoryService {
       toStatus: IR.COUNTED,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -122,8 +123,8 @@ class InventoryService {
       toStatus: IR.INBOUNDED_PENDING_QC,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -135,8 +136,8 @@ class InventoryService {
       toStatus: IR.INBOUNDED_PENDING_QC,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -148,8 +149,8 @@ class InventoryService {
       toStatus: IR.QUANTITY_MISMATCH,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -161,8 +162,8 @@ class InventoryService {
       toStatus: IR.DAMAGED,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -174,8 +175,8 @@ class InventoryService {
       toStatus: IR.EXCEPTION,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
@@ -187,12 +188,12 @@ class InventoryService {
       toStatus: IR.INBOUNDED_PENDING_QC,
       actor,
       patch: {
-        operator_id: actor?.id || null,
-      },
+        operator_id: actor?.id || null
+      }
     });
   }
 
-  createBatchFromInbound(input = {}) {
+  async createBatchFromInbound(input = {}) {
     const receivedQty = ensurePositiveInteger(input.receivedQty, "receivedQty");
     const now = nowIso();
     const batch = {
@@ -214,11 +215,11 @@ class InventoryService {
       location_code: input.locationCode || null,
       received_at: input.receivedAt || now,
       created_at: now,
-      updated_at: now,
-    };
+      updated_at: now
+    };return await withTransaction(this.db,
 
-    const create = this.db.transaction(() => {
-      this.db.prepare(`
+    async (txDb) => {
+      await execute(txDb, `
         INSERT INTO erp_inventory_batches (
           id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
           received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
@@ -231,9 +232,9 @@ class InventoryService {
           @defective_qty, @rework_qty, @unit_landed_cost, @qc_status,
           @location_code, @received_at, @created_at, @updated_at
         )
-      `).run(batch);
+      `, [batch]);
 
-      this.writeLedger({
+      await this.writeLedger({
         accountId: batch.account_id,
         skuId: batch.sku_id,
         batchId: batch.id,
@@ -244,10 +245,10 @@ class InventoryService {
         unitCost: batch.unit_landed_cost,
         sourceDocType: "inbound_receipt",
         sourceDocId: batch.inbound_receipt_id || batch.id,
-        actor: input.actor,
+        actor: input.actor
       });
       if (!Number.isFinite(batch.unit_landed_cost) || batch.unit_landed_cost <= 0) {
-        this.recordCostEvent({
+        await this.recordCostEvent({
           skuId: batch.sku_id,
           eventType: "invalid_inbound_batch_cost",
           qtyDelta: receivedQty,
@@ -259,24 +260,24 @@ class InventoryService {
           severity: "warn",
           status: "open",
           message: `Inventory batch ${batch.id} has no valid unit cost`,
-          raw: { batchId: batch.id, unitLandedCost: input.unitLandedCost },
+          raw: { batchId: batch.id, unitLandedCost: input.unitLandedCost }
         });
       }
 
-      return this.getBatch(batch.id);
+      return await this.getBatch(batch.id);
     });
 
-    return create();
+
   }
 
-  getBatch(batchId) {
-    const batch = this.db.prepare("SELECT * FROM erp_inventory_batches WHERE id = ?").get(batchId);
+  async getBatch(batchId) {
+    const batch = await queryOne(this.db, "SELECT * FROM erp_inventory_batches WHERE id = ?", [batchId]);
     if (!batch) throw new Error(`Inventory batch not found: ${batchId}`);
     return batch;
   }
 
-  releaseAfterQc(input = {}) {
-    const batch = this.getBatch(input.batchId);
+  async releaseAfterQc(input = {}) {
+    const batch = await this.getBatch(input.batchId);
     const releaseQty = Number(input.releaseQty || 0);
     const blockedQty = Number(input.blockedQty || 0);
     const defectiveQty = Number(input.defectiveQty || 0);
@@ -286,10 +287,10 @@ class InventoryService {
     }
     if (releaseQty + blockedQty + reworkQty > batch.blocked_qty) {
       throw new Error("QC release quantities exceed blocked quantity");
-    }
+    }return await withTransaction(this.db,
 
-    const apply = this.db.transaction(() => {
-      this.db.prepare(`
+    async (txDb) => {
+      await execute(txDb, `
         UPDATE erp_inventory_batches
         SET available_qty = available_qty + @release_qty,
             blocked_qty = @blocked_qty,
@@ -298,18 +299,18 @@ class InventoryService {
             qc_status = @qc_status,
             updated_at = @updated_at
         WHERE id = @batch_id
-      `).run({
+      `, {
         batch_id: input.batchId,
         release_qty: releaseQty,
         blocked_qty: blockedQty,
         defective_qty: defectiveQty,
         rework_qty: reworkQty,
         qc_status: input.qcStatus,
-        updated_at: nowIso(),
+        updated_at: nowIso()
       });
 
       if (releaseQty > 0) {
-        this.writeLedger({
+        await this.writeLedger({
           accountId: batch.account_id,
           skuId: batch.sku_id,
           batchId: batch.id,
@@ -319,12 +320,12 @@ class InventoryService {
           toBucket: "available",
           sourceDocType: "qc_inspection",
           sourceDocId: input.sourceDocId,
-          actor: input.actor,
+          actor: input.actor
         });
       }
 
       if (reworkQty > 0) {
-        this.writeLedger({
+        await this.writeLedger({
           accountId: batch.account_id,
           skuId: batch.sku_id,
           batchId: batch.id,
@@ -334,19 +335,19 @@ class InventoryService {
           toBucket: "rework",
           sourceDocType: "qc_inspection",
           sourceDocId: input.sourceDocId,
-          actor: input.actor,
+          actor: input.actor
         });
       }
 
-      return this.getBatch(input.batchId);
+      return await this.getBatch(input.batchId);
     });
 
-    return apply();
+
   }
 
-  assertCanReserve(batchId, qty) {
+  async assertCanReserve(batchId, qty) {
     const quantity = ensurePositiveInteger(qty, "qty");
-    const batch = this.getBatch(batchId);
+    const batch = await this.getBatch(batchId);
     if (batch.available_qty < quantity) {
       throw new Error(`Insufficient available inventory: ${batch.available_qty} < ${quantity}`);
     }
@@ -356,23 +357,23 @@ class InventoryService {
     return batch;
   }
 
-  reserveForOutbound(input = {}) {
+  async reserveForOutbound(input = {}) {
     const qty = ensurePositiveInteger(input.qty, "qty");
-    const batch = this.assertCanReserve(input.batchId, qty);
-    const reserve = this.db.transaction(() => {
-      this.db.prepare(`
+    const batch = await this.assertCanReserve(input.batchId, qty);return await withTransaction(this.db,
+    async (txDb) => {
+      await execute(txDb, `
         UPDATE erp_inventory_batches
         SET available_qty = available_qty - @qty,
             reserved_qty = reserved_qty + @qty,
             updated_at = @updated_at
         WHERE id = @batch_id
-      `).run({
+      `, {
         batch_id: input.batchId,
         qty,
-        updated_at: nowIso(),
+        updated_at: nowIso()
       });
 
-      this.writeLedger({
+      await this.writeLedger({
         accountId: batch.account_id,
         skuId: batch.sku_id,
         batchId: batch.id,
@@ -382,47 +383,47 @@ class InventoryService {
         toBucket: "reserved",
         sourceDocType: "outbound_shipment",
         sourceDocId: input.outboundId,
-        actor: input.actor,
+        actor: input.actor
       });
 
-      return this.getBatch(input.batchId);
+      return await this.getBatch(input.batchId);
     });
-    return reserve();
+
   }
 
-  assertCanShipReserved(batchId, qty) {
+  async assertCanShipReserved(batchId, qty) {
     const quantity = ensurePositiveInteger(qty, "qty");
-    const batch = this.getBatch(batchId);
+    const batch = await this.getBatch(batchId);
     if (batch.reserved_qty < quantity) {
       throw new Error(`Insufficient reserved inventory: ${batch.reserved_qty} < ${quantity}`);
     }
     return batch;
   }
 
-  shipReserved(input = {}) {
+  async shipReserved(input = {}) {
     const qty = ensurePositiveInteger(input.qty, "qty");
-    const batch = this.assertCanShipReserved(input.batchId, qty);
-    const ship = this.db.transaction(() => {
-      this.db.prepare(`
+    const batch = await this.assertCanShipReserved(input.batchId, qty);return await withTransaction(this.db,
+    async (txDb) => {
+      await execute(txDb, `
         UPDATE erp_inventory_batches
         SET reserved_qty = reserved_qty - @qty,
             updated_at = @updated_at
         WHERE id = @batch_id
-      `).run({
+      `, {
         batch_id: input.batchId,
         qty,
-        updated_at: nowIso(),
+        updated_at: nowIso()
       });
 
       // COGS 按 SKU 全公司加权成本结转；均价不变，仅扣减 cost_balance_qty
-      const unitCost = this.getSkuWeightedAvgCost(batch.sku_id);
-      this.applySkuCostChange(batch.sku_id, -qty, null, {
+      const unitCost = await this.getSkuWeightedAvgCost(batch.sku_id);
+      await this.applySkuCostChange(batch.sku_id, -qty, null, {
         sourceDocType: "outbound_shipment",
         sourceDocId: input.outboundId,
-        actor: input.actor,
+        actor: input.actor
       });
 
-      this.writeLedger({
+      await this.writeLedger({
         accountId: batch.account_id,
         skuId: batch.sku_id,
         batchId: batch.id,
@@ -433,16 +434,16 @@ class InventoryService {
         unitCost,
         sourceDocType: "outbound_shipment",
         sourceDocId: input.outboundId,
-        actor: input.actor,
+        actor: input.actor
       });
 
-      return this.getBatch(input.batchId);
+      return await this.getBatch(input.batchId);
     });
-    return ship();
+
   }
 
-  writeLedger(input = {}) {
-    this.db.prepare(`
+  async writeLedger(input = {}) {
+    await execute(this.db, `
       INSERT INTO erp_inventory_ledger_entries (
         id, account_id, sku_id, batch_id, type, qty_delta, from_bucket,
         to_bucket, unit_cost, source_doc_type, source_doc_id, created_at,
@@ -453,7 +454,7 @@ class InventoryService {
         @from_bucket, @to_bucket, @unit_cost, @source_doc_type,
         @source_doc_id, @created_at, @created_by
       )
-    `).run({
+    `, {
       id: createId("ledger"),
       account_id: input.accountId,
       sku_id: input.skuId,
@@ -466,7 +467,7 @@ class InventoryService {
       source_doc_type: input.sourceDocType,
       source_doc_id: input.sourceDocId,
       created_at: nowIso(),
-      created_by: input.actor?.id || null,
+      created_by: input.actor?.id || null
     });
   }
 
@@ -474,15 +475,15 @@ class InventoryService {
   //   addedQty > 0 + addedUnitCost：采购入库 / 客户退货 → 按加权重算均价
   //   addedQty < 0：平台销售 / 普通出库 → 均价不变，只扣减 cost_balance_qty
   // 调拨 / 平台送仓 / 平台退回自家仓：均价和总量都不变，不要调用本方法
-  applySkuCostChange(skuId, addedQty, addedUnitCost, options = {}) {
+  async applySkuCostChange(skuId, addedQty, addedUnitCost, options = {}) {
     if (!skuId) return null;
     const qty = Number(addedQty || 0);
     if (qty === 0) return null;
     const opts = options && typeof options === "object" ? options : {};
     const eventTime = nowIso();
-    const sku = this.db
-      .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
-      .get(skuId);
+    const sku = await queryOne(this.db,
+    "SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?", [
+    skuId]);
     if (!sku) return null;
     const oldQty = Number(sku.cost_balance_qty || 0);
     const oldAvg = Number(sku.weighted_avg_cost || 0);
@@ -492,7 +493,7 @@ class InventoryService {
       const unitCost = Number(addedUnitCost);
       if (!Number.isFinite(unitCost) || unitCost <= 0) {
         const message = `SKU ${skuId} inbound cost must be greater than 0`;
-        this.recordCostEvent({
+        await this.recordCostEvent({
           skuId,
           eventType: "invalid_inbound_cost",
           eventTime,
@@ -507,15 +508,15 @@ class InventoryService {
           severity: "error",
           status: "blocked",
           message,
-          raw: { addedQty, addedUnitCost },
+          raw: { addedQty, addedUnitCost }
         });
         throw new Error(message);
       }
       const costJumpLimit = Number.isFinite(Number(opts.costJumpLimit)) ? Number(opts.costJumpLimit) : 0.5;
       if (!opts.allowCostJump && oldAvg > 0 && Math.abs(unitCost - oldAvg) / oldAvg > costJumpLimit) {
-        const pctDiff = ((Math.abs(unitCost - oldAvg) / oldAvg) * 100).toFixed(1);
+        const pctDiff = (Math.abs(unitCost - oldAvg) / oldAvg * 100).toFixed(1);
         const message = `SKU ${skuId} inbound cost ${unitCost} differs from current average ${oldAvg} by more than ${(costJumpLimit * 100).toFixed(0)}%`;
-        this.recordCostEvent({
+        await this.recordCostEvent({
           skuId,
           eventType: "inbound_cost_jump",
           eventTime,
@@ -530,7 +531,7 @@ class InventoryService {
           severity: "warn",
           status: "blocked",
           message,
-          raw: { addedQty, addedUnitCost, costJumpLimit },
+          raw: { addedQty, addedUnitCost, costJumpLimit }
         });
         const err = new Error(message);
         err.code = "COST_JUMP";
@@ -539,20 +540,20 @@ class InventoryService {
       }
       newAvg = newQty > 0 ? (oldQty * oldAvg + qty * unitCost) / newQty : 0;
     }
-    this.db.prepare(`
+    await execute(this.db, `
       UPDATE erp_skus
       SET weighted_avg_cost = @avg,
           cost_balance_qty = @qty,
           updated_at = @updated_at
       WHERE id = @id
-    `).run({
+    `, {
       id: skuId,
       avg: newAvg,
       qty: Math.max(0, newQty),
-      updated_at: eventTime,
+      updated_at: eventTime
     });
     const costBalanceQty = Math.max(0, newQty);
-    const eventId = this.recordCostEvent({
+    const eventId = await this.recordCostEvent({
       skuId,
       eventType: qty > 0 ? "weighted_avg_inbound" : "weighted_avg_qty_out",
       eventTime,
@@ -566,14 +567,14 @@ class InventoryService {
       sourceDocId: opts.sourceDocId,
       severity: "info",
       status: "recorded",
-      raw: { addedQty, addedUnitCost },
+      raw: { addedQty, addedUnitCost }
     });
-    this.upsertDailyCostSnapshot({
+    await this.upsertDailyCostSnapshot({
       skuId,
       eventTime,
       weightedAvgCost: newAvg,
       costBalanceQty,
-      sourceEventId: eventId,
+      sourceEventId: eventId
     });
     return { weightedAvgCost: newAvg, costBalanceQty };
   }
@@ -582,12 +583,12 @@ class InventoryService {
   // deltaQty 件 + deltaValue 货值一起记账（出库腿传负、入库腿传正）。
   // 新均价 = (旧货值 + deltaValue) / (旧库存 + deltaQty)；库存到 0 则均价归 0。
   // 跟 applySkuCostChange 的区别：出库时也按指定货值扣并重算均价，而非「按旧均价扣、均价不变」。
-  adjustSkuInventoryValue(skuId, deltaQty, deltaValue, options = {}) {
+  async adjustSkuInventoryValue(skuId, deltaQty, deltaValue, options = {}) {
     if (!skuId) return null;
     const opts = options && typeof options === "object" ? options : {};
-    const sku = this.db
-      .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
-      .get(skuId);
+    const sku = await queryOne(this.db,
+    "SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?", [
+    skuId]);
     if (!sku) return null;
     const oldQty = Number(sku.cost_balance_qty || 0);
     const oldAvg = Number(sku.weighted_avg_cost || 0);
@@ -598,20 +599,20 @@ class InventoryService {
     }
     const newAvg = newQty > 0 ? newValue / newQty : 0;
     const eventTime = nowIso();
-    this.db.prepare(`
+    await execute(this.db, `
       UPDATE erp_skus
       SET weighted_avg_cost = @avg,
           cost_balance_qty = @qty,
           updated_at = @updated_at
       WHERE id = @id
-    `).run({
+    `, {
       id: skuId,
       avg: newAvg,
       qty: Math.max(0, newQty),
-      updated_at: eventTime,
+      updated_at: eventTime
     });
     const costBalanceQty = Math.max(0, newQty);
-    const eventId = this.recordCostEvent({
+    const eventId = await this.recordCostEvent({
       skuId,
       eventType: opts.eventType || "inventory_value_adjustment",
       eventTime,
@@ -623,23 +624,23 @@ class InventoryService {
       newAvg,
       sourceDocType: opts.sourceDocType,
       sourceDocId: opts.sourceDocId,
-      raw: { deltaQty, deltaValue },
+      raw: { deltaQty, deltaValue }
     });
-    this.upsertDailyCostSnapshot({
+    await this.upsertDailyCostSnapshot({
       skuId,
       eventTime,
       weightedAvgCost: newAvg,
       costBalanceQty,
-      sourceEventId: eventId,
+      sourceEventId: eventId
     });
     return { weightedAvgCost: newAvg, costBalanceQty };
   }
 
-  getSkuWeightedAvgCost(skuId) {
+  async getSkuWeightedAvgCost(skuId) {
     if (!skuId) return 0;
-    const row = this.db
-      .prepare("SELECT weighted_avg_cost FROM erp_skus WHERE id = ?")
-      .get(skuId);
+    const row = await queryOne(this.db,
+    "SELECT weighted_avg_cost FROM erp_skus WHERE id = ?", [
+    skuId]);
     return Number(row?.weighted_avg_cost || 0);
   }
 
@@ -648,7 +649,7 @@ class InventoryService {
   // 按 FIFO（received_at ASC）跨批次扣 available_qty，每批次单独写一条 ledger。
   // affectSkuTotal=true 时同步扣 SKU 总量；采购退货按退货单价同步冲货值并重算均价。
   // unitCost 由调用方传：采购退按 PO 原单价；位置切换按 SKU 当前均价。
-  applyDirectOutbound(input = {}) {
+  async applyDirectOutbound(input = {}) {
     const accountId = input.accountId;
     const skuId = input.skuId;
     const qty = ensurePositiveInteger(input.qty, "qty");
@@ -657,14 +658,14 @@ class InventoryService {
     if (!skuId) throw new Error("applyDirectOutbound requires skuId");
     if (!ledgerType) throw new Error("applyDirectOutbound requires ledgerType");
 
-    const batches = this.db.prepare(`
+    const batches = await queryAll(this.db, `
       SELECT * FROM erp_inventory_batches
       WHERE account_id = @account_id
         AND sku_id = @sku_id
         AND available_qty > 0
         AND qc_status IN ('passed', 'passed_with_observation', 'partial_passed')
       ORDER BY received_at ASC, created_at ASC, id ASC
-    `).all({ account_id: accountId, sku_id: skuId });
+    `, { account_id: accountId, sku_id: skuId });
 
     let totalAvailable = 0;
     for (const b of batches) totalAvailable += Number(b.available_qty || 0);
@@ -672,82 +673,140 @@ class InventoryService {
       throw new Error(`Insufficient available inventory for ${skuId} @${accountId}: ${totalAvailable} < ${qty}`);
     }
 
-    const run = this.db.transaction(() => {
-      let remaining = qty;
-      const lines = [];
-      const now = nowIso();
-      for (const batch of batches) {
-        if (remaining <= 0) break;
-        const take = Math.min(Number(batch.available_qty || 0), remaining);
-        if (take <= 0) continue;
-        this.db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    return await withTransaction(this.db, async (txDb) => {let remaining = qty;const lines = [];const now = nowIso();for (const batch of batches) {if (remaining <= 0) break;const take = Math.min(Number(batch.available_qty || 0), remaining);if (take <= 0) continue;await execute(txDb, `
           UPDATE erp_inventory_batches
           SET available_qty = available_qty - @take,
               updated_at = @updated_at
           WHERE id = @id
-        `).run({ id: batch.id, take, updated_at: now });
-        lines.push({ batchId: batch.id, qty: take, unitLandedCost: Number(batch.unit_landed_cost || 0) });
-        remaining -= take;
-      }
-      this.writeLedger({
-        accountId,
-        skuId,
-        batchId: lines.length === 1 ? lines[0].batchId : null,
-        type: ledgerType,
-        qtyDelta: -qty,
-        fromBucket: "available",
-        toBucket: null,
-        unitCost: input.unitCost ?? null,
-        sourceDocType: input.sourceDocType || "manual",
-        sourceDocId: input.sourceDocId || "",
-        actor: input.actor,
-      });
-      if (input.affectSkuTotal) {
-        if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN) {
-          const unitCost = Number(input.unitCost);
-          if (!Number.isFinite(unitCost) || unitCost <= 0) {
-            throw new Error("purchase return unitCost must be greater than 0");
-          }
-          this.adjustSkuInventoryValue(skuId, -qty, -(qty * unitCost), {
-            eventType: "purchase_return_value_out",
-            sourceDocType: input.sourceDocType || "purchase_return",
-            sourceDocId: input.sourceDocId || "",
-          });
-        } else {
-          this.applySkuCostChange(skuId, -qty, null, {
-            sourceDocType: input.sourceDocType || "manual",
-            sourceDocId: input.sourceDocId || "",
-            actor: input.actor,
-          });
-        }
-      }
-      return lines;
-    });
+        `, { id: batch.id, take, updated_at: now });lines.push({ batchId: batch.id, qty: take, unitLandedCost: Number(batch.unit_landed_cost || 0) });remaining -= take;}await this.writeLedger({ accountId, skuId, batchId: lines.length === 1 ? lines[0].batchId : null, type: ledgerType, qtyDelta: -qty, fromBucket: "available", toBucket: null, unitCost: input.unitCost ?? null, sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });if (input.affectSkuTotal) {if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN) {const unitCost = Number(input.unitCost);if (!Number.isFinite(unitCost) || unitCost <= 0) {throw new Error("purchase return unitCost must be greater than 0");}await this.adjustSkuInventoryValue(skuId, -qty, -(qty * unitCost), { eventType: "purchase_return_value_out", sourceDocType: input.sourceDocType || "purchase_return", sourceDocId: input.sourceDocId || "" });} else {await this.applySkuCostChange(skuId, -qty, null, { sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });}}return lines;}
 
-    return run();
-  }
 
-  // 直接入库（绕开 inbound_receipt 单据流程）。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    );} // 直接入库（绕开 inbound_receipt 单据流程）。
   // 用于：客户退货回平台仓 / 店铺间调拨入库腿 / 平台仓→自家仓入库腿。
   // 建一条新批次（available_qty=qty，unit_landed_cost=unitCost）+ 写一条 ledger。
   // affectSkuTotal=true 时按"加权均价"重算 SKU 主表（客户退按当前均价灌→均价不变；
   //   位置切换→ false，因为总量没变）。
-  applyDirectInbound(input = {}) {
-    const accountId = input.accountId;
-    const skuId = input.skuId;
-    const qty = ensurePositiveInteger(input.qty, "qty");
-    const ledgerType = input.ledgerType;
-    const unitLandedCost = Number(input.unitLandedCost || 0);
-    if (!accountId) throw new Error("applyDirectInbound requires accountId");
-    if (!skuId) throw new Error("applyDirectInbound requires skuId");
-    if (!ledgerType) throw new Error("applyDirectInbound requires ledgerType");
-
-    const now = nowIso();
-    const batchId = createId("batch");
-    const batchCode = input.batchCode || `DIRECT-${ledgerType}-${Date.now().toString(36).slice(-6).toUpperCase()}`;
-
-    const run = this.db.transaction(() => {
-      this.db.prepare(`
+  async applyDirectInbound(input = {}) {const accountId = input.accountId;const skuId = input.skuId;const qty = ensurePositiveInteger(input.qty, "qty");const ledgerType = input.ledgerType;const unitLandedCost = Number(input.unitLandedCost || 0);if (!accountId) throw new Error("applyDirectInbound requires accountId");if (!skuId) throw new Error("applyDirectInbound requires skuId");if (!ledgerType) throw new Error("applyDirectInbound requires ledgerType");const now = nowIso();const batchId = createId("batch");const batchCode = input.batchCode || `DIRECT-${ledgerType}-${Date.now().toString(36).slice(-6).toUpperCase()}`;return await withTransaction(this.db, async (txDb) => {await execute(txDb, `
         INSERT INTO erp_inventory_batches (
           id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
           received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
@@ -759,53 +818,4 @@ class InventoryService {
           0, @unit_landed_cost, 'passed', NULL,
           @now, @now, @now
         )
-      `).run({
-        id: batchId,
-        account_id: accountId,
-        batch_code: batchCode,
-        sku_id: skuId,
-        qty,
-        unit_landed_cost: unitLandedCost,
-        now,
-      });
-      this.writeLedger({
-        accountId,
-        skuId,
-        batchId,
-        type: ledgerType,
-        qtyDelta: qty,
-        fromBucket: null,
-        toBucket: "available",
-        unitCost: unitLandedCost,
-        sourceDocType: input.sourceDocType || "manual",
-        sourceDocId: input.sourceDocId || "",
-        actor: input.actor,
-      });
-      if (input.affectSkuTotal) {
-        if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL) {
-          if (!Number.isFinite(unitLandedCost) || unitLandedCost <= 0) {
-            throw new Error("purchase return reversal unitCost must be greater than 0");
-          }
-          this.adjustSkuInventoryValue(skuId, qty, qty * unitLandedCost, {
-            eventType: "purchase_return_value_reversal",
-            sourceDocType: input.sourceDocType || "purchase_return_cancel",
-            sourceDocId: input.sourceDocId || "",
-          });
-        } else {
-          this.applySkuCostChange(skuId, qty, unitLandedCost, {
-            sourceDocType: input.sourceDocType || "manual",
-            sourceDocId: input.sourceDocId || "",
-            actor: input.actor,
-          });
-        }
-      }
-      return this.getBatch(batchId);
-    });
-
-    return run();
-  }
-}
-
-module.exports = {
-  InventoryService,
-};
+      `, { id: batchId, account_id: accountId, batch_code: batchCode, sku_id: skuId, qty, unit_landed_cost: unitLandedCost, now });await this.writeLedger({ accountId, skuId, batchId, type: ledgerType, qtyDelta: qty, fromBucket: null, toBucket: "available", unitCost: unitLandedCost, sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });if (input.affectSkuTotal) {if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL) {if (!Number.isFinite(unitLandedCost) || unitLandedCost <= 0) {throw new Error("purchase return reversal unitCost must be greater than 0");}await this.adjustSkuInventoryValue(skuId, qty, qty * unitLandedCost, { eventType: "purchase_return_value_reversal", sourceDocType: input.sourceDocType || "purchase_return_cancel", sourceDocId: input.sourceDocId || "" });} else {await this.applySkuCostChange(skuId, qty, unitLandedCost, { sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });}}return await this.getBatch(batchId);});}}module.exports = { InventoryService };

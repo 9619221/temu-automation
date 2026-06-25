@@ -29,7 +29,7 @@ function getCurrentCompanyId() {
   }
 }
 
-function openCacheDb() {
+async function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -37,7 +37,7 @@ function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  db.exec(`
+  await execSql(db, `
     CREATE TABLE IF NOT EXISTS supplier_cache (
       company_id TEXT PRIMARY KEY,
       suppliers_json TEXT NOT NULL,
@@ -48,34 +48,34 @@ function openCacheDb() {
   return db;
 }
 
-function getCachedSuppliers(companyId) {
+async function getCachedSuppliers(companyId) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   let db;
-  try { db = openCacheDb(); } catch { return null; }
+  try {db = openCacheDb();} catch {return null;}
   let row;
   try {
-    row = db.prepare("SELECT suppliers_json FROM supplier_cache WHERE company_id = ?").get(key);
-  } catch { return null; }
+    row = await queryOne(db, "SELECT suppliers_json FROM supplier_cache WHERE company_id = ?", [key]);
+  } catch {return null;}
   if (!row) return null;
   try {
     const arr = JSON.parse(row.suppliers_json);
     return Array.isArray(arr) ? arr : null;
-  } catch { return null; }
+  } catch {return null;}
 }
 
-function setCachedSuppliers(companyId, suppliers) {
+async function setCachedSuppliers(companyId, suppliers) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   const db = openCacheDb();
-  db.prepare(`
+  await execute(db, `
     INSERT INTO supplier_cache (company_id, suppliers_json, cached_at)
     VALUES (@company_id, @suppliers_json, @cached_at)
     ON CONFLICT(company_id) DO UPDATE SET
       suppliers_json = excluded.suppliers_json,
       cached_at = excluded.cached_at
-  `).run({
+  `, {
     company_id: key,
     suppliers_json: JSON.stringify(Array.isArray(suppliers) ? suppliers : []),
-    cached_at: nowIso(),
+    cached_at: nowIso()
   });
 }
 
@@ -83,9 +83,9 @@ async function fetchRemoteSuppliers(params = {}) {
   const payload = await clientRuntime.remoteRequest("/api/master-data/workbench", {
     method: "POST",
     body: { ...(params || {}), part: "suppliers" },
-    timeoutMs: 60000,
+    timeoutMs: 60000
   });
-  return (payload && payload.workbench && payload.workbench.suppliers) || [];
+  return payload && payload.workbench && payload.workbench.suppliers || [];
 }
 
 async function triggerSync(params = {}) {
@@ -93,7 +93,7 @@ async function triggerSync(params = {}) {
   if (syncLocks.has(companyId)) return syncLocks.get(companyId);
   const promise = (async () => {
     const suppliers = await fetchRemoteSuppliers(params);
-    try { setCachedSuppliers(companyId, suppliers); } catch { /* */ }
+    try {setCachedSuppliers(companyId, suppliers);} catch {/* */}
     return suppliers;
   })();
   syncLocks.set(companyId, promise);
@@ -106,7 +106,7 @@ async function triggerSync(params = {}) {
 
 function closeCacheDb() {
   if (cacheDb) {
-    try { cacheDb.close(); } catch { /* */ }
+    try {cacheDb.close();} catch {/* */}
     cacheDb = null;
   }
 }
@@ -116,5 +116,5 @@ module.exports = {
   getCachedSuppliers,
   setCachedSuppliers,
   triggerSync,
-  closeCacheDb,
+  closeCacheDb
 };

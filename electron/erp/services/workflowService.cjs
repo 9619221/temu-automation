@@ -1,25 +1,26 @@
 const { assertTransition } = require("../workflow/validators.cjs");
+const { queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 const { createId, nowIso } = require("./utils.cjs");
 
 const ENTITY_CONFIG = Object.freeze({
   purchase_request: {
-    table: "erp_purchase_requests",
+    table: "erp_purchase_requests"
   },
   sourcing_candidate: {
-    table: "erp_sourcing_candidates",
+    table: "erp_sourcing_candidates"
   },
   purchase_order: {
-    table: "erp_purchase_orders",
+    table: "erp_purchase_orders"
   },
   inbound_receipt: {
-    table: "erp_inbound_receipts",
+    table: "erp_inbound_receipts"
   },
   qc_inspection: {
-    table: "erp_qc_inspections",
+    table: "erp_qc_inspections"
   },
   outbound_shipment: {
-    table: "erp_outbound_shipments",
-  },
+    table: "erp_outbound_shipments"
+  }
 });
 
 function assertSafeColumn(column) {
@@ -31,7 +32,7 @@ function assertSafeColumn(column) {
 function pickActor(actor = {}) {
   return {
     id: actor.id || null,
-    role: actor.role || "",
+    role: actor.role || ""
   };
 }
 
@@ -48,10 +49,10 @@ function sanitizeAuditSnapshot(value) {
   const out = isArray ? [] : {};
   for (const [key, val] of Object.entries(value)) {
     if (!isArray && AUDIT_DROP_KEY.test(key)) continue; // 整列丢弃已知大字段
-    if (val == null) { out[key] = val; continue; }
+    if (val == null) {out[key] = val;continue;}
     if (typeof val === "object") {
       let serialized = "";
-      try { serialized = JSON.stringify(val) || ""; } catch (_) { serialized = "[unserializable]"; }
+      try {serialized = JSON.stringify(val) || "";} catch (_) {serialized = "[unserializable]";}
       out[key] = serialized.length > AUDIT_MAX_FIELD_BYTES ? `[omitted ${serialized.length}B]` : val;
       continue;
     }
@@ -70,43 +71,43 @@ class ErpWorkflowService {
     this.db = db;
   }
 
-  getEntity(entityType, id) {
+  async getEntity(entityType, id) {
     const config = ENTITY_CONFIG[entityType];
     if (!config) throw new Error(`Unknown ERP entity type: ${entityType}`);
 
-    const row = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ?`).get(id);
+    const row = await queryOne(this.db, `SELECT * FROM ${config.table} WHERE id = ?`, [id]);
     if (!row) throw new Error(`${entityType} not found: ${id}`);
     return row;
   }
 
-  transition(input = {}) {
+  async transition(input = {}) {
     const {
       entityType,
       id,
       action,
       toStatus,
       actor,
-      patch = {},
+      patch = {}
     } = input;
 
     const config = ENTITY_CONFIG[entityType];
     if (!config) throw new Error(`Unknown ERP entity type: ${entityType}`);
 
-    const before = this.getEntity(entityType, id);
+    const before = await this.getEntity(entityType, id);
     const actorInfo = pickActor(actor);
     assertTransition({
       entityType,
       fromStatus: before.status,
       toStatus,
       action,
-      role: actorInfo.role,
+      role: actorInfo.role
     });
 
     const updatedAt = nowIso();
     const params = {
       id,
       status: toStatus,
-      updated_at: updatedAt,
+      updated_at: updatedAt
     };
     const assignments = ["status = @status", "updated_at = @updated_at"];
 
@@ -115,42 +116,42 @@ class ErpWorkflowService {
       assertSafeColumn(column);
       assignments.push(`${column} = @${column}`);
       params[column] = value;
-    }
+    }const
 
-    const apply = this.db.transaction(() => {
-      this.db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    after = await withTransaction(this.db, async (txDb) => {await execute(txDb, `
         UPDATE ${config.table}
         SET ${assignments.join(", ")}
         WHERE id = @id
-      `).run(params);
-
-      const after = this.getEntity(entityType, id);
-      this.writeAudit({
-        accountId: after.account_id || before.account_id || null,
-        actor: actorInfo,
-        action,
-        entityType,
-        entityId: id,
-        before,
-        after,
-      });
-      return after;
-    });
-
-    const after = apply();
-    return {
-      entityType,
-      id,
-      action,
+      `, [params]);const after = await this.getEntity(entityType, id);await this.writeAudit({ accountId: after.account_id || before.account_id || null, actor: actorInfo, action, entityType, entityId: id, before, after });return after;});return { entityType, id, action,
       fromStatus: before.status,
       toStatus: after.status,
       before,
-      after,
+      after
     };
   }
 
-  writeAudit(input = {}) {
-    this.db.prepare(`
+  async writeAudit(input = {}) {
+    await execute(this.db, `
       INSERT INTO erp_audit_logs (
         id, account_id, actor_id, actor_role, action, entity_type, entity_id,
         before_json, after_json, created_at
@@ -159,7 +160,7 @@ class ErpWorkflowService {
         @id, @account_id, @actor_id, @actor_role, @action, @entity_type,
         @entity_id, @before_json, @after_json, @created_at
       )
-    `).run({
+    `, {
       id: createId("audit"),
       account_id: input.accountId,
       actor_id: input.actor?.id || null,
@@ -169,7 +170,7 @@ class ErpWorkflowService {
       entity_id: input.entityId,
       before_json: JSON.stringify(sanitizeAuditSnapshot(input.before || null)),
       after_json: JSON.stringify(sanitizeAuditSnapshot(input.after || null)),
-      created_at: nowIso(),
+      created_at: nowIso()
     });
   }
 }
@@ -177,5 +178,5 @@ class ErpWorkflowService {
 module.exports = {
   ENTITY_CONFIG,
   ErpWorkflowService,
-  sanitizeAuditSnapshot,
+  sanitizeAuditSnapshot
 };

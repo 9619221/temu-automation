@@ -1,3 +1,4 @@
+const { queryAll, execute, withTransaction } = require("../../db/connection.cjs");
 /**
  * 运营工作台「官方 API 化」解析服务。
  *
@@ -20,20 +21,20 @@ function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-function str(v) { return v == null ? null : String(v); }
+function str(v) {return v == null ? null : String(v);}
 
 /** 把 records(source='sales') 行集解析为 SKU 级规整行数组。导出供测试。 */
 function parseSalesRecords(recordRows) {
   const out = [];
   for (const r of recordRows) {
     let item;
-    try { item = JSON.parse(r.raw_json); } catch { continue; }
+    try {item = JSON.parse(r.raw_json);} catch {continue;}
     if (!item || typeof item !== "object") continue;
     const list = Array.isArray(item.skuQuantityDetailList) ? item.skuQuantityDetailList : [];
     for (const sku of list) {
       const skuId = sku && sku.productSkuId != null ? String(sku.productSkuId) : "";
       if (!skuId) continue;
-      const inv = (sku.inventoryNumInfo && typeof sku.inventoryNumInfo === "object") ? sku.inventoryNumInfo : {};
+      const inv = sku.inventoryNumInfo && typeof sku.inventoryNumInfo === "object" ? sku.inventoryNumInfo : {};
       const ext = sku.skuExtCode != null && String(sku.skuExtCode).trim() !== "" ? String(sku.skuExtCode) : null;
       // 可售天数：官方 availableSaleDays(真·库存÷日均,仅活跃SKU~2.6%有值)优先；缺失则按 可用库存÷近7天日均 自算。
       // 注意 stockDays 普遍=3 是统计窗口而非可售天数，不可用。
@@ -41,7 +42,7 @@ function parseSalesRecords(recordRows) {
       const d7v = num(sku.lastSevenDaysSaleVolume);
       let saleDays = num(sku.availableSaleDays != null ? sku.availableSaleDays : sku.warehouseAvailableSaleDays);
       if (saleDays == null && whStock != null && whStock > 0 && d7v != null && d7v > 0) {
-        saleDays = Math.round((whStock * 7 / d7v) * 10) / 10;
+        saleDays = Math.round(whStock * 7 / d7v * 10) / 10;
       }
       out.push({
         mall_id: r.mall_id,
@@ -66,8 +67,8 @@ function parseSalesRecords(recordRows) {
         wait_in_stock: (num(inv.waitInStock) || 0) + (num(inv.waitReceiveNum) || 0),
         supply_status: str(item.supplyStatus),
         onsales_duration_offline: num(item.onSalesDurationOffline),
-        hot_tag: item.hotTag ? 1 : 0,        // 热销款（商品级）
-        has_hot_sku: item.hasHotSku ? 1 : 0, // 存在爆旺款 SKU（商品级）
+        hot_tag: item.hotTag ? 1 : 0, // 热销款（商品级）
+        has_hot_sku: item.hasHotSku ? 1 : 0 // 存在爆旺款 SKU（商品级）
       });
     }
   }
@@ -75,12 +76,33 @@ function parseSalesRecords(recordRows) {
 }
 
 /** 全量重建 erp_temu_openapi_sku_sales。返回 { records, skuRows }。 */
-function refreshSkuSalesAll(db) {
-  const recs = db.prepare("SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source = 'sales'").all();
+async function refreshSkuSalesAll(db) {
+  const recs = await queryAll(db, "SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source = 'sales'");
   const rows = parseSalesRecords(recs);
   const now = new Date().toISOString();
-  const ins = db.prepare(`
-    INSERT OR REPLACE INTO erp_temu_openapi_sku_sales
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  await withTransaction(db, async (txDb) => {await execute(txDb, "DELETE FROM erp_temu_openapi_sku_sales");for (const row of rows) await execute(txDb, `
+    INSERT INTO erp_temu_openapi_sku_sales
       (mall_id, product_id, product_skc_id, product_sku_id, ext_code, title, thumb_url, category, spec_name,
        today_sales, last7d_sales, last30d_sales, total_sales, sale_days, advice_qty, lack_quantity,
        warehouse_stock, occupy_stock, unavailable_stock, wait_in_stock, supply_status, onsales_duration_offline, hot_tag, has_hot_sku, synced_at)
@@ -88,26 +110,27 @@ function refreshSkuSalesAll(db) {
       (@mall_id, @product_id, @product_skc_id, @product_sku_id, @ext_code, @title, @thumb_url, @category, @spec_name,
        @today_sales, @last7d_sales, @last30d_sales, @total_sales, @sale_days, @advice_qty, @lack_quantity,
        @warehouse_stock, @occupy_stock, @unavailable_stock, @wait_in_stock, @supply_status, @onsales_duration_offline, @hot_tag, @has_hot_sku, @now)
-  `);
-  const tx = db.transaction(() => {
-    db.prepare("DELETE FROM erp_temu_openapi_sku_sales").run();
-    for (const row of rows) ins.run({ ...row, now });
-  });
-  tx();
-  return { records: recs.length, skuRows: rows.length };
-}
+  `, { ...row, now });}
 
-async function refreshSkuSalesAllChunked(db, batchSize = 500) {
-  const recs = db.prepare("SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source = 'sales'").all();
-  await new Promise((r) => setImmediate(r));
-  const allRows = [];
-  for (let i = 0; i < recs.length; i += batchSize) {
-    allRows.push(...parseSalesRecords(recs.slice(i, i + batchSize)));
-    await new Promise((r) => setImmediate(r));
-  }
-  const now = new Date().toISOString();
-  const ins = db.prepare(`
-    INSERT OR REPLACE INTO erp_temu_openapi_sku_sales
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  );return { records: recs.length, skuRows: rows.length };}async function refreshSkuSalesAllChunked(db, batchSize = 500) {const recs = await queryAll(db, "SELECT mall_id, raw_json FROM erp_temu_openapi_records WHERE source = 'sales'");await new Promise((r) => setImmediate(r));const allRows = [];for (let i = 0; i < recs.length; i += batchSize) {allRows.push(...parseSalesRecords(recs.slice(i, i + batchSize)));await new Promise((r) => setImmediate(r));}const now = new Date().toISOString();await execute(db, "DELETE FROM erp_temu_openapi_sku_sales");for (let i = 0; i < allRows.length; i += batchSize) {const chunk = allRows.slice(i, i + batchSize);await withTransaction(db, async (txDb) => {for (const row of chunk) await execute(txDb, `
+    INSERT INTO erp_temu_openapi_sku_sales
       (mall_id, product_id, product_skc_id, product_sku_id, ext_code, title, thumb_url, category, spec_name,
        today_sales, last7d_sales, last30d_sales, total_sales, sale_days, advice_qty, lack_quantity,
        warehouse_stock, occupy_stock, unavailable_stock, wait_in_stock, supply_status, onsales_duration_offline, hot_tag, has_hot_sku, synced_at)
@@ -115,15 +138,4 @@ async function refreshSkuSalesAllChunked(db, batchSize = 500) {
       (@mall_id, @product_id, @product_skc_id, @product_sku_id, @ext_code, @title, @thumb_url, @category, @spec_name,
        @today_sales, @last7d_sales, @last30d_sales, @total_sales, @sale_days, @advice_qty, @lack_quantity,
        @warehouse_stock, @occupy_stock, @unavailable_stock, @wait_in_stock, @supply_status, @onsales_duration_offline, @hot_tag, @has_hot_sku, @now)
-  `);
-  db.prepare("DELETE FROM erp_temu_openapi_sku_sales").run();
-  for (let i = 0; i < allRows.length; i += batchSize) {
-    const chunk = allRows.slice(i, i + batchSize);
-    const tx = db.transaction(() => { for (const row of chunk) ins.run({ ...row, now }); });
-    tx();
-    await new Promise((r) => setImmediate(r));
-  }
-  return { records: recs.length, skuRows: allRows.length };
-}
-
-module.exports = { refreshSkuSalesAll, refreshSkuSalesAllChunked, parseSalesRecords };
+  `, { ...row, now });});await new Promise((r) => setImmediate(r));}return { records: recs.length, skuRows: allRows.length };}module.exports = { refreshSkuSalesAll, refreshSkuSalesAllChunked, parseSalesRecords };

@@ -11,6 +11,7 @@
 // erp_temu_price_log 不再写入新行（cloud 无价格变更日志）。
 
 const crypto = require("crypto");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const ROBOT_KEY = "temu_sales_robot";
@@ -41,15 +42,15 @@ function normalizeCursor(value) {
   return new Date(ms - 1000).toISOString().replace("T", " ").replace(/\.\d+Z?$/, "");
 }
 
-function getSkuCursor(db, companyId) {
-  const row = db.prepare(`
+async function getSkuCursor(db, companyId) {
+  const row = await queryOne(db, `
     SELECT MAX(updated_at) AS cursor FROM erp_temu_sales_sku WHERE company_id = ?
-  `).get(companyId);
+  `, [companyId]);
   return normalizeCursor(row?.cursor);
 }
 
-function syncSku(db, { companyId, since, now, limit }) {
-  const rows = db.prepare(`
+async function syncSku(db, { companyId, since, now, limit }) {
+  const rows = await queryAll(db, `
     SELECT mall_supplier_id, skc_id, product_id, title, category_name,
            sku_ext_code, today_sales, warehouse_stock,
            declared_price_cents, price_currency, stat_date, last_updated_at
@@ -59,9 +60,51 @@ function syncSku(db, { companyId, since, now, limit }) {
       AND skc_id IS NOT NULL AND skc_id <> ''
     ORDER BY last_updated_at ASC
     LIMIT @limit
-  `).all({ since, limit });
+  `, { since, limit });
   if (!rows.length) return { upserted: 0, skipped: 0, latestCursor: since, shopAgg: new Map() };
-  const upsert = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  let upserted = 0;
+  let skipped = 0;
+  let latestCursor = since;
+  const shopAgg = new Map();
+  for (const row of rows) {
+    if (!row.mall_supplier_id || !row.skc_id) {skipped += 1;continue;}
+    const statDate = row.stat_date || String(row.last_updated_at || now).slice(0, 10);
+    const declaredPrice = row.declared_price_cents == null ?
+    null :
+    Number(row.declared_price_cents) / 100;
+    const todaySales = Number.isFinite(Number(row.today_sales)) ? Number(row.today_sales) : 0;
+    await execute(db, `
     INSERT INTO erp_temu_sales_sku (
       id, company_id, platform_shop_id, shop_name,
       sys_product_code, sys_style_code, product_name, product_category,
@@ -91,58 +134,35 @@ function syncSku(db, { companyId, since, now, limit }) {
       declared_price = excluded.declared_price,
       raw_json = excluded.raw_json,
       updated_at = excluded.updated_at
-  `);
-  let upserted = 0;
-  let skipped = 0;
-  let latestCursor = since;
-  const shopAgg = new Map();
-  for (const row of rows) {
-    if (!row.mall_supplier_id || !row.skc_id) { skipped += 1; continue; }
-    const statDate = row.stat_date || String(row.last_updated_at || now).slice(0, 10);
-    const declaredPrice = row.declared_price_cents == null
-      ? null
-      : Number(row.declared_price_cents) / 100;
-    const todaySales = Number.isFinite(Number(row.today_sales)) ? Number(row.today_sales) : 0;
-    upsert.run({
-      id: stableId("temu_sales_sku", [companyId, row.mall_supplier_id, row.skc_id, statDate]),
-      company_id: companyId,
-      platform_shop_id: String(row.mall_supplier_id),
-      sys_product_code: String(row.skc_id),
-      sys_style_code: row.product_id || null,
-      product_name: row.title || null,
-      product_category: row.category_name || null,
-      platform_stock: Number.isFinite(Number(row.warehouse_stock)) ? Number(row.warehouse_stock) : 0,
-      sales_qty: todaySales,
-      currency: row.price_currency || null,
-      declared_price: declaredPrice,
-      stat_date_start: statDate,
-      stat_date_end: statDate,
-      raw_json: JSON.stringify({
-        skc_id: row.skc_id,
-        sku_ext_code: row.sku_ext_code || null,
-        cloud_last_updated_at: row.last_updated_at || null,
-      }),
-      now,
-    });
-    upserted += 1;
-    if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;
-    const aggKey = `${row.mall_supplier_id}|${statDate}`;
-    const agg = shopAgg.get(aggKey) || {
-      mall_supplier_id: row.mall_supplier_id,
-      stat_date: statDate,
-      sales_qty_sum: 0,
-      currency: row.price_currency || null,
-    };
-    agg.sales_qty_sum += todaySales;
+  `, { id: stableId("temu_sales_sku", [companyId, row.mall_supplier_id, row.skc_id, statDate]), company_id: companyId, platform_shop_id: String(row.mall_supplier_id), sys_product_code: String(row.skc_id), sys_style_code: row.product_id || null, product_name: row.title || null, product_category: row.category_name || null, platform_stock: Number.isFinite(Number(row.warehouse_stock)) ? Number(row.warehouse_stock) : 0, sales_qty: todaySales, currency: row.price_currency || null, declared_price: declaredPrice, stat_date_start: statDate, stat_date_end: statDate, raw_json: JSON.stringify({ skc_id: row.skc_id, sku_ext_code: row.sku_ext_code || null, cloud_last_updated_at: row.last_updated_at || null }), now });upserted += 1;if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;const aggKey = `${row.mall_supplier_id}|${statDate}`;const agg = shopAgg.get(aggKey) || { mall_supplier_id: row.mall_supplier_id, stat_date: statDate, sales_qty_sum: 0, currency: row.price_currency || null };agg.sales_qty_sum += todaySales;
     if (!agg.currency && row.price_currency) agg.currency = row.price_currency;
     shopAgg.set(aggKey, agg);
   }
   return { upserted, skipped, latestCursor, shopAgg };
 }
 
-function syncShop(db, { companyId, shopAgg, now }) {
+async function syncShop(db, { companyId, shopAgg, now }) {
   if (!shopAgg || !shopAgg.size) return { upserted: 0 };
-  const upsert = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  let upserted = 0;
+  for (const agg of shopAgg.values()) {
+    await execute(db, `
     INSERT INTO erp_temu_sales_shop (
       id, company_id, platform_shop_id, shop_name, erp_shop_id, currency, stat_date,
       quality_score_lt60, quality_score_60_70, quality_score_70_90, quality_score_90_100,
@@ -158,32 +178,13 @@ function syncShop(db, { companyId, shopAgg, now }) {
       today_sales_qty = excluded.today_sales_qty,
       raw_json = excluded.raw_json,
       updated_at = excluded.updated_at
-  `);
-  let upserted = 0;
-  for (const agg of shopAgg.values()) {
-    upsert.run({
-      id: stableId("temu_sales_shop", [companyId, agg.mall_supplier_id, agg.stat_date]),
-      company_id: companyId,
-      platform_shop_id: String(agg.mall_supplier_id),
-      currency: agg.currency || null,
-      stat_date: agg.stat_date,
-      today_sales_qty: agg.sales_qty_sum,
-      raw_json: JSON.stringify({ source: "cloud_temu_sales_snapshot", batch_ts: now }),
-      now,
-    });
-    upserted += 1;
-  }
-  return { upserted };
-}
-
-class TemuCloudSalesSync {
-  constructor({ db, attachCloudDb }) {
+  `, { id: stableId("temu_sales_shop", [companyId, agg.mall_supplier_id, agg.stat_date]), company_id: companyId, platform_shop_id: String(agg.mall_supplier_id), currency: agg.currency || null, stat_date: agg.stat_date, today_sales_qty: agg.sales_qty_sum, raw_json: JSON.stringify({ source: "cloud_temu_sales_snapshot", batch_ts: now }), now });upserted += 1;}return { upserted };}class TemuCloudSalesSync {constructor({ db, attachCloudDb }) {
     if (!db) throw new Error("TemuCloudSalesSync requires db");
     this.db = db;
     this.attachCloudDb = attachCloudDb;
   }
 
-  sync(payload = {}) {
+  async sync(payload = {}) {
     const companyId = String(payload.companyId || payload.company_id || DEFAULT_COMPANY_ID);
     const limit = Math.min(20000, Math.max(1, Number(payload.limit) || 5000));
     if (!ensureCloudAttached(this.db, this.attachCloudDb)) {
@@ -191,27 +192,27 @@ class TemuCloudSalesSync {
     }
     const now = nowIso();
     const runId = stableId("temu_sales_run", [companyId, now]);
-    this.db.prepare(`
+    await execute(this.db, `
       INSERT INTO erp_temu_robot_sync_runs (
         id, company_id, robot_key, shop_count, sku_count, price_log_count,
         jit_count, vmi_count, status, error, started_at, finished_at
       ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 'running', NULL, ?, NULL)
-    `).run(runId, companyId, ROBOT_KEY, now);
+    `, [runId, companyId, ROBOT_KEY, now]);
 
     try {
-      const since = payload.since || getSkuCursor(this.db, companyId);
-      const stats = this.db.transaction(() => {
-        const skuStats = syncSku(this.db, { companyId, since, now, limit });
-        const shopStats = syncShop(this.db, { companyId, shopAgg: skuStats.shopAgg, now });
-        return { skuStats, shopStats };
-      })();
+      const since = payload.since || (await getSkuCursor(this.db, companyId));
+      const stats = await withTransaction(this.db, async (txDb) => {
+          const skuStats = await syncSku(this.db, { companyId, since, now, limit });
+          const shopStats = await syncShop(this.db, { companyId, shopAgg: skuStats.shopAgg, now });
+          return { skuStats, shopStats };
+        });
       const finishedAt = nowIso();
-      this.db.prepare(`
+      await execute(this.db, `
         UPDATE erp_temu_robot_sync_runs
         SET shop_count = ?, sku_count = ?, price_log_count = 0,
             status = 'success', error = NULL, finished_at = ?
         WHERE id = ?
-      `).run(stats.shopStats.upserted, stats.skuStats.upserted, finishedAt, runId);
+      `, [stats.shopStats.upserted, stats.skuStats.upserted, finishedAt, runId]);
       return {
         runId,
         companyId,
@@ -220,16 +221,16 @@ class TemuCloudSalesSync {
         skuSkipped: stats.skuStats.skipped,
         skuCursor: stats.skuStats.latestCursor,
         startedAt: now,
-        finishedAt,
+        finishedAt
       };
     } catch (error) {
       const finishedAt = nowIso();
       try {
-        this.db.prepare(`
+        await execute(this.db, `
           UPDATE erp_temu_robot_sync_runs
           SET status = 'failed', error = ?, finished_at = ?
           WHERE id = ?
-        `).run(String(error?.message || error).slice(0, 2000), finishedAt, runId);
+        `, [String(error?.message || error).slice(0, 2000), finishedAt, runId]);
       } catch {}
       throw error;
     }
@@ -239,5 +240,5 @@ class TemuCloudSalesSync {
 module.exports = {
   TemuCloudSalesSync,
   DEFAULT_COMPANY_ID,
-  ROBOT_KEY,
+  ROBOT_KEY
 };

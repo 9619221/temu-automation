@@ -49,12 +49,12 @@ function seed(db) {
   run();
 }
 
-function runTest() {
+async function runTest() {
   const tempUserData = fs.mkdtempSync(path.join(os.tmpdir(), "temu-erp-so-"));
   let db;
 
   try {
-    runMigrations({ userDataDir: tempUserData, backup: false });
+    await runMigrations({ userDataDir: tempUserData, backup: false });
     db = openErpDatabase({ userDataDir: tempUserData });
     seed(db);
 

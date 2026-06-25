@@ -22,13 +22,14 @@
 //   两者都比文档暗示的层级「高一层」。放错层会报「收货地址/包裹列表不可为空」。
 
 const { callOpenApi, signOpenApi } = require("../temuOpenApiClient.cjs");
+const { queryAll, queryOne, execute } = require("../../db/connection.cjs");
 
 // 按 mall_id 取该店官方调用凭证（app_secret 优先用表里存的，回退环境变量）。
-function getMallShipCreds(db, mallId) {
-  const auth = db.prepare(
-    "SELECT app_key, app_secret, access_token, region FROM erp_temu_openapi_auth " +
-    "WHERE mall_id = ? AND status = 'active' AND access_token IS NOT NULL AND access_token != ''",
-  ).get(String(mallId));
+async function getMallShipCreds(db, mallId) {
+  const auth = await queryOne(db,
+  "SELECT app_key, app_secret, access_token, region FROM erp_temu_openapi_auth " +
+  "WHERE mall_id = ? AND status = 'active' AND access_token IS NOT NULL AND access_token != ''", [
+  String(mallId)]);
   if (!auth) throw new Error(`店铺 ${mallId} 未绑定官方授权或 token 失效，无法取发货信息`);
   const appSecret = auth.app_secret || process.env.TEMU_OPENAPI_APP_SECRET || "";
   if (!appSecret) throw new Error(`店铺 ${mallId} 缺少 app_secret，无法调官方接口`);
@@ -41,7 +42,7 @@ async function callShipApi(creds, type, bizParams = {}) {
   const r = await callOpenApi({ ...creds, region, type, bizParams });
   const body = r && r.response;
   if (!body || body.success !== true) {
-    const err = new Error((body && body.errorMsg) || `${type} 调用失败`);
+    const err = new Error(body && body.errorMsg || `${type} 调用失败`);
     err.errorCode = body && body.errorCode;
     throw err;
   }
@@ -51,21 +52,21 @@ async function callShipApi(creds, type, bizParams = {}) {
 // 发货信息预览：大仓收货地址(按 WB 备货单) + 本店发货地址。纯只读，绝不发货。
 // 单个接口失败只记录到 *Error 字段、不影响另一个，便于前端部分展示。
 async function getOfficialShipPreview({ db, mallId, subPurchaseOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const out = {
     mallId: String(mallId),
     subPurchaseOrderSn: subPurchaseOrderSn ? String(subPurchaseOrderSn) : null,
     receiveWarehouse: null,
-    sendAddresses: [],
+    sendAddresses: []
   };
 
   // 1. 大仓收货地址（需 WB 备货单号；只有「待发货」状态的单能取到，其余报业务错）。
   if (out.subPurchaseOrderSn) {
     try {
       const res = await callShipApi(creds, "bg.shiporder.receiveaddressv2.get", {
-        subPurchaseOrderSnList: [out.subPurchaseOrderSn],
+        subPurchaseOrderSnList: [out.subPurchaseOrderSn]
       });
-      const grp = ((res && res.subPurchaseReceiveAddressGroups) || [])[0];
+      const grp = (res && res.subPurchaseReceiveAddressGroups || [])[0];
       const a = grp && grp.receiveAddressInfo;
       if (a) {
         out.receiveWarehouse = {
@@ -78,7 +79,7 @@ async function getOfficialShipPreview({ db, mallId, subPurchaseOrderSn }) {
           detailAddress: a.detailAddress || null,
           provinceCode: a.provinceCode != null ? a.provinceCode : null,
           cityCode: a.cityCode != null ? a.cityCode : null,
-          districtCode: a.districtCode != null ? a.districtCode : null,
+          districtCode: a.districtCode != null ? a.districtCode : null
         };
       }
     } catch (e) {
@@ -89,18 +90,18 @@ async function getOfficialShipPreview({ db, mallId, subPurchaseOrderSn }) {
   // 2. 本店发货地址列表。
   try {
     const res = await callShipApi(creds, "bg.mall.address.get", {});
-    const list = Array.isArray(res) ? res : (res && typeof res === "object" ? Object.values(res) : []);
-    out.sendAddresses = list
-      .filter((a) => a && typeof a === "object")
-      .map((a) => ({
-        id: a.id != null ? String(a.id) : null,
-        isDefault: Boolean(a.isDefault),
-        provinceName: a.provinceName || null,
-        cityName: a.cityName || null,
-        districtName: a.districtName || null,
-        addressDetail: a.addressDetail || a.detailAddress || null,
-        addressLabel: a.addressLabel || null,
-      }));
+    const list = Array.isArray(res) ? res : res && typeof res === "object" ? Object.values(res) : [];
+    out.sendAddresses = list.
+    filter((a) => a && typeof a === "object").
+    map((a) => ({
+      id: a.id != null ? String(a.id) : null,
+      isDefault: Boolean(a.isDefault),
+      provinceName: a.provinceName || null,
+      cityName: a.cityName || null,
+      districtName: a.districtName || null,
+      addressDetail: a.addressDetail || a.detailAddress || null,
+      addressLabel: a.addressLabel || null
+    }));
   } catch (e) {
     out.sendAddressesError = e.message;
   }
@@ -115,7 +116,7 @@ function normalizeShipSkus(skuList) {
   if (!Array.isArray(skuList) || skuList.length === 0) throw new Error("缺少发货 SKU 列表");
   return skuList.map((s) => {
     const productSkuId = Number(s.productSkuId != null ? s.productSkuId : s.skuId);
-    const qty = Number(s.qty != null ? s.qty : (s.deliverSkuNum != null ? s.deliverSkuNum : s.skuNum));
+    const qty = Number(s.qty != null ? s.qty : s.deliverSkuNum != null ? s.deliverSkuNum : s.skuNum);
     if (!productSkuId || !(qty > 0)) throw new Error(`发货 SKU 非法：${JSON.stringify(s)}`);
     return { productSkuId, qty };
   });
@@ -123,27 +124,27 @@ function normalizeShipSkus(skuList) {
 
 // 从发货台取 SKU 明细（含展示信息），供前端包裹编辑器使用。先 staging.add（幂等）再 staging.get。
 async function fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const wb = String(subPurchaseOrderSn);
   await callShipApi(creds, "bg.shiporder.staging.add", {
-    joinInfoList: [{ deliveryAddressType: 4, subPurchaseOrderSn: wb }],
+    joinInfoList: [{ deliveryAddressType: 4, subPurchaseOrderSn: wb }]
   }).catch(() => {});
   for (let pageNo = 1; pageNo <= 20; pageNo++) {
     const res = await callShipApi(creds, "bg.shiporder.staging.get", { pageSize: 50, pageNo });
-    const list = (res && res.list) || [];
+    const list = res && res.list || [];
     const hit = list.find(
-      (it) => it && it.subPurchaseOrderBasicVO && String(it.subPurchaseOrderBasicVO.subPurchaseOrderSn) === wb,
+      (it) => it && it.subPurchaseOrderBasicVO && String(it.subPurchaseOrderBasicVO.subPurchaseOrderSn) === wb
     );
     if (hit) {
-      return ((hit.orderDetailVOList) || [])
-        .map((d) => ({
-          productSkuId: Number(d.productSkuId),
-          qty: Number(d.productSkuPurchaseQuantity),
-          skuName: d.productName || d.skuName || "",
-          spec: d.productSkuSpec || d.spec || "",
-          thumbUrl: d.thumbUrl || d.skuImgUrl || "",
-        }))
-        .filter((it) => it.productSkuId && it.qty > 0);
+      return (hit.orderDetailVOList || []).
+      map((d) => ({
+        productSkuId: Number(d.productSkuId),
+        qty: Number(d.productSkuPurchaseQuantity),
+        skuName: d.productName || d.skuName || "",
+        spec: d.productSkuSpec || d.spec || "",
+        thumbUrl: d.thumbUrl || d.skuImgUrl || ""
+      })).
+      filter((it) => it.productSkuId && it.qty > 0);
     }
     if (list.length < 50) break;
   }
@@ -155,14 +156,14 @@ async function fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn }) {
 async function fetchStagingSkus(creds, wb) {
   for (let pageNo = 1; pageNo <= 20; pageNo++) {
     const res = await callShipApi(creds, "bg.shiporder.staging.get", { pageSize: 50, pageNo });
-    const list = (res && res.list) || [];
+    const list = res && res.list || [];
     const hit = list.find(
-      (it) => it && it.subPurchaseOrderBasicVO && String(it.subPurchaseOrderBasicVO.subPurchaseOrderSn) === wb,
+      (it) => it && it.subPurchaseOrderBasicVO && String(it.subPurchaseOrderBasicVO.subPurchaseOrderSn) === wb
     );
     if (hit) {
-      return ((hit.orderDetailVOList) || [])
-        .map((d) => ({ productSkuId: Number(d.productSkuId), qty: Number(d.productSkuPurchaseQuantity) }))
-        .filter((it) => it.productSkuId && it.qty > 0);
+      return (hit.orderDetailVOList || []).
+      map((d) => ({ productSkuId: Number(d.productSkuId), qty: Number(d.productSkuPurchaseQuantity) })).
+      filter((it) => it.productSkuId && it.qty > 0);
     }
     if (list.length < 50) break; // 已到最后一页
   }
@@ -172,13 +173,13 @@ async function fetchStagingSkus(creds, wb) {
 // 加入发货台（单个备货单，「加入发货台」独立按钮用）。
 // 已加入(errorCode 60001)返回 alreadyIn=true 无害；状态不对(60004 非已接单待发货)等其它错误抛出。
 async function stagingAddOfficial({ db, mallId, subPurchaseOrderSn, deliveryAddressType = 4 }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const wb = subPurchaseOrderSn ? String(subPurchaseOrderSn) : "";
   if (!wb) throw new Error("缺少备货单号 subPurchaseOrderSn");
   const addRes = await callShipApi(creds, "bg.shiporder.staging.add", {
-    joinInfoList: [{ deliveryAddressType: Number(deliveryAddressType) || 4, subPurchaseOrderSn: wb }],
+    joinInfoList: [{ deliveryAddressType: Number(deliveryAddressType) || 4, subPurchaseOrderSn: wb }]
   });
-  const errs = (addRes && addRes.joinErrorList) || [];
+  const errs = addRes && addRes.joinErrorList || [];
   const fatal = errs.filter((e) => e && Number(e.errorCode) !== 60001);
   if (fatal.length) throw new Error(fatal[0].errorMsg || `加入发货台失败(${fatal[0].errorCode})`);
   return { subPurchaseOrderSn: wb, alreadyIn: errs.some((e) => e && Number(e.errorCode) === 60001) };
@@ -186,17 +187,17 @@ async function stagingAddOfficial({ db, mallId, subPurchaseOrderSn, deliveryAddr
 
 // 按备货单号查已有的发货单号（shiporderv2.get + subPurchaseOrderSn 单数参数，重试 3 次）。
 async function lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const wb = String(subPurchaseOrderSn);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const r = await callShipApi(creds, "bg.shiporderv2.get", { pageSize: 10, pageNo: 1, subPurchaseOrderSn: wb });
-      const hit = ((r && r.list) || []).find((it) => it && it.deliveryOrderSn);
+      const hit = (r && r.list || []).find((it) => it && it.deliveryOrderSn);
       if (hit) {
         return {
           deliveryOrderSn: String(hit.deliveryOrderSn),
           deliveryAddressId: hit.deliveryAddressId ? String(hit.deliveryAddressId) : null,
-          subWarehouseId: hit.subWarehouseId ? String(hit.subWarehouseId) : null,
+          subWarehouseId: hit.subWarehouseId ? String(hit.subWarehouseId) : null
         };
       }
       break;
@@ -212,15 +213,15 @@ async function lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn }) {
 // mall.address（取发货地址 ID）→ shiporderv3.create（按验证出的正确结构）。
 // 生成 FH 发货单，可撤销、不真发货。返回 { deliveryOrderSn, deliveryOrders, subWarehouseId, deliveryAddressId }。
 async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList, deliveryAddressType = 4, deliveryAddressId = null, packageCount = 1, packages: rawPackages = null }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const wb = subPurchaseOrderSn ? String(subPurchaseOrderSn) : "";
   if (!wb) throw new Error("缺少备货单号 subPurchaseOrderSn");
 
   // 1. 确保在发货台（已加入返回 60001，无害；状态不对如 60004 抛出）。
   const addRes = await callShipApi(creds, "bg.shiporder.staging.add", {
-    joinInfoList: [{ deliveryAddressType: Number(deliveryAddressType) || 4, subPurchaseOrderSn: wb }],
+    joinInfoList: [{ deliveryAddressType: Number(deliveryAddressType) || 4, subPurchaseOrderSn: wb }]
   });
-  const joinErrors = ((addRes && addRes.joinErrorList) || []).filter((e) => e && Number(e.errorCode) !== 60001);
+  const joinErrors = (addRes && addRes.joinErrorList || []).filter((e) => e && Number(e.errorCode) !== 60001);
   if (joinErrors.length) {
     throw new Error(`加入发货台失败：${joinErrors[0].errorMsg || joinErrors[0].errorCode}`);
   }
@@ -236,7 +237,7 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
 
   // 2. 取大仓收货地址 + 子仓（必须在发货台之后才能取到）。
   const rav = await callShipApi(creds, "bg.shiporder.receiveaddressv2.get", { subPurchaseOrderSnList: [wb] });
-  const grp = ((rav && rav.subPurchaseReceiveAddressGroups) || [])[0];
+  const grp = (rav && rav.subPurchaseReceiveAddressGroups || [])[0];
   if (!grp || !grp.receiveAddressInfo) throw new Error("取不到大仓收货地址（单据可能不可发货）");
   const subWarehouseId = Number(grp.subWarehouseId);
   const receiveAddressInfo = grp.receiveAddressInfo;
@@ -245,7 +246,7 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
   let daId = deliveryAddressId != null && deliveryAddressId !== "" ? Number(deliveryAddressId) : null;
   if (!daId) {
     const addrRes = await callShipApi(creds, "bg.mall.address.get", {});
-    const arr = Array.isArray(addrRes) ? addrRes : (addrRes && typeof addrRes === "object" ? Object.values(addrRes) : []);
+    const arr = Array.isArray(addrRes) ? addrRes : addrRes && typeof addrRes === "object" ? Object.values(addrRes) : [];
     const def = arr.find((a) => a && a.isDefault) || arr[0];
     if (!def) throw new Error("本店无可用发货地址，请先在卖家后台维护发货地址");
     daId = Number(def.id);
@@ -261,8 +262,8 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
     const idMap = new Map();
     frontIds.forEach((fid, i) => idMap.set(fid, stagingIds[i] != null ? stagingIds[i] : fid));
     packages = rawPackages.map((pkg) =>
-      pkg.map((s) => ({ productSkuId: idMap.get(Number(s.productSkuId)) || Number(s.productSkuId), skuNum: Number(s.skuNum || 0) }))
-        .filter((s) => s.skuNum > 0)
+    pkg.map((s) => ({ productSkuId: idMap.get(Number(s.productSkuId)) || Number(s.productSkuId), skuNum: Number(s.skuNum || 0) })).
+    filter((s) => s.skuNum > 0)
     ).filter((pkg) => pkg.length > 0);
     if (!packages.length) packages = [items.map((it) => ({ productSkuId: it.productSkuId, skuNum: it.qty }))];
   } else {
@@ -290,36 +291,36 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
       deliveryAddressId: daId,
       subPurchaseOrderSn: wb,
       packageInfos: packages.map((pkgItems) => ({ packageDetailSaveInfos: pkgItems })),
-      deliverOrderDetailInfos: items.map((it) => ({ productSkuId: it.productSkuId, deliverSkuNum: it.qty })),
-    }],
+      deliverOrderDetailInfos: items.map((it) => ({ productSkuId: it.productSkuId, deliverSkuNum: it.qty }))
+    }]
   }];
   const res = await callShipApi(creds, "bg.shiporderv3.create", { deliveryOrderCreateGroupList: groupList });
-  const deliveryOrders = (res && res.deliveryOrders) || [];
+  const deliveryOrders = res && res.deliveryOrders || [];
   const deliveryOrderSn = deliveryOrders[0] || null;
 
   // 创建成功后回写 DB + 物化快照，让刷新后也能识别"已创建发货单"状态、显示收货仓/地址。
   if (deliveryOrderSn && db) {
     try {
       const addrJson = JSON.stringify(receiveAddressInfo);
-      const warehouseName = (receiveAddressInfo && receiveAddressInfo.receiverName) || null;
-      db.prepare(
-        `UPDATE erp_temu_openapi_consign SET
+      const warehouseName = receiveAddressInfo && receiveAddressInfo.receiverName || null;
+      await execute(db,
+      `UPDATE erp_temu_openapi_consign SET
           delivery_order_sn = COALESCE(NULLIF(delivery_order_sn,''), ?),
           sub_warehouse_name = COALESCE(NULLIF(sub_warehouse_name,''), ?),
           receive_warehouse_name = COALESCE(NULLIF(receive_warehouse_name,''), ?),
           receive_address_json = COALESCE(receive_address_json, ?)
-        WHERE so_id = ?`
-      ).run(deliveryOrderSn, String(subWarehouseId), warehouseName, addrJson, wb);
+        WHERE so_id = ?`, [
+      deliveryOrderSn, String(subWarehouseId), warehouseName, addrJson, wb]);
       // 同步更新物化快照
       try {
-        db.prepare(
-          `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json,
+        await execute(db,
+        `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json,
             '$.rawCloud.delivery_order_sn', ?,
             '$.rawCloud.receive_warehouse_name', ?,
             '$.rawCloud.receive_address_json', ?)
-          WHERE json_extract(payload_json, '$.soId') = ?`
-        ).run(deliveryOrderSn, warehouseName, addrJson, wb);
-      } catch (e2) { console.warn("[Ship] snapshot update failed (non-fatal):", e2.message); }
+          WHERE json_extract(payload_json, '$.soId') = ?`, [
+        deliveryOrderSn, warehouseName, addrJson, wb]);
+      } catch (e2) {console.warn("[Ship] snapshot update failed (non-fatal):", e2.message);}
     } catch (e) {
       console.warn("[Ship] post-create DB update failed (non-fatal):", e.message);
     }
@@ -331,7 +332,7 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
     deliveryAddressId: String(daId),
     receiveAddressInfo,
     deliveryOrders,
-    deliveryOrderSn,
+    deliveryOrderSn
   };
 }
 
@@ -339,7 +340,7 @@ async function createOfficialShipOrder({ db, mallId, subPurchaseOrderSn, skuList
 // 注意：FH 刚创建瞬间状态未就绪，立即撤销会报「当前店铺无法对该发货单进行操作」，
 // 故对该错误轻量重试（最多 3 次、间隔 2s）。
 async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchaseOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
   let lastErr;
@@ -350,12 +351,12 @@ async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchas
       if (db && subPurchaseOrderSn) {
         const soId = String(subPurchaseOrderSn);
         try {
-          db.prepare("UPDATE erp_temu_openapi_consign SET delivery_order_sn = NULL WHERE so_id = ? AND delivery_order_sn = ?").run(soId, sn);
-          db.prepare(
-            `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json, '$.rawCloud.delivery_order_sn', NULL)
-            WHERE json_extract(payload_json, '$.soId') = ?`
-          ).run(soId);
-        } catch (e) { console.warn("[Ship] post-cancel DB clear failed (non-fatal):", e.message); }
+          await execute(db, "UPDATE erp_temu_openapi_consign SET delivery_order_sn = NULL WHERE so_id = ? AND delivery_order_sn = ?", [soId, sn]);
+          await execute(db,
+          `UPDATE temu_consign_unified_snapshot SET payload_json = json_set(payload_json, '$.rawCloud.delivery_order_sn', NULL)
+            WHERE json_extract(payload_json, '$.soId') = ?`, [
+          soId]);
+        } catch (e) {console.warn("[Ship] post-cancel DB clear failed (non-fatal):", e.message);}
       }
       return { deliveryOrderSn: sn, result: res };
     } catch (e) {
@@ -372,17 +373,17 @@ async function cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchas
 
 // 快递公司字典（真发货选快递用）。返回 [{ shipId, shipName }]。
 async function getOfficialLogisticsCompanies({ db, mallId }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const res = await callShipApi(creds, "bg.logistics.company.get", {});
-  const list = (res && res.shipList) || [];
-  return list
-    .filter((s) => s && typeof s === "object")
-    .map((s) => ({ shipId: s.shipId != null ? String(s.shipId) : null, shipName: s.shipName || null }));
+  const list = res && res.shipList || [];
+  return list.
+  filter((s) => s && typeof s === "object").
+  map((s) => ({ shipId: s.shipId != null ? String(s.shipId) : null, shipName: s.shipName || null }));
 }
 
 // 发货前校验（packing.match）：校验发货单是否满足发货条件、返回未打标签的单、SKU 总重量。
 async function matchOfficialPacking({ db, mallId, deliveryOrderSnList }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const list = (deliveryOrderSnList || []).map(String).filter(Boolean);
   if (!list.length) throw new Error("缺少发货单号列表 deliveryOrderSnList");
   const res = await callShipApi(creds, "bg.shiporder.packing.match", { deliveryOrderSnList: list });
@@ -394,7 +395,7 @@ async function matchOfficialPacking({ db, mallId, deliveryOrderSnList }) {
 // 返回 { mostUsed, companies:[{expressCompanyId, expressCompanyName, predictId, minCharge, maxCharge,
 //        pickupMethod, hasUsed, scheduleTimes}] }。
 async function getOfficialLogisticsMatch({ db, mallId, deliveryOrderSn, deliveryAddressId, subWarehouseId, receiveAddressInfo, predictTotalPackageWeight = 1000, totalPackageNum = 1, predictVolume = null }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
   if (!deliveryAddressId) throw new Error("缺少发货地址 deliveryAddressId");
@@ -406,7 +407,7 @@ async function getOfficialLogisticsMatch({ db, mallId, deliveryOrderSn, delivery
     subWarehouseId: Number(subWarehouseId),
     totalPackageNum: Number(totalPackageNum) || 1,
     receiveAddressInfo,
-    deliveryOrderSns: [sn],
+    deliveryOrderSns: [sn]
   };
   if (predictVolume != null && predictVolume !== "") biz.predictVolume = String(predictVolume);
   const mapCo = (c) => ({
@@ -417,16 +418,16 @@ async function getOfficialLogisticsMatch({ db, mallId, deliveryOrderSn, delivery
     maxCharge: c.maxSupplierChargeAmount != null ? Number(c.maxSupplierChargeAmount) : null,
     pickupMethod: c.pickupMethod != null ? Number(c.pickupMethod) : 0,
     hasUsed: Boolean(c.hasUsedThisLogistics),
-    scheduleTimes: Array.isArray(c.channelScheduleTimeList) ? c.channelScheduleTimeList : [],
+    scheduleTimes: Array.isArray(c.channelScheduleTimeList) ? c.channelScheduleTimeList : []
   });
   let lastErr;
   for (let i = 0; i < 4; i++) {
     try {
       const res = await callShipApi(creds, "bg.shiporderv3.logisticsmatch.get", biz);
-      const list = (res && res.list) || [];
+      const list = res && res.list || [];
       return {
         mostUsed: res && res.mostUsedExpressCompany ? mapCo(res.mostUsedExpressCompany) : null,
-        companies: list.map(mapCo),
+        companies: list.map(mapCo)
       };
     } catch (e) {
       lastErr = e;
@@ -452,10 +453,10 @@ async function sendOfficialPacking(opts) {
     expressCompanyId, expressCompanyName, predictId,
     deliverMethod = 2, pickupMethod = 0,
     predictTotalPackageWeight, expressPackageNum, expectPickUpGoodsTime,
-    expressDeliverySn,
+    expressDeliverySn
   } = opts || {};
   if (confirm !== true) throw new Error("真发货需显式 confirm=true（防误触）");
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const list = (deliveryOrderSnList || []).map(String).filter(Boolean);
   if (!list.length) throw new Error("缺少发货单号列表 deliveryOrderSnList");
   if (!deliveryAddressId) throw new Error("缺少发货地址 deliveryAddressId");
@@ -466,7 +467,7 @@ async function sendOfficialPacking(opts) {
     deliveryOrderSnList: list,
     expressCompanyId: Number(expressCompanyId),
     expressCompanyName: expressCompanyName || "",
-    pickupMethod: Number(pickupMethod) || 0,
+    pickupMethod: Number(pickupMethod) || 0
   };
   if (predictId) tms.predictId = Number(predictId);
   if (predictTotalPackageWeight != null && predictTotalPackageWeight !== "") tms.predictTotalPackageWeight = Number(predictTotalPackageWeight);
@@ -478,10 +479,10 @@ async function sendOfficialPacking(opts) {
     deliveryAddressId: Number(deliveryAddressId),
     deliveryOrderSnList: list,
     deliverMethod: Number(deliverMethod) || 2,
-    thirdPartyDeliveryInfo: tms,
+    thirdPartyDeliveryInfo: tms
   };
   const res = await callShipApi(creds, "bg.shiporder.packing.send", biz);
-  return { expressBatchSn: (res && res.expressBatchSn) || null, result: res };
+  return { expressBatchSn: res && res.expressBatchSn || null, result: res };
 }
 
 // ── 打印（箱唛 / 商品条码）──────────────────────────────────────────
@@ -489,7 +490,7 @@ async function sendOfficialPacking(opts) {
 // 拼成 tool/print?dataKey=xxx 用浏览器打开就是渲染好的打印页（10 分钟单次有效，无需自渲染条码）。
 const TEMU_PRINT_BASES = {
   CN: "https://openapi.kuajingmaihuo.com/tool/print",
-  PA: "https://openapi-b-partner.temu.com/tool/print",
+  PA: "https://openapi-b-partner.temu.com/tool/print"
 };
 function getPrintBase(type) {
   return /^bg\.(glo|qtg)\./.test(type) ? TEMU_PRINT_BASES.PA : TEMU_PRINT_BASES.CN;
@@ -497,14 +498,14 @@ function getPrintBase(type) {
 
 // 打印箱唛：要发货单号（创建发货单后才有）。一次可传多个发货单，合并到一份打印页。
 async function printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrderSnList }) {
-  const creds = getMallShipCreds(db, mallId);
-  const list = (deliveryOrderSnList && deliveryOrderSnList.length ? deliveryOrderSnList : [deliveryOrderSn])
-    .map((x) => (x != null ? String(x) : "")).filter(Boolean);
+  const creds = await getMallShipCreds(db, mallId);
+  const list = (deliveryOrderSnList && deliveryOrderSnList.length ? deliveryOrderSnList : [deliveryOrderSn]).
+  map((x) => x != null ? String(x) : "").filter(Boolean);
   if (!list.length) throw new Error("缺少发货单号 deliveryOrderSn");
   const type = "bg.logistics.boxmarkinfo.get";
   const dataKey = await callShipApi(creds, type, {
     deliveryOrderSnList: list,
-    return_data_key: "true",
+    return_data_key: "true"
   });
   if (!dataKey || typeof dataKey !== "string") throw new Error("未返回箱唛打印 dataKey");
   return { dataKey, printUrl: `${getPrintBase(type)}?dataKey=${encodeURIComponent(dataKey)}` };
@@ -513,7 +514,7 @@ async function printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrder
 // 查询商品条码号(labelCode)：按 skcId 批量查，返回 { [skcId]: labelCode }。
 // 用于条码打印：labelCode 是 Temu 平台分配的条形码编号，区别于供应商自定义的 sku_ext_code。
 async function queryGoodsLabelCodes({ db, mallId, skcIds }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const ids = (skcIds || []).map((x) => Number(x)).filter(Boolean);
   if (!ids.length) return {};
   const map = {};
@@ -523,9 +524,9 @@ async function queryGoodsLabelCodes({ db, mallId, skcIds }) {
     const result = await callShipApi(creds, "bg.glo.goods.labelv2.get", {
       productSkcIdList: chunk,
       pageSize: chunkSize,
-      page: 1,
+      page: 1
     });
-    const items = (result && result.labelCodePageResult && result.labelCodePageResult.data) || [];
+    const items = result && result.labelCodePageResult && result.labelCodePageResult.data || [];
     for (const item of items) {
       const dto = item.productSkuLabelCodeDTO || item.productLabelCodeDTO;
       const skcId = String(dto && dto.productSkcId || item.productSkcId || "");
@@ -538,13 +539,13 @@ async function queryGoodsLabelCodes({ db, mallId, skcIds }) {
 
 // 打印商品条码（SKU 条码）：按 SKC 或 SKU id，不依赖发货单、随时可打。
 async function printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const skcs = (skcIds || []).map((x) => Number(x)).filter(Boolean);
   const skus = (skuIds || []).map((x) => Number(x)).filter(Boolean);
   const biz = { return_data_key: "true" };
-  if (skcs.length) biz.productSkcIdList = skcs;
-  else if (skus.length) biz.productSkuIdList = skus;
-  else throw new Error("缺少 SKC/SKU id");
+  if (skcs.length) biz.productSkcIdList = skcs;else
+  if (skus.length) biz.productSkuIdList = skus;else
+  throw new Error("缺少 SKC/SKU id");
   const type = "bg.glo.goods.labelv2.get";
   const dataKey = await callShipApi(creds, type, biz);
   if (!dataKey || typeof dataKey !== "string") throw new Error("未返回条码打印 dataKey");
@@ -555,26 +556,26 @@ async function printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }) {
 
 // 预估体积（predict.volume.get）—— ERP 下发货单前取，喂给 logisticsmatch 让运费/匹配更准。
 async function getOfficialPredictVolume({ db, mallId, deliveryOrderSnList }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const list = (deliveryOrderSnList || []).map(String).filter(Boolean);
   if (!list.length) throw new Error("缺少发货单号列表 deliveryOrderSnList");
   const res = await callShipApi(creds, "bg.predict.volume.get", { deliveryOrderSnList: list });
-  return { predictVolume: (res && res.predictVolume) || null };
+  return { predictVolume: res && res.predictVolume || null };
 }
 
 // 装箱明细查询（package.get）—— 创建发货单后查包裹怎么装的。
 async function getOfficialPackage({ db, mallId, deliveryOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
   const res = await callShipApi(creds, "bg.shiporder.package.get", { deliveryOrderSn: sn });
-  return { deliveryOrderSn: sn, packageInfo: (res && res.packageInfo) || [] };
+  return { deliveryOrderSn: sn, packageInfo: res && res.packageInfo || [] };
 }
 
 // 装箱编辑（package.edit）—— 调整发货单分箱：哪些 SKU 装哪箱、各箱数量。
 // deliverOrderDetailInfos=整单各 SKU 发货总量；packageInfos[].packageDetailSaveInfos=每箱 SKU 明细。
 async function editOfficialPackage({ db, mallId, deliveryOrderSn, deliverOrderDetailInfos, packageInfos }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
   if (!Array.isArray(deliverOrderDetailInfos) || !deliverOrderDetailInfos.length) throw new Error("缺少发货明细 deliverOrderDetailInfos");
@@ -583,14 +584,14 @@ async function editOfficialPackage({ db, mallId, deliveryOrderSn, deliverOrderDe
     deliveryOrderSn: sn,
     deliverOrderDetailInfos: deliverOrderDetailInfos.map((d) => ({
       productSkuId: Number(d.productSkuId),
-      deliverSkuNum: Number(d.deliverSkuNum != null ? d.deliverSkuNum : d.skuNum),
+      deliverSkuNum: Number(d.deliverSkuNum != null ? d.deliverSkuNum : d.skuNum)
     })),
     packageInfos: packageInfos.map((p) => ({
-      packageDetailSaveInfos: ((p.packageDetailSaveInfos || p.packageDetails) || []).map((it) => ({
+      packageDetailSaveInfos: (p.packageDetailSaveInfos || p.packageDetails || []).map((it) => ({
         productSkuId: Number(it.productSkuId),
-        skuNum: Number(it.skuNum),
-      })),
-    })),
+        skuNum: Number(it.skuNum)
+      }))
+    }))
   });
   return { deliveryOrderSn: sn, result: res };
 }
@@ -599,12 +600,12 @@ async function editOfficialPackage({ db, mallId, deliveryOrderSn, deliverOrderDe
 // 快递单号(expressDeliverySn)发货后平台才分配，未分配则提示等待。
 // PDF url 需 app-key/access-token/timestamp/sign 鉴权 GET（三参数签名复用 signOpenApi，规则同公共参数签名）。
 async function getOfficialExpressNotePdf({ db, mallId, deliveryOrderSn }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const sn = deliveryOrderSn ? String(deliveryOrderSn) : "";
   if (!sn) throw new Error("缺少发货单号 deliveryOrderSn");
   // 1. 查发货单拿 expressCompanyId + expressDeliverySn（快递单号）。
   const shipRes = await callShipApi(creds, "bg.shiporderv2.get", { pageSize: 10, pageNo: 1, deliveryOrderSnList: [sn] });
-  const order = ((shipRes && shipRes.list) || [])[0];
+  const order = (shipRes && shipRes.list || [])[0];
   if (!order) throw new Error("查不到该发货单");
   const expressCompanyId = order.expressCompanyId;
   const expressDeliverySn = order.expressDeliverySn;
@@ -612,9 +613,9 @@ async function getOfficialExpressNotePdf({ db, mallId, deliveryOrderSn }) {
   // 2. 取运单标签 PDF url。
   const noteRes = await callShipApi(creds, "bg.shiporder.express.note.get", {
     expressCompanyId: Number(expressCompanyId),
-    expressDeliverySn: String(expressDeliverySn),
+    expressDeliverySn: String(expressDeliverySn)
   });
-  const detail = ((noteRes && noteRes.tmsChildWaybillSnNoteDetails) || [])[0];
+  const detail = (noteRes && noteRes.tmsChildWaybillSnNoteDetails || [])[0];
   const pdfUrl = detail && detail.childWaybillNote;
   if (!pdfUrl) throw new Error("未取到运单标签 PDF 链接");
   // 3. 带三参数鉴权 header GET PDF。
@@ -622,29 +623,29 @@ async function getOfficialExpressNotePdf({ db, mallId, deliveryOrderSn }) {
   const sign = signOpenApi({ "app-key": creds.appKey, "access-token": creds.accessToken, timestamp }, creds.appSecret);
   const resp = await fetch(pdfUrl, {
     method: "GET",
-    headers: { "app-key": creds.appKey, "access-token": creds.accessToken, timestamp, sign },
+    headers: { "app-key": creds.appKey, "access-token": creds.accessToken, timestamp, sign }
   });
   if (!resp.ok) throw new Error(`下载面单 PDF 失败 HTTP ${resp.status}`);
   const buf = Buffer.from(await resp.arrayBuffer());
   return {
     deliveryOrderSn: sn,
     expressDeliverySn: String(expressDeliverySn),
-    childWaybillSn: (detail && detail.childWaybillSn) || null,
+    childWaybillSn: detail && detail.childWaybillSn || null,
     filename: `面单_${expressDeliverySn}.pdf`,
-    pdfBase64: buf.toString("base64"),
+    pdfBase64: buf.toString("base64")
   };
 }
 
 // 备货单·创建（purchaseorder.apply）—— ⚠️ 真下备货单（有当日额度上限、受核价限制，错误码原样透传）。
 // purchaseDetailList=[{productSkuId,productSkcId,productSkuPurchaseQuantity,expectLatestDeliverTime?,expectLatestArrivalTime?}]。
 async function applyOfficialPurchaseOrder({ db, mallId, purchaseDetailList }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   if (!Array.isArray(purchaseDetailList) || !purchaseDetailList.length) throw new Error("缺少备货明细 purchaseDetailList");
   const list = purchaseDetailList.map((d) => {
     const item = {
       productSkuId: Number(d.productSkuId),
       productSkcId: Number(d.productSkcId),
-      productSkuPurchaseQuantity: Number(d.productSkuPurchaseQuantity != null ? d.productSkuPurchaseQuantity : d.quantity),
+      productSkuPurchaseQuantity: Number(d.productSkuPurchaseQuantity != null ? d.productSkuPurchaseQuantity : d.quantity)
     };
     if (!item.productSkuId || !item.productSkcId || !(item.productSkuPurchaseQuantity > 0)) {
       throw new Error(`备货明细非法：${JSON.stringify(d)}`);
@@ -659,13 +660,13 @@ async function applyOfficialPurchaseOrder({ db, mallId, purchaseDetailList }) {
 
 // 备货单·改下单量（purchaseorder.edit）—— 仅待创建备货单可改。
 async function editOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSn, purchaseDetailList }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const wb = subPurchaseOrderSn ? String(subPurchaseOrderSn) : "";
   if (!wb) throw new Error("缺少备货单号 subPurchaseOrderSn");
   if (!Array.isArray(purchaseDetailList) || !purchaseDetailList.length) throw new Error("缺少备货明细 purchaseDetailList");
   const list = purchaseDetailList.map((d) => ({
     productSkuId: Number(d.productSkuId),
-    productSkuPurchaseQuantity: Number(d.productSkuPurchaseQuantity != null ? d.productSkuPurchaseQuantity : d.quantity),
+    productSkuPurchaseQuantity: Number(d.productSkuPurchaseQuantity != null ? d.productSkuPurchaseQuantity : d.quantity)
   }));
   const res = await callShipApi(creds, "bg.purchaseorder.edit", { subPurchaseOrderSn: wb, purchaseDetailList: list });
   return { subPurchaseOrderSn: wb, result: res };
@@ -673,7 +674,7 @@ async function editOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSn, purch
 
 // 备货单·批量取消待接单（purchaseorder.cancel）。
 async function cancelOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSnList }) {
-  const creds = getMallShipCreds(db, mallId);
+  const creds = await getMallShipCreds(db, mallId);
   const list = (subPurchaseOrderSnList || []).map(String).filter(Boolean);
   if (!list.length) throw new Error("缺少备货单号列表 subPurchaseOrderSnList");
   const res = await callShipApi(creds, "bg.purchaseorder.cancel", { subPurchaseOrderSnList: list });
@@ -686,9 +687,9 @@ const SHIP_STATUS_MAP = { "0": "待发货", "1": "已发货", "2": "已收货", 
 async function syncShipOrderStatus({ db, soIds }) {
   if (!Array.isArray(soIds) || !soIds.length) return { updated: 0 };
   const placeholders = soIds.map(() => "?").join(",");
-  const rows = db.prepare(
-    `SELECT mall_id, so_id, delivery_order_sn, temu_status FROM erp_temu_openapi_consign WHERE so_id IN (${placeholders})`
-  ).all(...soIds);
+  const rows = await queryAll(db,
+  `SELECT mall_id, so_id, delivery_order_sn, temu_status FROM erp_temu_openapi_consign WHERE so_id IN (${placeholders})`, [
+  ...soIds]);
   const SKIP_STATUSES = new Set(["取消", "已取消", "已付款待审核"]);
   // 按 mall 分组：有 delivery_order_sn 的走批量查询，没有的走逐个 subPurchaseOrderSn 查
   const byMall = new Map();
@@ -704,7 +705,7 @@ async function syncShipOrderStatus({ db, soIds }) {
     }
   }
   let updated = 0;
-  const upd = db.prepare(`
+  const updSql = `
     UPDATE erp_temu_openapi_consign SET
       ship_status = COALESCE(?, ship_status),
       temu_status = COALESCE(?, temu_status),
@@ -715,22 +716,22 @@ async function syncShipOrderStatus({ db, soIds }) {
       deliver_package_num = COALESCE(?, deliver_package_num),
       receive_package_num = COALESCE(?, receive_package_num),
       predict_package_weight = COALESCE(?, predict_package_weight)
-    WHERE so_id = ? AND mall_id = ?`);
+    WHERE so_id = ? AND mall_id = ?`;
   for (const [mallId, snSet] of byMall) {
     let creds;
-    try { creds = getMallShipCreds(db, mallId); } catch { continue; }
+    try {creds = await getMallShipCreds(db, mallId);} catch {continue;}
     const snList = [...snSet];
     for (let i = 0; i < snList.length; i += 20) {
       const batch = snList.slice(i, i + 20);
       try {
         const r = await callShipApi(creds, "bg.shiporderv2.get", {
-          pageSize: 20, pageNo: 1, deliveryOrderSnList: batch,
+          pageSize: 20, pageNo: 1, deliveryOrderSnList: batch
         });
-        for (const it of ((r && r.list) || [])) {
+        for (const it of r && r.list || []) {
           const wb = it.subPurchaseOrderSn ? String(it.subPurchaseOrderSn) : null;
           if (!wb) continue;
           const ss = SHIP_STATUS_MAP[String(it.status)] || null;
-          upd.run(
+          await execute(db, updSql, [
             ss, ss,
             it.expressCompany || null,
             it.expressDeliverySn ? String(it.expressDeliverySn) : null,
@@ -739,25 +740,25 @@ async function syncShipOrderStatus({ db, soIds }) {
             it.deliverPackageNum != null ? Number(it.deliverPackageNum) : null,
             it.receivePackageNum != null ? Number(it.receivePackageNum) : null,
             it.predictTotalPackageWeight != null ? Number(it.predictTotalPackageWeight) : null,
-            wb, mallId,
-          );
+            wb, mallId
+          ]);
           updated++;
         }
-      } catch (e) { console.log("[syncShipOrderStatus] error mall", mallId, ":", e.message); }
+      } catch (e) {console.log("[syncShipOrderStatus] error mall", mallId, ":", e.message);}
     }
   }
   // 对没有 delivery_order_sn 的单，逐个用 subPurchaseOrderSn 查（API 不稳定，最多重试2次）
   for (const [mallId, wbList] of missingSnByMall) {
     let creds;
-    try { creds = getMallShipCreds(db, mallId); } catch { continue; }
+    try {creds = await getMallShipCreds(db, mallId);} catch {continue;}
     for (const wb of wbList) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const r = await callShipApi(creds, "bg.shiporderv2.get", { pageSize: 20, pageNo: 1, subPurchaseOrderSn: wb });
-          const it = ((r && r.list) || []).find((x) => x && x.deliveryOrderSn);
+          const it = (r && r.list || []).find((x) => x && x.deliveryOrderSn);
           if (it) {
             const ss = SHIP_STATUS_MAP[String(it.status)] || null;
-            upd.run(
+            await execute(db, updSql, [
               ss, ss,
               it.expressCompany || null,
               it.expressDeliverySn ? String(it.expressDeliverySn) : null,
@@ -766,8 +767,8 @@ async function syncShipOrderStatus({ db, soIds }) {
               it.deliverPackageNum != null ? Number(it.deliverPackageNum) : null,
               it.receivePackageNum != null ? Number(it.receivePackageNum) : null,
               it.predictTotalPackageWeight != null ? Number(it.predictTotalPackageWeight) : null,
-              wb, mallId,
-            );
+              wb, mallId
+            ]);
             updated++;
           }
           break;
@@ -803,5 +804,5 @@ module.exports = {
   applyOfficialPurchaseOrder,
   editOfficialPurchaseOrder,
   cancelOfficialPurchaseOrder,
-  syncShipOrderStatus,
+  syncShipOrderStatus
 };

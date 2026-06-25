@@ -139,7 +139,7 @@ async function main() {
   const startedAt = Date.now();
 
   const db = openErpDatabase();
-  runMigrations({ db });
+  await runMigrations({ db });
 
   const collector = new JushuitanWebCollector();
   const service = new JushuitanService({

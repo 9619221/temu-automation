@@ -193,7 +193,7 @@ function buildItemRow(raw, companyId, nowIso) {
   };
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sourceDir = args._[0]
     || process.env.JST_CONSIGN_AS_EXPORT_DIR
@@ -258,7 +258,7 @@ function main() {
   db.pragma("busy_timeout = 60000");
 
   try {
-    runMigrations({ db });
+    await runMigrations({ db });
 
     db.prepare(`
       INSERT INTO erp_companies (id, name, code, status, created_at, updated_at)

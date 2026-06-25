@@ -1,7 +1,10 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { getErpDatabasePath, openErpDatabase } = require("./connection.cjs");
+const {
+  getErpDatabasePath, openErpDatabase,
+  queryOne, execute, execSql, execRawSql, withTransaction,
+} = require("./connection.cjs");
 
 const MIGRATION_LOG_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS erp_migration_log (
@@ -38,26 +41,26 @@ function listMigrationFiles(options = {}) {
     }));
 }
 
-function ensureMigrationLog(db) {
-  db.exec(MIGRATION_LOG_TABLE_SQL);
+async function ensureMigrationLog(db) {
+  await execSql(db, MIGRATION_LOG_TABLE_SQL);
 }
 
-function hasSuccessfulMigration(db, migrationKey) {
-  const row = db.prepare(
+async function hasSuccessfulMigration(db, migrationKey) {
+  const row = await queryOne(db,
     "SELECT status FROM erp_migration_log WHERE migration_key = ? AND status = 'success'",
-  ).get(migrationKey);
+    [migrationKey]);
   return Boolean(row);
 }
 
-function writeMigrationLog(db, migrationKey, status, remark = "") {
-  db.prepare(`
+async function writeMigrationLog(db, migrationKey, status, remark = "") {
+  await execute(db, `
     INSERT INTO erp_migration_log (id, migration_key, status, executed_at, remark)
     VALUES (@id, @migration_key, @status, @executed_at, @remark)
     ON CONFLICT(migration_key) DO UPDATE SET
       status = excluded.status,
       executed_at = excluded.executed_at,
       remark = excluded.remark
-  `).run({
+  `, {
     id: createId("migration"),
     migration_key: migrationKey,
     status,
@@ -74,12 +77,10 @@ function shouldRunIdempotent(sql) {
   return /--\s*@idempotent\b/i.test(sql);
 }
 
-// 仅吞掉「对象已存在」类幂等错误（重复加列 / 表或索引已存在），其余照常抛出
 function isIgnorableIdempotentError(message) {
   return /duplicate column name|already exists/i.test(String(message || ""));
 }
 
-// 按分号拆分 SQL，跳过单引号字符串与 -- 行注释里的分号
 function splitSqlStatements(sql) {
   const statements = [];
   let current = "";
@@ -114,12 +115,11 @@ function splitSqlStatements(sql) {
   return statements;
 }
 
-// @idempotent 迁移逐语句执行：单条遇「已存在」类错误跳过，其余抛出
-function execStatementsIdempotently(db, sql) {
+async function execStatementsIdempotently(db, sql) {
   for (const statement of splitSqlStatements(sql)) {
     if (!statement.replace(/--[^\n]*/g, "").trim()) continue;
     try {
-      db.exec(statement);
+      await execRawSql(db, statement);
     } catch (error) {
       if (isIgnorableIdempotentError(error && error.message)) continue;
       throw error;
@@ -127,8 +127,6 @@ function execStatementsIdempotently(db, sql) {
   }
 }
 
-// 列出 backups/ 目录下的自动备份文件（erp-<时间戳>.sqlite），按修改时间从新到旧排序。
-// 只认 "erp-" 前缀，不会误伤主库 erp.sqlite 或手工快照 erp.sqlite.PRE-* / erp.sqlite.CORRUPT-*。
 function listAutoBackups(backupDir) {
   if (!fs.existsSync(backupDir)) return [];
   return fs.readdirSync(backupDir)
@@ -136,21 +134,19 @@ function listAutoBackups(backupDir) {
     .map((name) => {
       const full = path.join(backupDir, name);
       let mtimeMs = 0;
-      try { mtimeMs = fs.statSync(full).mtimeMs; } catch (_) { /* stat 失败按最旧处理 */ }
+      try { mtimeMs = fs.statSync(full).mtimeMs; } catch (_) {}
       return { name, full, mtimeMs };
     })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-// 只保留最近 keep 份自动备份，删除更旧的。清理失败不影响主流程。
 function pruneAutoBackups(backupDir, keep) {
   const limit = Math.max(0, keep);
   for (const file of listAutoBackups(backupDir).slice(limit)) {
-    try { fs.unlinkSync(file.full); } catch (_) { /* 删除失败忽略 */ }
+    try { fs.unlinkSync(file.full); } catch (_) {}
   }
 }
 
-// 解析自动备份保留份数：options.backupKeep > 环境变量 ERP_BACKUP_KEEP > 默认 3。
 function resolveBackupKeep(options = {}) {
   if (Number.isInteger(options.backupKeep) && options.backupKeep >= 1) return options.backupKeep;
   const envKeep = parseInt(process.env.ERP_BACKUP_KEEP || "", 10);
@@ -165,8 +161,6 @@ function backupDatabaseIfNeeded(dbPath, options = {}) {
   const backupDir = options.backupDir || path.join(path.dirname(dbPath), "backups");
   fs.mkdirSync(backupDir, { recursive: true });
 
-  // 备份前先清理旧备份，给新备份腾出空间（先收到 keep-1 份，加上即将生成的共 keep 份）。
-  // erp.sqlite 已数 GB，整库 copy 若撞 ENOSPC 会让迁移失败、服务进 restart loop，故先腾空间。
   const keep = resolveBackupKeep(options);
   pruneAutoBackups(backupDir, Math.max(0, keep - 1));
 
@@ -174,48 +168,49 @@ function backupDatabaseIfNeeded(dbPath, options = {}) {
   const backupPath = path.join(backupDir, `erp-${stamp}.sqlite`);
   fs.copyFileSync(dbPath, backupPath);
 
-  // copy 成功后再校正一次，确保最终恰好保留 keep 份。
   pruneAutoBackups(backupDir, keep);
   return backupPath;
 }
 
-function runMigrations(options = {}) {
+async function runMigrations(options = {}) {
   const db = options.db || openErpDatabase(options);
   const shouldClose = !options.db;
   const dbPath = options.dbPath || db.__erpDbPath || getErpDatabasePath(options);
 
   try {
-    ensureMigrationLog(db);
+    await ensureMigrationLog(db);
     const migrationFiles = listMigrationFiles(options);
-    const pending = migrationFiles.filter((migration) => !hasSuccessfulMigration(db, migration.key));
-    const backupPath = pending.length > 0 ? backupDatabaseIfNeeded(dbPath, options) : null;
+    const pendingKeys = new Set();
+    for (const mig of migrationFiles) {
+      if (!(await hasSuccessfulMigration(db, mig.key))) pendingKeys.add(mig.key);
+    }
+    const backupPath = pendingKeys.size > 0 ? backupDatabaseIfNeeded(dbPath, options) : null;
     const results = [];
 
     for (const migration of migrationFiles) {
-      if (hasSuccessfulMigration(db, migration.key)) {
+      if (!pendingKeys.has(migration.key)) {
         results.push({ key: migration.key, status: "skipped" });
         continue;
       }
 
       const sql = fs.readFileSync(migration.path, "utf8");
-      const runSql = shouldRunIdempotent(sql)
-        ? () => execStatementsIdempotently(db, sql)
-        : () => db.exec(sql);
+      const idempotent = shouldRunIdempotent(sql);
 
       try {
         if (shouldRunWithoutWrapperTransaction(sql)) {
-          runSql();
-          writeMigrationLog(db, migration.key, "success", "");
+          if (idempotent) await execStatementsIdempotently(db, sql);
+          else await execRawSql(db, sql);
+          await writeMigrationLog(db, migration.key, "success", "");
         } else {
-          const applyMigration = db.transaction(() => {
-            runSql();
-            writeMigrationLog(db, migration.key, "success", "");
+          await withTransaction(db, async (txDb) => {
+            if (idempotent) await execStatementsIdempotently(txDb, sql);
+            else await execRawSql(txDb, sql);
+            await writeMigrationLog(txDb, migration.key, "success", "");
           });
-          applyMigration();
         }
         results.push({ key: migration.key, status: "success" });
       } catch (error) {
-        writeMigrationLog(db, migration.key, "failed", error?.message || String(error));
+        await writeMigrationLog(db, migration.key, "failed", error?.message || String(error));
         error.message = `Migration ${migration.key} failed: ${error.message}`;
         throw error;
       }

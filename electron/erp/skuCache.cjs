@@ -17,7 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const { getErpDataDir, tableExists } = require("../db/connection.cjs");
 // 命名空间引用（非解构）：便于单元测试 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 
@@ -60,7 +60,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-function openCacheDb() {
+async function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -68,7 +68,7 @@ function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  db.exec(`
+  await execSql(db, `
     CREATE TABLE IF NOT EXISTS sku_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -101,19 +101,19 @@ function openCacheDb() {
 
 function closeCacheDb() {
   if (cacheDb) {
-    try { cacheDb.close(); } catch { /* ignore */ }
+    try {cacheDb.close();} catch {/* ignore */}
     cacheDb = null;
   }
 }
 
-function getMeta(companyId) {
-  const db = openCacheDb();
-  return db.prepare("SELECT * FROM sku_sync_meta WHERE company_id = ?").get(companyId) || null;
+async function getMeta(companyId) {
+  const db = await openCacheDb();
+  return (await queryOne(db, "SELECT * FROM sku_sync_meta WHERE company_id = ?", [companyId])) || null;
 }
 
-function setMeta(companyId, fields = {}) {
-  const db = openCacheDb();
-  db.prepare(`
+async function setMeta(companyId, fields = {}) {
+  const db = await openCacheDb();
+  await execute(db, `
     INSERT INTO sku_sync_meta (company_id, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id) DO UPDATE SET
@@ -121,20 +121,20 @@ function setMeta(companyId, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `).run({
+  `, {
     company_id: companyId,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
     last_sync_at: fields.lastSyncAt != null ? fields.lastSyncAt : null,
-    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null,
+    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null
   });
 }
 
-function isCachePopulated(companyId) {
+async function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
-    const db = openCacheDb();
-    const row = db.prepare("SELECT 1 FROM sku_cache WHERE company_id = ? LIMIT 1").get(companyId);
+    const db = await openCacheDb();
+    const row = await queryOne(db, "SELECT 1 FROM sku_cache WHERE company_id = ? LIMIT 1", [companyId]);
     return Boolean(row);
   } catch {
     return false;
@@ -142,16 +142,16 @@ function isCachePopulated(companyId) {
 }
 
 // 读缓存。返回 null 表示无法用缓存（无 companyId / 缓存空 / 打开失败），调用方据此降级回跨海。
-function getCachedSkus(params = {}) {
+async function getCachedSkus(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = openCacheDb();
+    db = await openCacheDb();
   } catch {
     return null;
   }
-  if (!isCachePopulated(companyId)) return null;
+  if (!await isCachePopulated(companyId)) return null;
 
   const conditions = ["company_id = @company_id", "status != 'deleted'"];
   const args = { company_id: companyId };
@@ -162,22 +162,22 @@ function getCachedSkus(params = {}) {
   }
   const limit = Math.max(1, Math.min(Number(params.limit) || 500, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = db.prepare(`
+  const rows = await queryAll(db, `
     SELECT payload_json FROM sku_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY updated_at DESC
     LIMIT @limit OFFSET @offset
-  `).all({ ...args, limit, offset });
+  `, { ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-function mappingCacheTableExists(db) {
-  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mapping_cache'").get());
+async function mappingCacheTableExists(db) {
+  return await tableExists(db, "mapping_cache");
 }
 
 // 未绑定 SKU 条件构建（list 与 count 共用）。"未绑定" = sku_cache 里没有任何 active 映射的行。
 // sku_cache 与 mapping_cache 同在一个 cache.db 文件，可跨表 NOT EXISTS。
-function buildUnmappedConditions(db, params, args) {
+async function buildUnmappedConditions(db, params, args) {
   const conditions = ["sku.company_id = @company_id", "sku.status != 'deleted'"];
   const search = optionalString(params.search);
   if (search) {
@@ -186,108 +186,108 @@ function buildUnmappedConditions(db, params, args) {
   }
   // mapping_cache 走 idx_mapping_cache_sku(company_id, sku_id)，NOT EXISTS 命中索引；
   // 老库还没同步过映射（表不存在）时退化为"全部 SKU 都算未绑定"。
-  if (mappingCacheTableExists(db)) {
+  if (await mappingCacheTableExists(db)) {
     conditions.push(
-      "NOT EXISTS (SELECT 1 FROM mapping_cache m WHERE m.company_id = sku.company_id AND m.sku_id = sku.id AND m.status != 'deleted')",
+      "NOT EXISTS (SELECT 1 FROM mapping_cache m WHERE m.company_id = sku.company_id AND m.sku_id = sku.id AND m.status != 'deleted')"
     );
   }
   return conditions;
 }
 
 // 未绑定 SKU 分页（供应商管理「未绑定」Tab）。返回 null 表示无法用缓存、调用方降级。
-function getCachedUnmappedSkus(params = {}) {
+async function getCachedUnmappedSkus(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = openCacheDb();
+    db = await openCacheDb();
   } catch {
     return null;
   }
-  if (!isCachePopulated(companyId)) return null;
+  if (!await isCachePopulated(companyId)) return null;
 
   const args = { company_id: companyId };
   const conditions = buildUnmappedConditions(db, params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 500, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = db.prepare(`
+  const rows = await queryAll(db, `
     SELECT sku.payload_json FROM sku_cache sku
     WHERE ${conditions.join(" AND ")}
     ORDER BY sku.updated_at DESC
     LIMIT @limit OFFSET @offset
-  `).all({ ...args, limit, offset });
+  `, { ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-function getCachedUnmappedSkusCount(params = {}) {
+async function getCachedUnmappedSkusCount(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = openCacheDb();
+    db = await openCacheDb();
   } catch {
     return null;
   }
-  if (!isCachePopulated(companyId)) return null;
+  if (!await isCachePopulated(companyId)) return null;
 
   const args = { company_id: companyId };
   const conditions = buildUnmappedConditions(db, params, args);
-  const row = db.prepare(`
+  const row = await queryOne(db, `
     SELECT COUNT(*) AS c FROM sku_cache sku
     WHERE ${conditions.join(" AND ")}
-  `).get(args);
+  `, [args]);
   return row ? row.c : 0;
 }
 
-function upsertSkus(companyId, rows) {
+async function upsertSkus(companyId, rows) {
   if (!rows.length) return;
-  const db = openCacheDb();
+  const db = await openCacheDb();
   const now = nowIso();
-  const stmt = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  await withTransaction(db, async (txDb) => {const items =
+
+
+
+
+
+
+
+    rows;for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO sku_cache (company_id, id, internal_sku_code, product_name, status, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @code, @name, @status, @updated_at, @payload, @cached_at)
     ON CONFLICT(company_id, id) DO UPDATE SET
       internal_sku_code = @code, product_name = @name, status = @status,
       updated_at = @updated_at, payload_json = @payload, cached_at = @cached_at
-  `);
-  const tx = db.transaction((items) => {
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        code: row.internalSkuCode != null ? String(row.internalSkuCode) : null,
-        name: row.productName != null ? String(row.productName) : null,
-        status: row.status != null ? String(row.status) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  tx(rows);
-}
-
-function deleteSkus(companyId, ids) {
-  if (!ids.length) return;
-  const db = openCacheDb();
-  const stmt = db.prepare("DELETE FROM sku_cache WHERE company_id = ? AND id = ?");
-  const tx = db.transaction((list) => {
-    for (const id of list) stmt.run(companyId, String(id));
-  });
-  tx(ids);
-}
-
-async function fetchSkuPage({ since, includeDeleted, limit, offset }) {
+  `, { company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});}async function deleteSkus(companyId, ids) {if (!ids.length) return;const db = await openCacheDb();await withTransaction(db, async (txDb) => {const list = ids;for (const id of list) await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});}async function fetchSkuPage({ since, includeDeleted, limit, offset }) {
   const body = { part: "skus", limit, offset };
   if (since) body.since = since;
   if (includeDeleted) body.includeDeleted = true;
   const payload = await clientRuntime.remoteRequest("/api/master-data/workbench", {
     method: "POST",
     body,
-    timeoutMs: 120000,
+    timeoutMs: 120000
   });
-  return (payload && payload.workbench && payload.workbench.skus) || [];
+  return payload && payload.workbench && payload.workbench.skus || [];
 }
 
 // 全量重建：拉所有活跃 SKU 到内存后一个事务替换该 company 缓存（中途失败不破坏旧缓存）。
@@ -304,37 +304,37 @@ async function syncFull(companyId) {
   for (const row of all) {
     if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;
   }
-  const db = openCacheDb();
-  const now = nowIso();
-  const stmt = db.prepare(`
+  const db = await openCacheDb();
+  const now = nowIso();await withTransaction(db,
+
+
+
+
+  async (txDb) => {const items =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    all;await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO sku_cache (company_id, id, internal_sku_code, product_name, status, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @code, @name, @status, @updated_at, @payload, @cached_at)
-  `);
-  const replaceTx = db.transaction((items) => {
-    db.prepare("DELETE FROM sku_cache WHERE company_id = ?").run(companyId);
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        code: row.internalSkuCode != null ? String(row.internalSkuCode) : null,
-        name: row.productName != null ? String(row.productName) : null,
-        status: row.status != null ? String(row.status) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  replaceTx(all);
-  setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });
-  return { mode: "full", total: all.length };
-}
+  `, { company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});await setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });return { mode: "full", total: all.length };}
 
 // 增量：since 固定（cursor 回退 1 秒）+ offset 翻页拉所有变化行。
 async function syncIncremental(companyId) {
-  const meta = getMeta(companyId);
-  if (!meta || !meta.cursor) return syncFull(companyId);
+  const meta = await getMeta(companyId);
+  if (!meta || !meta.cursor) return await syncFull(companyId);
   const since = shiftBack1s(meta.cursor);
   let offset = 0;
   let cursor = meta.cursor;
@@ -345,8 +345,8 @@ async function syncIncremental(companyId) {
     if (!skus.length) break;
     const toUpsert = skus.filter((row) => row.status !== "deleted");
     const toDelete = skus.filter((row) => row.status === "deleted").map((row) => row.id);
-    upsertSkus(companyId, toUpsert);
-    deleteSkus(companyId, toDelete);
+    await upsertSkus(companyId, toUpsert);
+    await deleteSkus(companyId, toDelete);
     upserted += toUpsert.length;
     deleted += toDelete.length;
     for (const row of skus) {
@@ -355,7 +355,7 @@ async function syncIncremental(companyId) {
     if (skus.length < INCR_PAGE) break;
     offset += INCR_PAGE;
   }
-  setMeta(companyId, { cursor, lastSyncAt: nowIso() });
+  await setMeta(companyId, { cursor, lastSyncAt: nowIso() });
   return { mode: "incremental", upserted, deleted };
 }
 
@@ -370,11 +370,11 @@ async function reconcileDeletes(companyId) {
   }
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true }; // 防御：空集不敢全删
-  const db = openCacheDb();
-  const localIds = db.prepare("SELECT id FROM sku_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
+  const db = await openCacheDb();
+  const localIds = (await queryAll(db, "SELECT id FROM sku_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
-  deleteSkus(companyId, stale);
-  setMeta(companyId, { lastReconcileAt: nowIso() });
+  await deleteSkus(companyId, stale);
+  await setMeta(companyId, { lastReconcileAt: nowIso() });
   return { reconciled: stale.length };
 }
 
@@ -382,9 +382,9 @@ async function reconcileDeletes(companyId) {
 function withLock(companyId, key, fn) {
   const lockKey = `${companyId}:${key}`;
   if (syncLocks.has(lockKey)) return syncLocks.get(lockKey);
-  const promise = Promise.resolve()
-    .then(fn)
-    .finally(() => syncLocks.delete(lockKey));
+  const promise = Promise.resolve().
+  then(fn).
+  finally(() => syncLocks.delete(lockKey));
   syncLocks.set(lockKey, promise);
   return promise;
 }
@@ -408,20 +408,20 @@ async function triggerReconcile(options = {}) {
   if (!companyId) return { skipped: true, reason: "no-company" };
   const runtime = clientRuntime.getRuntimeStatus();
   if (runtime.mode !== "client" || !runtime.serverUrl) return { skipped: true, reason: "not-client" };
-  return withLock(companyId, "reconcile", () => reconcileDeletes(companyId));
+  return withLock(companyId, "reconcile", async () => await reconcileDeletes(companyId));
 }
 
-function getCacheStatus(options = {}) {
+async function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, count: 0, populated: false };
   let count = 0;
   try {
-    const db = openCacheDb();
-    count = db.prepare("SELECT COUNT(*) AS c FROM sku_cache WHERE company_id = ? AND status != 'deleted'").get(companyId).c;
+    const db = await openCacheDb();
+    count = (await queryOne(db, "SELECT COUNT(*) AS c FROM sku_cache WHERE company_id = ? AND status != 'deleted'", [companyId])).c;
   } catch {
     return { companyId, count: 0, populated: false };
   }
-  const meta = getMeta(companyId);
+  const meta = await getMeta(companyId);
   return {
     companyId,
     count,
@@ -430,7 +430,7 @@ function getCacheStatus(options = {}) {
     lastFullAt: meta?.last_full_at || null,
     lastSyncAt: meta?.last_sync_at || null,
     lastReconcileAt: meta?.last_reconcile_at || null,
-    syncing: syncLocks.has(`${companyId}:sync`),
+    syncing: syncLocks.has(`${companyId}:sync`)
   };
 }
 
@@ -443,5 +443,5 @@ module.exports = {
   isCachePopulated,
   triggerSync,
   triggerReconcile,
-  getCacheStatus,
+  getCacheStatus
 };

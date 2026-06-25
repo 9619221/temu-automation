@@ -2,12 +2,13 @@
 // 选品广场云端读取 service：读 yunqi_products.db（服务器抓取服务写入的云端库），供 lanServer 端点调用。
 // 用 better-sqlite3（erp 服务进程已在用，ABI 匹配服务器 node；sqlite 文件格式标准，能读抓取服务用 node:sqlite 建的库）。
 const Database = require("better-sqlite3");
+const { queryAll, queryOne, execute, getTableColumns, tableExists } = require("../../db/connection.cjs");
 
 const YUNQI_DB = process.env.YUNQI_DB || "/opt/temu-erp-data/yunqi_products.db";
 const SELECTION_STATUSES = ["want", "sourcing", "sourced", "listing", "listed", "dropped"];
 
 let _db = null;
-function db() {
+async function db() {
   if (_db) return _db;
   _db = new Database(YUNQI_DB);
   _db.pragma("busy_timeout = 8000");
@@ -26,8 +27,8 @@ function db() {
     CREATE INDEX IF NOT EXISTS idx_sel_account ON selection_pool(account_id);
   `);
   try {
-    const cols = _db.prepare("PRAGMA table_info(selection_pool)").all();
-    if (cols.length && !cols.some(c => c.name === "account_id")) {
+    const cols = (await getTableColumns(_db, "selection_pool")).map(name => ({ name }));
+    if (cols.length && !cols.some((c) => c.name === "account_id")) {
       _db.exec(`
         ALTER TABLE selection_pool RENAME TO _selection_pool_old;
         CREATE TABLE selection_pool (
@@ -56,15 +57,15 @@ function db() {
   return _db;
 }
 
-function buildCategoryPath(optIds) {
+async function buildCategoryPath(optIds) {
   if (!Array.isArray(optIds) || !optIds.length) return "";
-  const d = db();
+  const d = await db();
   const ids = optIds.map(String);
-  const rows = d.prepare(`SELECT cat_id, cat_name, cat_level, parent_cat_id FROM categories WHERE cat_id IN (${ids.map(() => "?").join(",")})`).all(...ids);
+  const rows = await queryAll(d, `SELECT cat_id, cat_name, cat_level, parent_cat_id FROM categories WHERE cat_id IN (${ids.map(() => "?").join(",")})`, [...ids]);
   if (!rows.length) return "";
   const byId = Object.fromEntries(rows.map((r) => [String(r.cat_id), r]));
   const parts = [];
-  for (const id of ids) { const r = byId[id]; if (r) parts.push(r.cat_name); }
+  for (const id of ids) {const r = byId[id];if (r) parts.push(r.cat_name);}
   return parts.join(">");
 }
 
@@ -73,16 +74,16 @@ function buildCategoryPath(optIds) {
 // 搜索重建一次，平时仅多一次主键 MAX 检查。重建为 DROP+CREATE AS SELECT，单进程同步无并发。
 let _latestMaxId = null;
 let _ftsReady = false;
-function ensureLatest(d) {
+async function ensureLatest(d) {
   let curMax;
-  try { curMax = d.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM products").get().m; }
-  catch { return false; } // products 表尚未就绪
-  const exists = d.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='products_latest'").get();
+  try {curMax = (await queryOne(d, "SELECT COALESCE(MAX(id), 0) AS m FROM products")).m;}
+  catch {return false;} // products 表尚未就绪
+  const exists = await tableExists(d, "products_latest");
   if (exists && _latestMaxId === curMax) return true;
   d.exec("DROP TABLE IF EXISTS products_latest");
   d.exec("CREATE TABLE products_latest AS SELECT p.* FROM products p WHERE p.id IN (SELECT MAX(id) FROM products GROUP BY goods_id)");
   for (const col of ["daily_sales", "weekly_sales", "monthly_sales", "total_sales", "usd_price", "usd_gmv", "score", "total_comments", "mall_mode"]) {
-    try { d.exec(`CREATE INDEX IF NOT EXISTS idx_pl_${col} ON products_latest(${col})`); } catch { /* 列缺失则跳过 */ }
+    try {d.exec(`CREATE INDEX IF NOT EXISTS idx_pl_${col} ON products_latest(${col})`);} catch {/* 列缺失则跳过 */}
   }
   // FTS5 trigram 全文搜索索引：替代 LIKE '%关键词%' 全表扫描
   _ftsReady = false;
@@ -91,14 +92,14 @@ function ensureLatest(d) {
     d.exec("CREATE VIRTUAL TABLE products_fts USING fts5(title_zh, title_en, category_zh, tokenize='trigram')");
     d.exec("INSERT INTO products_fts(rowid, title_zh, title_en, category_zh) SELECT id, COALESCE(title_zh,''), COALESCE(title_en,''), COALESCE(category_zh,'') FROM products_latest");
     _ftsReady = true;
-  } catch { /* FTS5 不可用则降级到 LIKE */ }
+  } catch {/* FTS5 不可用则降级到 LIKE */}
   _latestMaxId = curMax;
   return true;
 }
 
 // 商品搜索：查 products_latest(每商品最新一行) + 筛选/排序/分页
-function searchProducts(params = {}) {
-  const d = db();
+async function searchProducts(params = {}) {
+  const d = await db();
   const { keyword = "", category = "", optId = "", mallMode = "", minPrice = null, maxPrice = null, minDailySales = null, sortBy = "daily_sales", sortOrder = "DESC", page = 1, pageSize = 24 } = params || {};
   const conds = [];
   const vals = [];
@@ -113,7 +114,7 @@ function searchProducts(params = {}) {
   }
   // optId：真·按类目筛。商品 opt_ids 存为 JSON 如 ["580","1099","2708"]，选「汽车(580)」即筛 opt_ids 含 580。
   // 带引号匹配（%"580"%）防 580 误中 5801；选一级筛全部子类商品（子类商品 opt_ids 也含一级 id）。
-  if (optId) { conds.push("opt_ids LIKE ?"); vals.push(`%"${optId}"%`); }
+  if (optId) {conds.push("opt_ids LIKE ?");vals.push(`%"${optId}"%`);}
   // category：保留「按词筛标题」兜底（无 opt_id 时输入"厨房/充电"筛标题）
   if (category) {
     if (_ftsReady) {
@@ -124,10 +125,10 @@ function searchProducts(params = {}) {
       vals.push(`%${category}%`, `%${category}%`, `%${category}%`);
     }
   }
-  if (mallMode) { conds.push("mall_mode = ?"); vals.push(mallMode); }
-  if (minPrice != null && minPrice !== "") { conds.push("usd_price >= ?"); vals.push(Number(minPrice)); }
-  if (maxPrice != null && maxPrice !== "") { conds.push("usd_price <= ?"); vals.push(Number(maxPrice)); }
-  if (minDailySales != null && minDailySales !== "") { conds.push("daily_sales >= ?"); vals.push(Number(minDailySales)); }
+  if (mallMode) {conds.push("mall_mode = ?");vals.push(mallMode);}
+  if (minPrice != null && minPrice !== "") {conds.push("usd_price >= ?");vals.push(Number(minPrice));}
+  if (maxPrice != null && maxPrice !== "") {conds.push("usd_price <= ?");vals.push(Number(maxPrice));}
+  if (minDailySales != null && minDailySales !== "") {conds.push("daily_sales >= ?");vals.push(Number(minDailySales));}
 
   const allowedSort = ["daily_sales", "weekly_sales", "monthly_sales", "total_sales", "usd_price", "usd_gmv", "score", "total_comments"];
   const sort = allowedSort.includes(sortBy) ? sortBy : "daily_sales";
@@ -138,61 +139,61 @@ function searchProducts(params = {}) {
 
   // 查物化表 products_latest（去重已在重建时算好，搜索免每次全表去重）。
   // ensureLatest 据 products.MAX(id) 惰性重建：抓取后首次搜索重建一次，之后命中。
-  if (ensureLatest(d)) {
+  if (await ensureLatest(d)) {
     let base = "FROM products_latest";
     if (conds.length) base += " WHERE " + conds.join(" AND ");
-    const total = d.prepare(`SELECT COUNT(*) AS c ${base}`).get(...vals).c;
-    const items = d.prepare(`SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`).all(...vals, pSize, offset);
+    const total = (await queryOne(d, `SELECT COUNT(*) AS c ${base}`, [...vals])).c;
+    const items = await queryAll(d, `SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`, [...vals, pSize, offset]);
     return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
   }
   // 兜底：products 表尚未就绪、物化表建不出来时，回退原全表去重写法。
   let base = "FROM products WHERE id IN (SELECT MAX(id) FROM products GROUP BY goods_id)";
   if (conds.length) base += " AND " + conds.join(" AND ");
-  const total = d.prepare(`SELECT COUNT(*) AS c ${base}`).get(...vals).c;
-  const items = d.prepare(`SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`).all(...vals, pSize, offset);
+  const total = (await queryOne(d, `SELECT COUNT(*) AS c ${base}`, [...vals])).c;
+  const items = await queryAll(d, `SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`, [...vals, pSize, offset]);
   return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
 }
 
-function getStats() {
-  const d = db();
-  const s = d.prepare("SELECT COUNT(DISTINCT goods_id) AS totalProducts, COUNT(DISTINCT mall_id) AS totalMalls FROM products").get();
+async function getStats() {
+  const d = await db();
+  const s = await queryOne(d, "SELECT COUNT(DISTINCT goods_id) AS totalProducts, COUNT(DISTINCT mall_id) AS totalMalls FROM products");
   return { totalProducts: s.totalProducts || 0, totalMalls: s.totalMalls || 0 };
 }
 
-function getInfo() {
-  const d = db();
-  const n = d.prepare("SELECT COUNT(DISTINCT goods_id) AS c FROM products").get().c;
+async function getInfo() {
+  const d = await db();
+  const n = (await queryOne(d, "SELECT COUNT(DISTINCT goods_id) AS c FROM products")).c;
   return { dbPath: YUNQI_DB, rowCount: n || 0 };
 }
 
 // ---- 选品池 ----
-function listSelection({ status = "", accountId = "" } = {}) {
-  const d = db();
+async function listSelection({ status = "", accountId = "" } = {}) {
+  const d = await db();
   const aid = String(accountId || "");
-  const rows = (status && SELECTION_STATUSES.includes(status))
-    ? d.prepare("SELECT * FROM selection_pool WHERE account_id = ? AND status = ? ORDER BY added_at DESC").all(aid, status)
-    : d.prepare("SELECT * FROM selection_pool WHERE account_id = ? ORDER BY added_at DESC").all(aid);
-  const summary = { total: d.prepare("SELECT COUNT(*) AS c FROM selection_pool WHERE account_id = ?").get(aid).c };
+  const rows = status && SELECTION_STATUSES.includes(status) ? await queryAll(d,
+  "SELECT * FROM selection_pool WHERE account_id = ? AND status = ? ORDER BY added_at DESC", [aid, status]) : await queryAll(d,
+  "SELECT * FROM selection_pool WHERE account_id = ? ORDER BY added_at DESC", [aid]);
+  const summary = { total: (await queryOne(d, "SELECT COUNT(*) AS c FROM selection_pool WHERE account_id = ?", [aid])).c };
   for (const s of SELECTION_STATUSES) summary[s] = 0;
-  for (const r of d.prepare("SELECT status, COUNT(*) AS c FROM selection_pool WHERE account_id = ? GROUP BY status").all(aid)) { if (r.status) summary[r.status] = r.c; }
+  for (const r of await queryAll(d, "SELECT status, COUNT(*) AS c FROM selection_pool WHERE account_id = ? GROUP BY status", [aid])) {if (r.status) summary[r.status] = r.c;}
   return { rows, summary };
 }
 
-function listSelectionIds(accountId = "") {
+async function listSelectionIds(accountId = "") {
   const aid = String(accountId || "");
-  return db().prepare("SELECT goods_id FROM selection_pool WHERE account_id = ?").all(aid).map((r) => String(r.goods_id));
+  return (await queryAll(await db(), "SELECT goods_id FROM selection_pool WHERE account_id = ?", [aid])).map((r) => String(r.goods_id));
 }
 
-function addSelection(item = {}) {
+async function addSelection(item = {}) {
   const goodsId = String(item?.goods_id || item?.goodsId || "").trim();
   if (!goodsId) return { ok: false, reason: "缺少 goods_id" };
-  const d = db();
+  const d = await db();
   const now = new Date().toISOString();
-  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const num = (v) => {const n = Number(v);return Number.isFinite(n) ? n : 0;};
   const optIds = Array.isArray(item.opt_ids) ? item.opt_ids : [];
-  const backCat = String(item.backend_category || "") || buildCategoryPath(optIds) || String(item.category_zh || "");
+  const backCat = String(item.backend_category || "") || await buildCategoryPath(optIds) || String(item.category_zh || "");
   const aid = String(item.accountId || item.account_id || "");
-  d.prepare(`
+  await execute(d, `
     INSERT INTO selection_pool (account_id, goods_id, sku_id, title_zh, title_en, main_image, product_url, usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score, category_zh, mall_name, mall_mode, backend_category, status, note, source_keyword, added_at, updated_at)
     VALUES (@account_id,@goods_id,@sku_id,@title_zh,@title_en,@main_image,@product_url,@usd_price,@daily_sales,@weekly_sales,@monthly_sales,@usd_gmv,@score,@category_zh,@mall_name,@mall_mode,@backend_category,@status,@note,@source_keyword,@added_at,@updated_at)
     ON CONFLICT(account_id, goods_id) DO UPDATE SET
@@ -200,44 +201,44 @@ function addSelection(item = {}) {
       usd_price=excluded.usd_price, daily_sales=excluded.daily_sales, weekly_sales=excluded.weekly_sales,
       monthly_sales=excluded.monthly_sales, usd_gmv=excluded.usd_gmv, score=excluded.score,
       mall_name=excluded.mall_name, mall_mode=excluded.mall_mode, backend_category=excluded.backend_category, updated_at=excluded.updated_at
-  `).run({
+  `, {
     account_id: aid, goods_id: goodsId, sku_id: String(item.sku_id || ""), title_zh: String(item.title_zh || ""), title_en: String(item.title_en || ""),
     main_image: String(item.main_image || ""), product_url: String(item.product_url || `https://www.temu.com/goods.html?goods_id=${goodsId}`),
     usd_price: num(item.usd_price), daily_sales: num(item.daily_sales), weekly_sales: num(item.weekly_sales), monthly_sales: num(item.monthly_sales),
     usd_gmv: num(item.usd_gmv), score: num(item.score), category_zh: String(item.category_zh || ""), mall_name: String(item.mall_name || ""), mall_mode: String(item.mall_mode || ""),
     backend_category: backCat,
     status: SELECTION_STATUSES.includes(item.status) ? item.status : "want", note: String(item.note || ""), source_keyword: String(item.source_keyword || ""),
-    added_at: now, updated_at: now,
+    added_at: now, updated_at: now
   });
   return { ok: true, goodsId };
 }
 
-function removeSelection(goodsId, accountId = "") {
+async function removeSelection(goodsId, accountId = "") {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
   const aid = String(accountId || "");
-  const r = db().prepare("DELETE FROM selection_pool WHERE account_id = ? AND goods_id = ?").run(aid, id);
+  const r = await execute(await db(), "DELETE FROM selection_pool WHERE account_id = ? AND goods_id = ?", [aid, id]);
   return { ok: true, removed: r.changes };
 }
 
-function updateSelection(goodsId, { status, note, accountId = "" } = {}) {
+async function updateSelection(goodsId, { status, note, accountId = "" } = {}) {
   const id = String(goodsId || "").trim();
   if (!id) return { ok: false };
   const aid = String(accountId || "");
   const sets = [];
   const obj = { goods_id: id, account_id: aid, updated_at: new Date().toISOString() };
-  if (status != null && SELECTION_STATUSES.includes(status)) { sets.push("status = @status"); obj.status = status; }
-  if (note != null) { sets.push("note = @note"); obj.note = String(note); }
+  if (status != null && SELECTION_STATUSES.includes(status)) {sets.push("status = @status");obj.status = status;}
+  if (note != null) {sets.push("note = @note");obj.note = String(note);}
   if (!sets.length) return { ok: false, reason: "无可更新字段" };
   sets.push("updated_at = @updated_at");
-  const r = db().prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE account_id = @account_id AND goods_id = @goods_id`).run(obj);
+  const r = await execute(await db(), `UPDATE selection_pool SET ${sets.join(", ")} WHERE account_id = @account_id AND goods_id = @goods_id`, obj);
   return { ok: true, changed: r.changes };
 }
 
 // 类目树（gettemucategorieslist 抓来存的），前端分类下拉用
-function listCategories() {
-  try { return db().prepare("SELECT cat_id, cat_name, cat_en_name, cat_level, parent_cat_id, is_leaf FROM categories ORDER BY cat_level, cat_id").all(); }
-  catch { return []; }
+async function listCategories() {
+  try {return await queryAll(await db(), "SELECT cat_id, cat_name, cat_en_name, cat_level, parent_cat_id, is_leaf FROM categories ORDER BY cat_level, cat_id");}
+  catch {return [];}
 }
 
 module.exports = { searchProducts, getStats, getInfo, listSelection, listSelectionIds, addSelection, removeSelection, updateSelection, listCategories };

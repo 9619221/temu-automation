@@ -1,6 +1,7 @@
 const fs = require("fs");
 const crypto = require("crypto");
 const { createId, nowIso } = require("./utils.cjs");
+const { execute, withTransaction} = require("../../db/connection.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const DEFAULT_PLATFORM_SHOP_ID = "unknown";
@@ -57,9 +58,9 @@ function normalizeDate(value) {
 }
 
 function getStatDate(payload, salesData) {
-  return normalizeDate(payload.statDate || payload.stat_date)
-    || normalizeDate(salesData?.syncedAt || salesData?.synced_at)
-    || formatLocalDate(new Date());
+  return normalizeDate(payload.statDate || payload.stat_date) ||
+  normalizeDate(salesData?.syncedAt || salesData?.synced_at) ||
+  formatLocalDate(new Date());
 }
 
 function isObject(value) {
@@ -68,10 +69,10 @@ function isObject(value) {
 
 function isSalesDataShape(value) {
   return isObject(value) && (
-    Object.prototype.hasOwnProperty.call(value, "items")
-    || Object.prototype.hasOwnProperty.call(value, "summary")
-    || Object.prototype.hasOwnProperty.call(value, "syncedAt")
-  );
+  Object.prototype.hasOwnProperty.call(value, "items") ||
+  Object.prototype.hasOwnProperty.call(value, "summary") ||
+  Object.prototype.hasOwnProperty.call(value, "syncedAt"));
+
 }
 
 function unwrapSalesData(value) {
@@ -101,11 +102,11 @@ class TemuSalesBridge {
   constructor({ db }) {
     if (!db) throw new Error("TemuSalesBridge requires db");
     this.db = db;
-    this.prepareStatements();
+    this.prepareSqlStrings();
   }
 
-  prepareStatements() {
-    this.upsertShopStmt = this.db.prepare(`
+  prepareSqlStrings() {
+    this.upsertShopSql = `
       INSERT INTO erp_temu_sales_shop (
         id, company_id, platform_shop_id, shop_name, erp_shop_id, currency,
         stat_date, quality_score_lt60, quality_score_60_70,
@@ -130,8 +131,8 @@ class TemuSalesBridge {
         today_sales_amount = excluded.today_sales_amount,
         raw_json = excluded.raw_json,
         updated_at = excluded.updated_at
-    `);
-    this.upsertSkuStmt = this.db.prepare(`
+    `;
+    this.upsertSkuSql = `
       INSERT INTO erp_temu_sales_sku (
         id, company_id, platform_shop_id, shop_name, sys_product_code,
         sys_style_code, product_name, product_category, local_stock,
@@ -172,8 +173,8 @@ class TemuSalesBridge {
         add_cart_total = excluded.add_cart_total,
         raw_json = excluded.raw_json,
         updated_at = excluded.updated_at
-    `);
-    this.insertRunStmt = this.db.prepare(`
+    `;
+    this.insertRunSql = `
       INSERT INTO erp_temu_robot_sync_runs (
         id, company_id, robot_key, shop_count, sku_count, price_log_count,
         status, error, started_at, finished_at
@@ -182,8 +183,8 @@ class TemuSalesBridge {
         @id, @company_id, @robot_key, 0, 0, 0,
         'running', NULL, @started_at, NULL
       )
-    `);
-    this.updateRunStmt = this.db.prepare(`
+    `;
+    this.updateRunSql = `
       UPDATE erp_temu_robot_sync_runs
       SET shop_count = @shop_count,
           sku_count = @sku_count,
@@ -192,7 +193,7 @@ class TemuSalesBridge {
           error = @error,
           finished_at = @finished_at
       WHERE id = @id
-    `);
+    `;
   }
 
   resolveSalesData(payload) {
@@ -218,7 +219,7 @@ class TemuSalesBridge {
       today_sales_amount: 0,
       raw_json: stringify(summary),
       created_at: now,
-      updated_at: now,
+      updated_at: now
     };
   }
 
@@ -253,15 +254,15 @@ class TemuSalesBridge {
       stat_date_end: statDate,
       raw_json: stringify(item),
       created_at: now,
-      updated_at: now,
+      updated_at: now
     };
   }
 
-  sync(payload = {}, actor = {}) {
+  async sync(payload = {}, actor = {}) {
     const companyId = optionalString(payload.companyId || payload.company_id) || DEFAULT_COMPANY_ID;
-    const platformShopId = optionalString(payload.shopId || payload.shop_id)
-      || optionalString(payload.accountId || payload.account_id)
-      || DEFAULT_PLATFORM_SHOP_ID;
+    const platformShopId = optionalString(payload.shopId || payload.shop_id) ||
+    optionalString(payload.accountId || payload.account_id) ||
+    DEFAULT_PLATFORM_SHOP_ID;
     const shopName = optionalString(payload.shopName || payload.shop_name) || null;
     const now = nowIso();
     const runId = createId("temu_sales_run");
@@ -277,14 +278,14 @@ class TemuSalesBridge {
       skippedCount: 0,
       errors: [],
       startedAt: now,
-      finishedAt: null,
+      finishedAt: null
     };
 
-    this.insertRunStmt.run({
+    await execute(this.db, this.insertRunSql, {
       id: runId,
       company_id: companyId,
       robot_key: ROBOT_KEY,
-      started_at: now,
+      started_at: now
     });
 
     try {
@@ -292,59 +293,59 @@ class TemuSalesBridge {
       const statDate = getStatDate(payload, salesData);
       const summary = isObject(salesData.summary) ? salesData.summary : {};
       const items = Array.isArray(salesData.items) ? salesData.items : [];
-      stats.statDate = statDate;
+      stats.statDate = statDate;await withTransaction(this.db,
 
-      const run = this.db.transaction(() => {
-        this.upsertShopStmt.run(this.buildShopRow({
-          companyId,
-          platformShopId,
-          shopName,
-          statDate,
-          summary,
-          now,
-        }));
-        stats.shopCount = 1;
+        async (txDb) => {
+          await execute(this.db, this.upsertShopSql, this.buildShopRow({
+            companyId,
+            platformShopId,
+            shopName,
+            statDate,
+            summary,
+            now
+          }));
+          stats.shopCount = 1;
 
-        items.forEach((item, index) => {
-          try {
-            const row = this.buildSkuRow({ companyId, platformShopId, shopName, statDate, item, now });
-            if (!row) {
-              addError(stats, `items[${index}] missing skuCode/skcId`);
-              return;
+          for (let index = 0; index < items.length; index++) {
+            try {
+              const row = this.buildSkuRow({ companyId, platformShopId, shopName, statDate, item: items[index], now });
+              if (!row) {
+                addError(stats, `items[${index}] missing skuCode/skcId`);
+                continue;
+              }
+              await execute(this.db, this.upsertSkuSql, row);
+              stats.skuCount += 1;
+            } catch (error) {
+              addError(stats, `items[${index}] ${error?.message || String(error)}`);
             }
-            this.upsertSkuStmt.run(row);
-            stats.skuCount += 1;
-          } catch (error) {
-            addError(stats, `items[${index}] ${error?.message || String(error)}`);
           }
+
+          stats.finishedAt = nowIso();
+          await execute(this.db, this.updateRunSql, {
+            id: runId,
+            shop_count: stats.shopCount,
+            sku_count: stats.skuCount,
+            price_log_count: stats.priceLogCount,
+            status: "success",
+            error: errorRemark(stats),
+            finished_at: stats.finishedAt
+          });
         });
 
-        stats.finishedAt = nowIso();
-        this.updateRunStmt.run({
-          id: runId,
-          shop_count: stats.shopCount,
-          sku_count: stats.skuCount,
-          price_log_count: stats.priceLogCount,
-          status: "success",
-          error: errorRemark(stats),
-          finished_at: stats.finishedAt,
-        });
-      });
 
-      run();
       return stats;
     } catch (error) {
       const message = error?.message || String(error);
       stats.finishedAt = nowIso();
       try {
-        this.updateRunStmt.run({
+        await execute(this.db, this.updateRunSql, {
           id: runId,
           shop_count: stats.shopCount,
           sku_count: stats.skuCount,
           price_log_count: stats.priceLogCount,
           status: "failed",
           error: message.slice(0, 2000),
-          finished_at: stats.finishedAt,
+          finished_at: stats.finishedAt
         });
       } catch {}
       throw error;
@@ -356,5 +357,5 @@ module.exports = {
   TemuSalesBridge,
   DEFAULT_COMPANY_ID,
   DEFAULT_PLATFORM_SHOP_ID,
-  ROBOT_KEY,
+  ROBOT_KEY
 };

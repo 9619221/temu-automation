@@ -149,7 +149,7 @@ function buildBatchCode(receiptNo, lineId, index) {
   return `${safeReceiptNo}-B${String(index + 1).padStart(2, "0")}-${safeLine}`;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sourceDir = args._[0] || process.cwd();
   const dryRun = Boolean(args.dry);
@@ -167,7 +167,7 @@ function main() {
   const db = openErpDatabase(dbOptions);
   db.pragma("busy_timeout = 60000");
   try {
-    runMigrations({ db });
+    await runMigrations({ db });
     const now = new Date().toISOString();
     const receipts = db.prepare(`
       SELECT *

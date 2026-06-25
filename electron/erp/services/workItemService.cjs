@@ -2,8 +2,9 @@ const {
   ERP_ROLES,
   WORK_ITEM_PRIORITY: PRIORITY,
   WORK_ITEM_STATUS: STATUS,
-  WORK_ITEM_TYPE: TYPE,
+  WORK_ITEM_TYPE: TYPE
 } = require("../workflow/enums.cjs");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 const { createId, nowIso } = require("./utils.cjs");
 
 const FINAL_STATUSES = new Set([STATUS.DONE, STATUS.DISMISSED]);
@@ -25,9 +26,9 @@ function formatSku(row) {
 }
 
 function compactEvidence(items) {
-  return items
-    .filter((item) => item !== null && item !== undefined && String(item).trim() !== "")
-    .map((item) => String(item));
+  return items.
+  filter((item) => item !== null && item !== undefined && String(item).trim() !== "").
+  map((item) => String(item));
 }
 
 function normalizeStatus(value) {
@@ -64,7 +65,7 @@ function pushTask(tasks, input) {
     skuId: input.skuId || null,
     dueAt: input.dueAt || null,
     sourceRule: input.sourceRule,
-    dedupeKey: input.dedupeKey,
+    dedupeKey: input.dedupeKey
   });
 }
 
@@ -74,8 +75,8 @@ class WorkItemService {
     this.db = db;
   }
 
-  writeEvent(input = {}) {
-    this.db.prepare(`
+  async writeEvent(input = {}) {
+    await execute(this.db, `
       INSERT INTO erp_work_item_events (
         id, account_id, work_item_id, action, from_status, to_status,
         actor_id, actor_role, remark, created_at
@@ -84,7 +85,7 @@ class WorkItemService {
         @id, @account_id, @work_item_id, @action, @from_status, @to_status,
         @actor_id, @actor_role, @remark, @created_at
       )
-    `).run({
+    `, {
       id: createId("wie"),
       account_id: input.accountId,
       work_item_id: input.workItemId,
@@ -94,14 +95,14 @@ class WorkItemService {
       actor_id: input.actor?.id || null,
       actor_role: input.actor?.role || null,
       remark: optionalString(input.remark),
-      created_at: nowIso(),
+      created_at: nowIso()
     });
   }
 
-  list(params = {}) {
+  async list(params = {}) {
     const clauses = ["1 = 1"];
     const values = {
-      limit: normalizeLimit(params.limit),
+      limit: normalizeLimit(params.limit)
     };
     if (params.accountId) {
       clauses.push("wi.account_id = @account_id");
@@ -123,7 +124,7 @@ class WorkItemService {
       clauses.push("wi.status NOT IN ('done', 'dismissed')");
     }
 
-    return this.db.prepare(`
+    return await queryAll(this.db, `
       SELECT
         wi.*,
         acct.name AS account_name,
@@ -156,10 +157,10 @@ class WorkItemService {
         COALESCE(wi.due_at, '9999-12-31') ASC,
         wi.updated_at DESC
       LIMIT @limit
-    `).all(values);
+    `, [values]);
   }
 
-  getStats(params = {}) {
+  async getStats(params = {}) {
     const clauses = ["1 = 1"];
     const values = {};
     if (params.accountId) {
@@ -181,18 +182,18 @@ class WorkItemService {
     if (params.activeOnly) {
       clauses.push("status NOT IN ('done', 'dismissed')");
     }
-    const rows = this.db.prepare(`
+    const rows = await queryAll(this.db, `
       SELECT owner_role, status, priority, COUNT(*) AS count
       FROM erp_work_items
       WHERE ${clauses.join(" AND ")}
       GROUP BY owner_role, status, priority
-    `).all(values);
+    `, [values]);
     const stats = {
       total: 0,
       active: 0,
       byOwnerRole: {},
       byStatus: {},
-      byPriority: {},
+      byPriority: {}
     };
     for (const row of rows) {
       const count = Number(row.count || 0);
@@ -205,48 +206,48 @@ class WorkItemService {
     return stats;
   }
 
-  updateStatus(id, statusInput, actor = {}, remark = "") {
+  async updateStatus(id, statusInput, actor = {}, remark = "") {
     const status = normalizeStatus(statusInput);
-    const before = this.db.prepare("SELECT * FROM erp_work_items WHERE id = ?").get(id);
+    const before = await queryOne(this.db, "SELECT * FROM erp_work_items WHERE id = ?", [id]);
     if (!before) throw new Error(`Work item not found: ${id}`);
 
     const now = nowIso();
-    this.db.prepare(`
+    await execute(this.db, `
       UPDATE erp_work_items
       SET status = @status,
           updated_at = @updated_at,
           resolved_at = @resolved_at
       WHERE id = @id
-    `).run({
+    `, {
       id,
       status,
       updated_at: now,
-      resolved_at: FINAL_STATUSES.has(status) ? now : null,
+      resolved_at: FINAL_STATUSES.has(status) ? now : null
     });
 
-    const after = this.db.prepare("SELECT * FROM erp_work_items WHERE id = ?").get(id);
-    this.writeEvent({
+    const after = await queryOne(this.db, "SELECT * FROM erp_work_items WHERE id = ?", [id]);
+    await this.writeEvent({
       accountId: after.account_id,
       workItemId: after.id,
       action: "update_status",
       fromStatus: before.status,
       toStatus: after.status,
       actor,
-      remark,
+      remark
     });
     return after;
   }
 
-  upsertGeneratedTask(task, actor) {
+  async upsertGeneratedTask(task, actor) {
     const now = nowIso();
-    const existing = this.db.prepare(`
+    const existing = await queryOne(this.db, `
       SELECT *
       FROM erp_work_items
       WHERE account_id = @account_id AND dedupe_key = @dedupe_key
       LIMIT 1
-    `).get({
+    `, {
       account_id: task.accountId,
-      dedupe_key: task.dedupeKey,
+      dedupe_key: task.dedupeKey
     });
 
     if (existing && FINAL_STATUSES.has(existing.status)) {
@@ -270,10 +271,10 @@ class WorkItemService {
       dedupe_key: task.dedupeKey,
       source_rule: task.sourceRule,
       created_at: existing?.created_at || now,
-      updated_at: now,
+      updated_at: now
     };
 
-    this.db.prepare(`
+    await execute(this.db, `
       INSERT INTO erp_work_items (
         id, account_id, type, priority, status, owner_role, owner_user_id,
         title, evidence_json, related_doc_type, related_doc_id, sku_id,
@@ -297,79 +298,79 @@ class WorkItemService {
         due_at = excluded.due_at,
         source_rule = excluded.source_rule,
         updated_at = excluded.updated_at
-    `).run(payload);
+    `, [payload]);
 
-    const item = this.db.prepare("SELECT * FROM erp_work_items WHERE id = ?").get(payload.id);
+    const item = await queryOne(this.db, "SELECT * FROM erp_work_items WHERE id = ?", [payload.id]);
     if (!existing) {
-      this.writeEvent({
+      await this.writeEvent({
         accountId: item.account_id,
         workItemId: item.id,
         action: "generated",
         fromStatus: null,
         toStatus: item.status,
         actor,
-        remark: task.sourceRule,
+        remark: task.sourceRule
       });
       return { action: "created", item };
     }
     return { action: "updated", item };
   }
 
-  resolveStaleGeneratedTasks(activeKeys, params = {}, actor = {}) {
+  async resolveStaleGeneratedTasks(activeKeys, params = {}, actor = {}) {
     const activeSet = new Set(activeKeys);
     const clauses = [
-      "source_rule LIKE @source_rule",
-      "status NOT IN ('done', 'dismissed')",
-    ];
+    "source_rule LIKE @source_rule",
+    "status NOT IN ('done', 'dismissed')"];
+
     const values = {
-      source_rule: `${GENERATED_RULE_PREFIX}%`,
+      source_rule: `${GENERATED_RULE_PREFIX}%`
     };
     if (params.accountId) {
       clauses.push("account_id = @account_id");
       values.account_id = params.accountId;
     }
 
-    const rows = this.db.prepare(`
+    const rows = await queryAll(this.db, `
       SELECT *
       FROM erp_work_items
       WHERE ${clauses.join(" AND ")}
-    `).all(values);
+    `, [values]);
 
     let resolved = 0;
     for (const row of rows) {
       if (activeSet.has(row.dedupe_key)) continue;
       const now = nowIso();
-      this.db.prepare(`
+      await execute(this.db, `
         UPDATE erp_work_items
         SET status = 'done',
             updated_at = @updated_at,
             resolved_at = @resolved_at
         WHERE id = @id
-      `).run({
+      `, {
         id: row.id,
         updated_at: now,
-        resolved_at: now,
+        resolved_at: now
       });
-      this.writeEvent({
+      await this.writeEvent({
         accountId: row.account_id,
         workItemId: row.id,
         action: "auto_resolved",
         fromStatus: row.status,
         toStatus: STATUS.DONE,
         actor,
-        remark: "Source document no longer matches the rule",
+        remark: "Source document no longer matches the rule"
       });
       resolved += 1;
     }
     return resolved;
   }
 
-  buildTasks(params = {}) {
-    const accountClause = (alias) => (params.accountId ? `AND ${alias}.account_id = @account_id` : "");
+  async buildTasks(params = {}) {
+    const accountClause = (alias) => params.accountId ? `AND ${alias}.account_id = @account_id` : "";
     const baseParams = { account_id: params.accountId || null };
     const tasks = [];
 
-    const purchaseRequests = this.db.prepare(`
+    const purchaseRequests = await queryAll(this.db, `
       SELECT
         pr.*,
         sku.internal_sku_code,
@@ -378,7 +379,7 @@ class WorkItemService {
       LEFT JOIN erp_skus sku ON sku.id = pr.sku_id
       WHERE pr.status IN ('submitted', 'buyer_processing')
         ${accountClause("pr")}
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of purchaseRequests) {
       if (row.status === "submitted") {
@@ -394,7 +395,7 @@ class WorkItemService {
           skuId: row.sku_id,
           dueAt: row.expected_arrival_date,
           sourceRule: "erp:purchase_request:submitted",
-          dedupeKey: `purchase_request:${row.id}:submitted`,
+          dedupeKey: `purchase_request:${row.id}:submitted`
         });
       }
       if (row.status === "buyer_processing") {
@@ -410,12 +411,12 @@ class WorkItemService {
           skuId: row.sku_id,
           dueAt: row.expected_arrival_date,
           sourceRule: "erp:purchase_request:buyer_processing",
-          dedupeKey: `purchase_request:${row.id}:buyer_processing`,
+          dedupeKey: `purchase_request:${row.id}:buyer_processing`
         });
       }
     }
 
-    const purchaseOrders = this.db.prepare(`
+    const purchaseOrders = await queryAll(this.db, `
       SELECT
         po.*,
         supplier.name AS supplier_name,
@@ -427,7 +428,7 @@ class WorkItemService {
       WHERE po.status IN ('draft', 'pending_finance_approval', 'approved_to_pay')
         ${accountClause("po")}
       GROUP BY po.id
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of purchaseOrders) {
       if (row.status === "draft") {
@@ -442,7 +443,7 @@ class WorkItemService {
           relatedDocId: row.id,
           dueAt: row.expected_delivery_date,
           sourceRule: "erp:purchase_order:draft",
-          dedupeKey: `purchase_order:${row.id}:draft_payment_submit`,
+          dedupeKey: `purchase_order:${row.id}:draft_payment_submit`
         });
       }
       if (row.status === "pending_finance_approval") {
@@ -457,7 +458,7 @@ class WorkItemService {
           relatedDocId: row.id,
           dueAt: row.expected_delivery_date,
           sourceRule: "erp:purchase_order:pending_finance_approval",
-          dedupeKey: `purchase_order:${row.id}:finance_approval`,
+          dedupeKey: `purchase_order:${row.id}:finance_approval`
         });
       }
       if (row.status === "approved_to_pay") {
@@ -472,12 +473,12 @@ class WorkItemService {
           relatedDocId: row.id,
           dueAt: row.expected_delivery_date,
           sourceRule: "erp:purchase_order:approved_to_pay",
-          dedupeKey: `purchase_order:${row.id}:confirm_paid`,
+          dedupeKey: `purchase_order:${row.id}:confirm_paid`
         });
       }
     }
 
-    const inboundReceipts = this.db.prepare(`
+    const inboundReceipts = await queryAll(this.db, `
       SELECT
         receipt.*,
         po.po_no,
@@ -496,7 +497,7 @@ class WorkItemService {
       WHERE receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')
         ${accountClause("receipt")}
       GROUP BY receipt.id
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of inboundReceipts) {
       const statusConfig = {
@@ -505,7 +506,7 @@ class WorkItemService {
         counted: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P1, "仓库待确认入库", "erp:inbound_receipt:counted"],
         quantity_mismatch: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库数量异常待处理", "erp:inbound_receipt:quantity_mismatch"],
         damaged: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库破损异常待处理", "erp:inbound_receipt:damaged"],
-        exception: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库异常待处理", "erp:inbound_receipt:exception"],
+        exception: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库异常待处理", "erp:inbound_receipt:exception"]
       }[row.status];
       if (!statusConfig) continue;
       const issueEvidence = [];
@@ -519,21 +520,21 @@ class WorkItemService {
         ownerRole: ERP_ROLES.WAREHOUSE,
         title: `${statusConfig[2]}：${row.receipt_no}`,
         evidence: [
-          `PO ${row.po_no || "-"}`,
-          `供应商 ${row.supplier_name || "-"}`,
-          `实收 ${row.received_qty || 0} / 应收 ${row.expected_qty || 0}`,
-          ...issueEvidence,
-          row.sku_summary || "",
-        ],
+        `PO ${row.po_no || "-"}`,
+        `供应商 ${row.supplier_name || "-"}`,
+        `实收 ${row.received_qty || 0} / 应收 ${row.expected_qty || 0}`,
+        ...issueEvidence,
+        row.sku_summary || ""],
+
         relatedDocType: "inbound_receipt",
         relatedDocId: row.id,
         dueAt: row.received_at,
         sourceRule: statusConfig[3],
-        dedupeKey: `inbound_receipt:${row.id}:${row.status}`,
+        dedupeKey: `inbound_receipt:${row.id}:${row.status}`
       });
     }
 
-    const pendingQcBatches = this.db.prepare(`
+    const pendingQcBatches = await queryAll(this.db, `
       SELECT
         batch.*,
         sku.internal_sku_code,
@@ -553,7 +554,7 @@ class WorkItemService {
       )
       WHERE (batch.qc_status = 'pending' OR qc.status IN ('pending_qc', 'in_progress'))
         ${accountClause("batch")}
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of pendingQcBatches) {
       pushTask(tasks, {
@@ -568,11 +569,11 @@ class WorkItemService {
         skuId: row.sku_id,
         dueAt: row.received_at,
         sourceRule: "erp:inventory_batch:pending_qc",
-        dedupeKey: `inventory_batch:${row.id}:pending_qc`,
+        dedupeKey: `inventory_batch:${row.id}:pending_qc`
       });
     }
 
-    const qcExceptions = this.db.prepare(`
+    const qcExceptions = await queryAll(this.db, `
       SELECT
         qc.*,
         batch.batch_code,
@@ -583,7 +584,7 @@ class WorkItemService {
       LEFT JOIN erp_skus sku ON sku.id = qc.sku_id
       WHERE qc.status IN ('failed', 'partial_passed', 'rework_required')
         ${accountClause("qc")}
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of qcExceptions) {
       const isFailed = row.status === "failed" || row.status === "rework_required";
@@ -598,11 +599,11 @@ class WorkItemService {
         relatedDocId: row.id,
         skuId: row.sku_id,
         sourceRule: `erp:qc_inspection:${row.status}`,
-        dedupeKey: `qc_inspection:${row.id}:${row.status}`,
+        dedupeKey: `qc_inspection:${row.id}:${row.status}`
       });
     }
 
-    const outboundShipments = this.db.prepare(`
+    const outboundShipments = await queryAll(this.db, `
       SELECT
         shipment.*,
         sku.internal_sku_code,
@@ -613,7 +614,7 @@ class WorkItemService {
       LEFT JOIN erp_inventory_batches batch ON batch.id = shipment.batch_id
       WHERE shipment.status IN ('pending_warehouse', 'picking', 'packed', 'pending_ops_confirm', 'exception')
         ${accountClause("shipment")}
-    `).all(baseParams);
+    `, [baseParams]);
 
     for (const row of outboundShipments) {
       const config = {
@@ -621,7 +622,7 @@ class WorkItemService {
         picking: [TYPE.PACKING_PENDING, PRIORITY.P1, ERP_ROLES.WAREHOUSE, "仓库待打包", "erp:outbound_shipment:picking"],
         packed: [TYPE.SHIP_OUT_PENDING, PRIORITY.P1, ERP_ROLES.WAREHOUSE, "仓库待确认发出", "erp:outbound_shipment:packed"],
         pending_ops_confirm: [TYPE.OUTBOUND_CONFIRM_PENDING, PRIORITY.P1, ERP_ROLES.OPERATIONS, "运营待确认出库完成", "erp:outbound_shipment:pending_ops_confirm"],
-        exception: [TYPE.OUTBOUND_EXCEPTION, PRIORITY.P0, ERP_ROLES.OPERATIONS, "出库异常待处理", "erp:outbound_shipment:exception"],
+        exception: [TYPE.OUTBOUND_EXCEPTION, PRIORITY.P0, ERP_ROLES.OPERATIONS, "出库异常待处理", "erp:outbound_shipment:exception"]
       }[row.status];
       if (!config) continue;
       pushTask(tasks, {
@@ -635,42 +636,42 @@ class WorkItemService {
         relatedDocId: row.id,
         skuId: row.sku_id,
         sourceRule: config[4],
-        dedupeKey: `outbound_shipment:${row.id}:${row.status}`,
+        dedupeKey: `outbound_shipment:${row.id}:${row.status}`
       });
     }
 
     return tasks;
   }
 
-  generateFromCurrentState(params = {}, actor = {}) {
-    const tasks = this.buildTasks(params);
+  async generateFromCurrentState(params = {}, actor = {}) {
+    const tasks = await this.buildTasks(params);
     const activeKeys = tasks.map((task) => task.dedupeKey);
-    const result = this.db.transaction(() => {
-      const summary = {
-        scanned: tasks.length,
-        created: 0,
-        updated: 0,
-        skipped: 0,
-        resolved: 0,
-      };
-      for (const task of tasks) {
-        const change = this.upsertGeneratedTask(task, actor);
-        if (change.action === "created") summary.created += 1;
-        else if (change.action === "updated") summary.updated += 1;
-        else summary.skipped += 1;
-      }
-      summary.resolved = this.resolveStaleGeneratedTasks(activeKeys, params, actor);
-      return summary;
-    })();
+    const result = await withTransaction(this.db, async (txDb) => {
+        const summary = {
+          scanned: tasks.length,
+          created: 0,
+          updated: 0,
+          skipped: 0,
+          resolved: 0
+        };
+        for (const task of tasks) {
+          const change = await this.upsertGeneratedTask(task, actor);
+          if (change.action === "created") summary.created += 1;else
+          if (change.action === "updated") summary.updated += 1;else
+          summary.skipped += 1;
+        }
+        summary.resolved = await this.resolveStaleGeneratedTasks(activeKeys, params, actor);
+        return summary;
+      });
 
     return {
       generatedAt: nowIso(),
       summary: result,
-      items: this.list({
+      items: await this.list({
         accountId: params.accountId,
         activeOnly: true,
-        limit: params.limit || 100,
-      }),
+        limit: params.limit || 100
+      })
     };
   }
 
@@ -680,5 +681,5 @@ class WorkItemService {
 }
 
 module.exports = {
-  WorkItemService,
+  WorkItemService
 };

@@ -2,6 +2,7 @@
 // 数据源：扩展 hook 捕获 /bg-luna-agent-seller/review/pageQuery 写入 cloud。
 
 const crypto = require("crypto");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const ROBOT_KEY = "temu_review_robot";
@@ -32,15 +33,15 @@ function normalizeCursor(value) {
   return new Date(ms - 1000).toISOString().replace("T", " ").replace(/\.\d+Z?$/, "");
 }
 
-function getReviewCursor(db, companyId) {
-  const row = db.prepare(`
+async function getReviewCursor(db, companyId) {
+  const row = await queryOne(db, `
     SELECT MAX(updated_at) AS cursor FROM erp_temu_reviews WHERE company_id = ?
-  `).get(companyId);
+  `, [companyId]);
   return normalizeCursor(row?.cursor);
 }
 
-function syncReviews(db, { companyId, since, now, limit }) {
-  const rows = db.prepare(`
+async function syncReviews(db, { companyId, since, now, limit }) {
+  const rows = await queryAll(db, `
     SELECT mall_id, site, review_id, product_id, product_skc_id,
            goods_id, goods_name, score, comment, spec_summary, category_path,
            status, on_sale, created_at_ts, raw_json, last_updated_at
@@ -50,9 +51,43 @@ function syncReviews(db, { companyId, since, now, limit }) {
       AND review_id IS NOT NULL AND review_id <> ''
     ORDER BY last_updated_at ASC
     LIMIT @limit
-  `).all({ since, limit });
+  `, { since, limit });
   if (!rows.length) return { upserted: 0, skipped: 0, latestCursor: since };
-  const upsert = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  let upserted = 0;
+  let skipped = 0;
+  let latestCursor = since;
+  for (const row of rows) {
+    if (!row.mall_id || !row.review_id) {skipped += 1;continue;}
+    await execute(db, `
     INSERT INTO erp_temu_reviews (
       id, company_id, platform_shop_id, site, review_id,
       product_id, product_skc_id, goods_id, goods_name,
@@ -80,46 +115,12 @@ function syncReviews(db, { companyId, since, now, limit }) {
       created_at_ts = excluded.created_at_ts,
       raw_json = excluded.raw_json,
       updated_at = excluded.updated_at
-  `);
-  let upserted = 0;
-  let skipped = 0;
-  let latestCursor = since;
-  for (const row of rows) {
-    if (!row.mall_id || !row.review_id) { skipped += 1; continue; }
-    upsert.run({
-      id: stableId("temu_review", [companyId, row.mall_id, row.review_id]),
-      company_id: companyId,
-      platform_shop_id: String(row.mall_id),
-      site: row.site || null,
-      review_id: String(row.review_id),
-      product_id: row.product_id || null,
-      product_skc_id: row.product_skc_id || null,
-      goods_id: row.goods_id || null,
-      goods_name: row.goods_name || null,
-      score: Number.isFinite(Number(row.score)) ? Number(row.score) : null,
-      comment: row.comment || null,
-      spec_summary: row.spec_summary || null,
-      category_path: row.category_path || null,
-      status: Number.isFinite(Number(row.status)) ? Number(row.status) : null,
-      on_sale: row.on_sale == null ? null : (row.on_sale ? 1 : 0),
-      created_at_ts: Number.isFinite(Number(row.created_at_ts)) ? Number(row.created_at_ts) : null,
-      raw_json: row.raw_json || "{}",
-      now,
-    });
-    upserted += 1;
-    if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;
-  }
-  return { upserted, skipped, latestCursor };
-}
-
-class TemuCloudReviewSync {
-  constructor({ db, attachCloudDb }) {
-    if (!db) throw new Error("TemuCloudReviewSync requires db");
+  `, { id: stableId("temu_review", [companyId, row.mall_id, row.review_id]), company_id: companyId, platform_shop_id: String(row.mall_id), site: row.site || null, review_id: String(row.review_id), product_id: row.product_id || null, product_skc_id: row.product_skc_id || null, goods_id: row.goods_id || null, goods_name: row.goods_name || null, score: Number.isFinite(Number(row.score)) ? Number(row.score) : null, comment: row.comment || null, spec_summary: row.spec_summary || null, category_path: row.category_path || null, status: Number.isFinite(Number(row.status)) ? Number(row.status) : null, on_sale: row.on_sale == null ? null : row.on_sale ? 1 : 0, created_at_ts: Number.isFinite(Number(row.created_at_ts)) ? Number(row.created_at_ts) : null, raw_json: row.raw_json || "{}", now });upserted += 1;if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;}return { upserted, skipped, latestCursor };}class TemuCloudReviewSync {constructor({ db, attachCloudDb }) {if (!db) throw new Error("TemuCloudReviewSync requires db");
     this.db = db;
     this.attachCloudDb = attachCloudDb;
   }
 
-  sync(payload = {}) {
+  async sync(payload = {}) {
     const companyId = String(payload.companyId || payload.company_id || DEFAULT_COMPANY_ID);
     const limit = Math.min(20000, Math.max(1, Number(payload.limit) || 5000));
     if (!ensureCloudAttached(this.db, this.attachCloudDb)) {
@@ -127,22 +128,22 @@ class TemuCloudReviewSync {
     }
     const now = nowIso();
     const runId = stableId("temu_review_run", [companyId, now]);
-    this.db.prepare(`
+    await execute(this.db, `
       INSERT INTO erp_temu_robot_sync_runs (
         id, company_id, robot_key, shop_count, sku_count, price_log_count,
         jit_count, vmi_count, review_count, status, error, started_at, finished_at
       ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, 'running', NULL, ?, NULL)
-    `).run(runId, companyId, ROBOT_KEY, now);
+    `, [runId, companyId, ROBOT_KEY, now]);
 
     try {
-      const since = payload.since || getReviewCursor(this.db, companyId);
-      const stats = this.db.transaction(() => syncReviews(this.db, { companyId, since, now, limit }))();
+      const since = payload.since || (await getReviewCursor(this.db, companyId));
+      const stats = await withTransaction(this.db, async (txDb) => syncReviews(this.db, { companyId, since, now, limit }));
       const finishedAt = nowIso();
-      this.db.prepare(`
+      await execute(this.db, `
         UPDATE erp_temu_robot_sync_runs
         SET review_count = ?, status = 'success', error = NULL, finished_at = ?
         WHERE id = ?
-      `).run(stats.upserted, finishedAt, runId);
+      `, [stats.upserted, finishedAt, runId]);
       return {
         runId,
         companyId,
@@ -150,16 +151,16 @@ class TemuCloudReviewSync {
         reviewSkipped: stats.skipped,
         reviewCursor: stats.latestCursor,
         startedAt: now,
-        finishedAt,
+        finishedAt
       };
     } catch (error) {
       const finishedAt = nowIso();
       try {
-        this.db.prepare(`
+        await execute(this.db, `
           UPDATE erp_temu_robot_sync_runs
           SET status = 'failed', error = ?, finished_at = ?
           WHERE id = ?
-        `).run(String(error?.message || error).slice(0, 2000), finishedAt, runId);
+        `, [String(error?.message || error).slice(0, 2000), finishedAt, runId]);
       } catch {}
       throw error;
     }
@@ -169,5 +170,5 @@ class TemuCloudReviewSync {
 module.exports = {
   TemuCloudReviewSync,
   DEFAULT_COMPANY_ID,
-  ROBOT_KEY,
+  ROBOT_KEY
 };

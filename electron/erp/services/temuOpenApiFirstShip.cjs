@@ -15,15 +15,16 @@
 "use strict";
 
 const { callOpenApi } = require("../temuOpenApiClient.cjs");
+const { queryAll, execute, withTransaction } = require("../../db/connection.cjs");
 
 const PAGE_SIZE = 100;
-const MAX_PAGES = 200;          // 分页上限(防 runaway;每店一天首单量很小)
-const MIN_INTERVAL_MS = 400;    // 全局节流
+const MAX_PAGES = 200; // 分页上限(防 runaway;每店一天首单量很小)
+const MIN_INTERVAL_MS = 400; // 全局节流
 const MAX_RETRIES = 4;
-const BJ = 8 * 3600000, DAY = 86400000;
+const BJ = 8 * 3600000,DAY = 86400000;
 
-function s(v) { return v == null ? null : String(v); }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function s(v) {return v == null ? null : String(v);}
+function sleep(ms) {return new Promise((r) => setTimeout(r, ms));}
 
 let lastCallAt = 0;
 async function throttle() {
@@ -38,12 +39,12 @@ async function callRetry(params) {
   for (let i = 0; i <= MAX_RETRIES; i += 1) {
     await throttle();
     let response = null;
-    try { ({ response } = await callOpenApi(params)); } catch (e) { response = { errorMsg: String((e && e.message) || e) }; }
+    try {({ response } = await callOpenApi(params));} catch (e) {response = { errorMsg: String(e && e.message || e) };}
     if (response && response.success === true) return response;
     const code = response && response.errorCode;
-    lastMsg = (response && response.errorMsg) || `errorCode=${code}`;
+    lastMsg = response && response.errorMsg || `errorCode=${code}`;
     const retriable = !response || code === 4000000 || /SYSTEM_EXCEPTION|limit|frequent|频繁|rate|timeout|超时|null|empty/i.test(lastMsg);
-    if (i < MAX_RETRIES && retriable) { await sleep(1000 * (i + 1)); continue; }
+    if (i < MAX_RETRIES && retriable) {await sleep(1000 * (i + 1));continue;}
     throw new Error(`${params.type} 失败: ${lastMsg}`);
   }
   throw new Error(`${params.type} 重试失败: ${lastMsg}`);
@@ -55,7 +56,7 @@ function bjDayStart(dayOffset = 0) {
   return todayStart + dayOffset * DAY;
 }
 // 北京时区日期串 YYYY-MM-DD。导出供测试。
-function bjDateStr(ms) { return new Date(ms + BJ).toISOString().slice(0, 10); }
+function bjDateStr(ms) {return new Date(ms + BJ).toISOString().slice(0, 10);}
 
 // 采集单店「指定日发货的首单」(按 WB 去重)。返回待 upsert 行数组。导出供测试。
 async function collectFirstShipForMall(db, mall, opts = {}) {
@@ -70,24 +71,24 @@ async function collectFirstShipForMall(db, mall, opts = {}) {
     const resp = await callRetry({
       type: "bg.shiporderv2.get", ...cred,
       bizParams: { deliverTimeFrom: from, deliverTimeTo: to, pageSize: PAGE_SIZE, pageNo: page },
-      timeoutMs: 30000,
+      timeoutMs: 30000
     });
     const result = resp.result || {};
     const list = Array.isArray(result.list) ? result.list : [];
     for (const it of list) {
       const vo = it.subPurchaseOrderBasicVO;
-      if (!(vo && vo.isFirst === true)) continue;     // 只要首单
+      if (!(vo && vo.isFirst === true)) continue; // 只要首单
       const sn = s(it.subPurchaseOrderSn);
-      if (!sn || seen.has(sn)) continue;              // 按 WB 去重
+      if (!sn || seen.has(sn)) continue; // 按 WB 去重
       seen.set(sn, {
         mall_id: mall.mall_id, stat_date: statDate, sub_purchase_order_sn: sn,
         delivery_order_sn: s(it.deliveryOrderSn),
         product_skc_id: s(it.productSkcId),
-        ext_code: (it.skcExtCode != null && String(it.skcExtCode).trim() !== "") ? String(it.skcExtCode) : null,
-        deliver_time: it.deliverTime != null ? Number(it.deliverTime) : null,
+        ext_code: it.skcExtCode != null && String(it.skcExtCode).trim() !== "" ? String(it.skcExtCode) : null,
+        deliver_time: it.deliverTime != null ? Number(it.deliverTime) : null
       });
     }
-    if (list.length < PAGE_SIZE) break;               // 不满一页 = 到底(不依赖偶发缺失的 total)
+    if (list.length < PAGE_SIZE) break; // 不满一页 = 到底(不依赖偶发缺失的 total)
   }
   return [...seen.values()];
 }
@@ -100,20 +101,20 @@ const UPSERT_SQL = `INSERT INTO erp_temu_firstship_daily
     ext_code=excluded.ext_code, deliver_time=excluded.deliver_time, synced_at=excluded.synced_at`;
 
 // upsert 一批首单行。返回写入行数。导出供测试。
-function upsertFirstShip(db, rows) {
+async function upsertFirstShip(db, rows) {
   if (!rows.length) return 0;
-  const now = new Date().toISOString();
-  const stmt = db.prepare(UPSERT_SQL);
-  const tx = db.transaction((list) => { for (const r of list) stmt.run({ ...r, synced_at: now }); });
-  tx(rows);
+  const now = new Date().toISOString();await withTransaction(db,
+
+    async (txDb) => {const list =
+      rows;for (const r of list) await execute(txDb, UPSERT_SQL, { ...r, synced_at: now });});
   return rows.length;
 }
 
 // 刷新所有全托管 active 店「指定日(默认今天)首单发货」。返回汇总。
 async function refreshFirstShipAll(db, opts = {}) {
-  const malls = db.prepare(
-    "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0"
-  ).all();
+  const malls = await queryAll(db,
+  "SELECT mall_id, mall_name, region, app_key, app_secret, access_token FROM erp_temu_openapi_auth WHERE status='active' AND semi_managed=0");
+
   let totalFirst = 0;
   const perMall = [];
   const errors = [];
@@ -126,12 +127,12 @@ async function refreshFirstShipAll(db, opts = {}) {
     }));
     for (const r of results) {
       if (r.status === "fulfilled") {
-        const n = upsertFirstShip(db, r.value.rows);
+        const n = await upsertFirstShip(db, r.value.rows);
         totalFirst += n;
         if (n > 0) perMall.push({ mall: r.value.mall.mall_id, first: n });
       } else {
         const mall_id = batch[results.indexOf(r)]?.mall_id;
-        errors.push({ mall: mall_id, error: (r.reason && r.reason.message) || String(r.reason) });
+        errors.push({ mall: mall_id, error: r.reason && r.reason.message || String(r.reason) });
       }
     }
   }

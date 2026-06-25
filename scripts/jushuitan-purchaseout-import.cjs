@@ -142,7 +142,7 @@ function buildItemRow(raw, companyId, nowIso) {
   };
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sourceDir = args._[0]
     || process.env.JST_PURCHASEOUT_EXPORT_DIR
@@ -195,7 +195,7 @@ function main() {
   db.pragma("busy_timeout = 60000");
 
   try {
-    runMigrations({ db });
+    await runMigrations({ db });
 
     // 保险：确保 company 存在（开发库可能没有 company_default）。
     db.prepare(`

@@ -3,16 +3,13 @@
 // 用法(crontab,建议错峰、低频,如每 4 小时):
 //   17 */4 * * * cd /opt/temu-automation && node scripts/refresh-openapi-qc.cjs >> /var/log/temu-openapi-qc.log 2>&1
 "use strict";
-const Database = require("better-sqlite3");
-const ERP_DB = process.env.ERP_DB || "/opt/temu-erp-data/erp.sqlite";
-const db = new Database(ERP_DB);
-db.pragma("busy_timeout=60000");
+const { openErpDatabase, closePgPool, USE_PG } = require("../electron/db/connection.cjs");
 const { refreshQcAll } = require("../electron/erp/services/temuOpenApiQc.cjs");
 
 (async () => {
+  const db = openErpDatabase();
   const t0 = Date.now();
   try {
-    // 可选增量:设 QC_SINCE_DAYS 只采最近 N 天更新的质检(减少详情调用量);默认全量不合格。
     const sinceDays = Number(process.env.QC_SINCE_DAYS) || 0;
     const opts = sinceDays > 0 ? { sinceMs: Date.now() - sinceDays * 86400000 } : {};
     const r = await refreshQcAll(db, opts);
@@ -22,6 +19,6 @@ const { refreshQcAll } = require("../electron/erp/services/temuOpenApiQc.cjs");
     console.error(new Date().toISOString(), "qc refresh failed:", (e && e.message) || e);
     process.exitCode = 1;
   } finally {
-    db.close();
+    if (USE_PG) await closePgPool(); else db.close();
   }
 })();

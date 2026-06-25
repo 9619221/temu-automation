@@ -183,7 +183,7 @@ function buildHeaderMap(headers) {
   return map;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sourceDir = args._[0]
     || process.env.JST_PURCHASEIN_EXPORT_DIR
@@ -205,7 +205,7 @@ function main() {
   db.pragma("busy_timeout = 60000");
 
   try {
-    runMigrations({ db });
+    await runMigrations({ db });
     const now = new Date().toISOString();
 
     const upsertCompany = db.prepare(`

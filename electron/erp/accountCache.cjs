@@ -43,7 +43,7 @@ function getCurrentCompanyId() {
   }
 }
 
-function openCacheDb() {
+async function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -51,7 +51,7 @@ function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  db.exec(`
+  await execSql(db, `
     CREATE TABLE IF NOT EXISTS account_cache (
       company_id TEXT PRIMARY KEY,
       accounts_json TEXT NOT NULL,
@@ -63,7 +63,7 @@ function openCacheDb() {
 }
 
 // 读缓存。返回 null 表示无可用缓存（无缓存 / 打开或解析失败），调用方据此降级实时拉。
-function getCachedAccounts(companyId) {
+async function getCachedAccounts(companyId) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   let db;
   try {
@@ -73,7 +73,7 @@ function getCachedAccounts(companyId) {
   }
   let row;
   try {
-    row = db.prepare("SELECT accounts_json FROM account_cache WHERE company_id = ?").get(key);
+    row = await queryOne(db, "SELECT accounts_json FROM account_cache WHERE company_id = ?", [key]);
   } catch {
     return null;
   }
@@ -86,19 +86,19 @@ function getCachedAccounts(companyId) {
   }
 }
 
-function setCachedAccounts(companyId, accounts) {
+async function setCachedAccounts(companyId, accounts) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   const db = openCacheDb();
-  db.prepare(`
+  await execute(db, `
     INSERT INTO account_cache (company_id, accounts_json, cached_at)
     VALUES (@company_id, @accounts_json, @cached_at)
     ON CONFLICT(company_id) DO UPDATE SET
       accounts_json = excluded.accounts_json,
       cached_at = excluded.cached_at
-  `).run({
+  `, {
     company_id: key,
     accounts_json: JSON.stringify(Array.isArray(accounts) ? accounts : []),
-    cached_at: nowIso(),
+    cached_at: nowIso()
   });
 }
 
@@ -106,9 +106,9 @@ async function fetchRemoteAccounts(params = {}) {
   const payload = await clientRuntime.remoteRequest("/api/master-data/workbench", {
     method: "POST",
     body: { ...(params || {}), part: "accounts" },
-    timeoutMs: 60000,
+    timeoutMs: 60000
   });
-  return (payload && payload.workbench && payload.workbench.accounts) || [];
+  return payload && payload.workbench && payload.workbench.accounts || [];
 }
 
 // 拉主控端最新 accounts 并写缓存。同 company 并发请求单飞，共享同一 in-flight Promise。
@@ -121,9 +121,9 @@ async function triggerSync(params = {}) {
     try {
       setCachedAccounts(companyId, accounts);
     } catch {
+
       // 缓存写失败不影响返回
-    }
-    return accounts;
+    }return accounts;
   })();
   syncLocks.set(companyId, promise);
   try {
@@ -135,7 +135,7 @@ async function triggerSync(params = {}) {
 
 function closeCacheDb() {
   if (cacheDb) {
-    try { cacheDb.close(); } catch { /* ignore */ }
+    try {cacheDb.close();} catch {/* ignore */}
     cacheDb = null;
   }
 }
@@ -145,5 +145,5 @@ module.exports = {
   getCachedAccounts,
   setCachedAccounts,
   triggerSync,
-  closeCacheDb,
+  closeCacheDb
 };

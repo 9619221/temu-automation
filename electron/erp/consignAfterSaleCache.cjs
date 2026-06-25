@@ -27,7 +27,7 @@ function configureConsignAfterSaleCache(options = {}) {
   userDataDir = options.userDataDir || userDataDir || null;
 }
 
-function nowIso() { return new Date().toISOString(); }
+function nowIso() {return new Date().toISOString();}
 
 function optionalString(value) {
   const text = value == null ? "" : String(value).trim();
@@ -52,7 +52,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-function openCacheDb() {
+async function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -60,7 +60,7 @@ function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  db.exec(`
+  await execSql(db, `
     CREATE TABLE IF NOT EXISTS consign_after_sale_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -111,19 +111,19 @@ function openCacheDb() {
 
 function closeCacheDb() {
   if (cacheDb) {
-    try { cacheDb.close(); } catch { /* ignore */ }
+    try {cacheDb.close();} catch {/* ignore */}
     cacheDb = null;
   }
 }
 
-function getMeta(companyId, source) {
+async function getMeta(companyId, source) {
   const db = openCacheDb();
-  return db.prepare("SELECT * FROM consign_after_sale_sync_meta WHERE company_id = ? AND source = ?").get(companyId, source) || null;
+  return (await queryOne(db, "SELECT * FROM consign_after_sale_sync_meta WHERE company_id = ? AND source = ?", [companyId, source])) || null;
 }
 
-function setMeta(companyId, source, fields = {}) {
+async function setMeta(companyId, source, fields = {}) {
   const db = openCacheDb();
-  db.prepare(`
+  await execute(db, `
     INSERT INTO consign_after_sale_sync_meta (company_id, source, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @source, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id, source) DO UPDATE SET
@@ -131,21 +131,21 @@ function setMeta(companyId, source, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `).run({
+  `, {
     company_id: companyId,
     source,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
     last_sync_at: fields.lastSyncAt != null ? fields.lastSyncAt : null,
-    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null,
+    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null
   });
 }
 
-function isCachePopulated(companyId) {
+async function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
     const db = openCacheDb();
-    const row = db.prepare("SELECT 1 FROM consign_after_sale_cache WHERE company_id = ? LIMIT 1").get(companyId);
+    const row = await queryOne(db, "SELECT 1 FROM consign_after_sale_cache WHERE company_id = ? LIMIT 1", [companyId]);
     return Boolean(row);
   } catch {
     return false;
@@ -182,42 +182,42 @@ function buildHeadConditions(params, args) {
   return conditions;
 }
 
-function getCachedConsignAfterSales(params = {}) {
+async function getCachedConsignAfterSales(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
-  try { db = openCacheDb(); } catch { return null; }
+  try {db = openCacheDb();} catch {return null;}
   if (!isCachePopulated(companyId)) return null;
   const args = { company_id: companyId };
   const conditions = buildHeadConditions(params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 500000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = db.prepare(`
+  const rows = await queryAll(db, `
     SELECT payload_json FROM consign_after_sale_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY as_date DESC, as_id DESC
     LIMIT @limit OFFSET @offset
-  `).all({ ...args, limit, offset });
+  `, { ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-function getCachedConsignAfterSalesCount(params = {}) {
+async function getCachedConsignAfterSalesCount(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
-  try { db = openCacheDb(); } catch { return null; }
+  try {db = openCacheDb();} catch {return null;}
   if (!isCachePopulated(companyId)) return null;
   const args = { company_id: companyId };
   const conditions = buildHeadConditions(params, args);
-  const row = db.prepare(`SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE ${conditions.join(" AND ")}`).get(args);
+  const row = await queryOne(db, `SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE ${conditions.join(" AND ")}`, [args]);
   return row ? row.c : 0;
 }
 
-function getCachedConsignAfterSaleItems(params = {}) {
+async function getCachedConsignAfterSaleItems(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
-  try { db = openCacheDb(); } catch { return null; }
+  try {db = openCacheDb();} catch {return null;}
   const asId = params.asId != null ? Number(params.asId) : null;
   const asIdsRaw = Array.isArray(params.asIds) ? params.asIds.map(Number).filter(Number.isFinite) : null;
   const conditions = ["company_id = @company_id", "status_internal != 'deleted'"];
@@ -227,114 +227,114 @@ function getCachedConsignAfterSaleItems(params = {}) {
     args.as_id = asId;
   } else if (asIdsRaw && asIdsRaw.length) {
     const placeholders = asIdsRaw.map((_, idx) => `@as_${idx}`);
-    asIdsRaw.forEach((v, idx) => { args[`as_${idx}`] = v; });
+    asIdsRaw.forEach((v, idx) => {args[`as_${idx}`] = v;});
     conditions.push(`as_id IN (${placeholders.join(", ")})`);
   }
-  const rows = db.prepare(`
+  const rows = await queryAll(db, `
     SELECT payload_json FROM consign_after_sale_item_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY as_id DESC, asi_id ASC
-  `).all(args);
+  `, [args]);
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-function upsertHeads(companyId, rows) {
+async function upsertHeads(companyId, rows) {
   if (!rows.length) return;
   const db = openCacheDb();
   const now = nowIso();
-  const stmt = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  await withTransaction(db, async (txDb) => {const items =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    rows;for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO consign_after_sale_cache (company_id, id, as_id, status_internal, as_date, shop_name, status, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @as_id, @status_internal, @as_date, @shop_name, @status, @updated_at, @payload, @cached_at)
     ON CONFLICT(company_id, id) DO UPDATE SET
       as_id = @as_id, status_internal = @status_internal, as_date = @as_date,
       shop_name = @shop_name, status = @status, updated_at = @updated_at,
       payload_json = @payload, cached_at = @cached_at
-  `);
-  const tx = db.transaction((items) => {
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        as_id: Number(row.asId) || 0,
-        status_internal: row.statusInternal != null ? String(row.statusInternal) : null,
-        as_date: row.asDate != null ? String(row.asDate) : null,
-        shop_name: row.shopName != null ? String(row.shopName) : null,
-        status: row.status != null ? String(row.status) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  tx(rows);
-}
-
-function deleteHeads(companyId, ids) {
-  if (!ids.length) return;
-  const db = openCacheDb();
-  const stmt = db.prepare("DELETE FROM consign_after_sale_cache WHERE company_id = ? AND id = ?");
-  const tx = db.transaction((list) => { for (const id of list) stmt.run(companyId, String(id)); });
-  tx(ids);
-}
-
-function upsertItems(companyId, rows) {
-  if (!rows.length) return;
-  const db = openCacheDb();
-  const now = nowIso();
-  const stmt = db.prepare(`
+  `, { company_id: companyId, id: String(row.id), as_id: Number(row.asId) || 0, status_internal: row.statusInternal != null ? String(row.statusInternal) : null, as_date: row.asDate != null ? String(row.asDate) : null, shop_name: row.shopName != null ? String(row.shopName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});}async function deleteHeads(companyId, ids) {if (!ids.length) return;const db = openCacheDb();await withTransaction(db, async (txDb) => {const list = ids;for (const id of list) await execute(txDb, "DELETE FROM consign_after_sale_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});}async function upsertItems(companyId, rows) {if (!rows.length) return;const db = openCacheDb();const now = nowIso();await withTransaction(db, async (txDb) => {const items = rows;for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO consign_after_sale_item_cache (company_id, id, as_id, asi_id, sku_id, status_internal, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @as_id, @asi_id, @sku_id, @status_internal, @updated_at, @payload, @cached_at)
     ON CONFLICT(company_id, id) DO UPDATE SET
       as_id = @as_id, asi_id = @asi_id, sku_id = @sku_id,
       status_internal = @status_internal, updated_at = @updated_at,
       payload_json = @payload, cached_at = @cached_at
-  `);
-  const tx = db.transaction((items) => {
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        as_id: Number(row.asId) || 0,
-        asi_id: Number(row.asiId) || 0,
-        sku_id: row.skuId != null ? String(row.skuId) : null,
-        status_internal: row.statusInternal != null ? String(row.statusInternal) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  tx(rows);
-}
-
-function deleteItems(companyId, ids) {
-  if (!ids.length) return;
-  const db = openCacheDb();
-  const stmt = db.prepare("DELETE FROM consign_after_sale_item_cache WHERE company_id = ? AND id = ?");
-  const tx = db.transaction((list) => { for (const id of list) stmt.run(companyId, String(id)); });
-  tx(ids);
-}
-
-async function fetchHeadPage({ since, includeDeleted, limit, offset }) {
-  const body = { limit, offset };
-  if (since) body.since = since;
-  if (includeDeleted) body.includeDeleted = true;
-  const payload = await clientRuntime.remoteRequest("/api/master-data/consign-after-sales", {
-    method: "POST", body, timeoutMs: 120000,
-  });
-  return (payload && payload.rows) || [];
-}
-
-async function fetchItemPage({ since, includeDeleted, limit, offset }) {
+  `, { company_id: companyId, id: String(row.id), as_id: Number(row.asId) || 0, asi_id: Number(row.asiId) || 0, sku_id: row.skuId != null ? String(row.skuId) : null, status_internal: row.statusInternal != null ? String(row.statusInternal) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});}async function deleteItems(companyId, ids) {if (!ids.length) return;const db = openCacheDb();await withTransaction(db, async (txDb) => {const list = ids;for (const id of list) await execute(txDb, "DELETE FROM consign_after_sale_item_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});}async function fetchHeadPage({ since, includeDeleted, limit, offset }) {const body = { limit, offset };if (since) body.since = since;if (includeDeleted) body.includeDeleted = true;const payload = await clientRuntime.remoteRequest("/api/master-data/consign-after-sales", { method: "POST", body, timeoutMs: 120000 });return payload && payload.rows || [];}async function fetchItemPage({ since, includeDeleted, limit, offset }) {
   const body = { limit, offset };
   if (since) body.since = since;
   if (includeDeleted) body.includeDeleted = true;
   const payload = await clientRuntime.remoteRequest("/api/master-data/consign-after-sale-items", {
-    method: "POST", body, timeoutMs: 120000,
+    method: "POST", body, timeoutMs: 120000
   });
-  return (payload && payload.rows) || [];
+  return payload && payload.rows || [];
 }
 
 async function syncFullHead(companyId) {
@@ -352,73 +352,73 @@ async function syncFullHead(companyId) {
   }
   const db = openCacheDb();
   const now = nowIso();
-  const stmt = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  await withTransaction(db, async (txDb) => {const items =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    all;await execute(txDb, "DELETE FROM consign_after_sale_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO consign_after_sale_cache (company_id, id, as_id, status_internal, as_date, shop_name, status, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @as_id, @status_internal, @as_date, @shop_name, @status, @updated_at, @payload, @cached_at)
-  `);
-  const replaceTx = db.transaction((items) => {
-    db.prepare("DELETE FROM consign_after_sale_cache WHERE company_id = ?").run(companyId);
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        as_id: Number(row.asId) || 0,
-        status_internal: row.statusInternal != null ? String(row.statusInternal) : null,
-        as_date: row.asDate != null ? String(row.asDate) : null,
-        shop_name: row.shopName != null ? String(row.shopName) : null,
-        status: row.status != null ? String(row.status) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  replaceTx(all);
-  setMeta(companyId, "head", { cursor, lastFullAt: now, lastSyncAt: now });
-  return { mode: "full", source: "head", total: all.length };
-}
+  `, { company_id: companyId, id: String(row.id), as_id: Number(row.asId) || 0, status_internal: row.statusInternal != null ? String(row.statusInternal) : null, as_date: row.asDate != null ? String(row.asDate) : null, shop_name: row.shopName != null ? String(row.shopName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}}
 
-async function syncFullItem(companyId) {
-  const all = [];
-  let offset = 0;
-  for (let guard = 0; guard < 1000; guard += 1) {
-    const rows = await fetchItemPage({ limit: FULL_PAGE_ITEM, offset });
-    all.push(...rows);
-    if (rows.length < FULL_PAGE_ITEM) break;
-    offset += FULL_PAGE_ITEM;
-  }
-  let cursor = "";
-  for (const row of all) {
-    if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;
-  }
-  const db = openCacheDb();
-  const now = nowIso();
-  const stmt = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+  );setMeta(companyId, "head", { cursor, lastFullAt: now, lastSyncAt: now });return { mode: "full", source: "head", total: all.length };}async function syncFullItem(companyId) {const all = [];let offset = 0;for (let guard = 0; guard < 1000; guard += 1) {const rows = await fetchItemPage({ limit: FULL_PAGE_ITEM, offset });all.push(...rows);if (rows.length < FULL_PAGE_ITEM) break;offset += FULL_PAGE_ITEM;}let cursor = "";for (const row of all) {if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;}const db = openCacheDb();const now = nowIso();await withTransaction(db, async (txDb) => {const items =
+    all;await execute(txDb, "DELETE FROM consign_after_sale_item_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
     INSERT INTO consign_after_sale_item_cache (company_id, id, as_id, asi_id, sku_id, status_internal, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @as_id, @asi_id, @sku_id, @status_internal, @updated_at, @payload, @cached_at)
-  `);
-  const replaceTx = db.transaction((items) => {
-    db.prepare("DELETE FROM consign_after_sale_item_cache WHERE company_id = ?").run(companyId);
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run({
-        company_id: companyId,
-        id: String(row.id),
-        as_id: Number(row.asId) || 0,
-        asi_id: Number(row.asiId) || 0,
-        sku_id: row.skuId != null ? String(row.skuId) : null,
-        status_internal: row.statusInternal != null ? String(row.statusInternal) : null,
-        updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
-        payload: JSON.stringify(row),
-        cached_at: now,
-      });
-    }
-  });
-  replaceTx(all);
-  setMeta(companyId, "item", { cursor, lastFullAt: now, lastSyncAt: now });
-  return { mode: "full", source: "item", total: all.length };
-}
+  `, { company_id: companyId, id: String(row.id), as_id: Number(row.asId) || 0, asi_id: Number(row.asiId) || 0, sku_id: row.skuId != null ? String(row.skuId) : null, status_internal: row.statusInternal != null ? String(row.statusInternal) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});setMeta(companyId, "item", { cursor, lastFullAt: now, lastSyncAt: now });return { mode: "full", source: "item", total: all.length };}
 
 async function syncIncrementalHead(companyId) {
   const meta = getMeta(companyId, "head");
@@ -485,7 +485,7 @@ async function reconcileHeadDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true };
   const db = openCacheDb();
-  const localIds = db.prepare("SELECT id FROM consign_after_sale_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
+  const localIds = (await queryAll(db, "SELECT id FROM consign_after_sale_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteHeads(companyId, stale);
   setMeta(companyId, "head", { lastReconcileAt: nowIso() });
@@ -503,7 +503,7 @@ async function reconcileItemDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true };
   const db = openCacheDb();
-  const localIds = db.prepare("SELECT id FROM consign_after_sale_item_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
+  const localIds = (await queryAll(db, "SELECT id FROM consign_after_sale_item_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteItems(companyId, stale);
   setMeta(companyId, "item", { lastReconcileAt: nowIso() });
@@ -524,12 +524,12 @@ async function triggerSync(options = {}) {
   const runtime = clientRuntime.getRuntimeStatus();
   if (runtime.mode !== "client" || !runtime.serverUrl) return { skipped: true, reason: "not-client" };
   const mode = options.mode === "full" ? "full" : "incremental";
-  const headTask = withLock(companyId, "sync-head", async () => (
-    mode === "full" ? syncFullHead(companyId) : syncIncrementalHead(companyId)
-  ));
-  const itemTask = withLock(companyId, "sync-item", async () => (
-    mode === "full" ? syncFullItem(companyId) : syncIncrementalItem(companyId)
-  ));
+  const headTask = withLock(companyId, "sync-head", async () =>
+  mode === "full" ? syncFullHead(companyId) : syncIncrementalHead(companyId)
+  );
+  const itemTask = withLock(companyId, "sync-item", async () =>
+  mode === "full" ? syncFullItem(companyId) : syncIncrementalItem(companyId)
+  );
   const [head, item] = await Promise.all([headTask, itemTask]);
   return { head, item };
 }
@@ -545,15 +545,15 @@ async function triggerReconcile(options = {}) {
   return { head, item };
 }
 
-function getCacheStatus(options = {}) {
+async function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, headCount: 0, itemCount: 0, populated: false };
   let headCount = 0;
   let itemCount = 0;
   try {
     const db = openCacheDb();
-    headCount = db.prepare("SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE company_id = ? AND status_internal != 'deleted'").get(companyId).c;
-    itemCount = db.prepare("SELECT COUNT(*) AS c FROM consign_after_sale_item_cache WHERE company_id = ? AND status_internal != 'deleted'").get(companyId).c;
+    headCount = (await queryOne(db, "SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE company_id = ? AND status_internal != 'deleted'", [companyId])).c;
+    itemCount = (await queryOne(db, "SELECT COUNT(*) AS c FROM consign_after_sale_item_cache WHERE company_id = ? AND status_internal != 'deleted'", [companyId])).c;
   } catch {
     return { companyId, headCount: 0, itemCount: 0, populated: false };
   }
@@ -569,15 +569,15 @@ function getCacheStatus(options = {}) {
       lastFullAt: headMeta?.last_full_at || null,
       lastSyncAt: headMeta?.last_sync_at || null,
       lastReconcileAt: headMeta?.last_reconcile_at || null,
-      syncing: syncLocks.has(`${companyId}:sync-head`),
+      syncing: syncLocks.has(`${companyId}:sync-head`)
     },
     item: {
       cursor: itemMeta?.cursor || null,
       lastFullAt: itemMeta?.last_full_at || null,
       lastSyncAt: itemMeta?.last_sync_at || null,
       lastReconcileAt: itemMeta?.last_reconcile_at || null,
-      syncing: syncLocks.has(`${companyId}:sync-item`),
-    },
+      syncing: syncLocks.has(`${companyId}:sync-item`)
+    }
   };
 }
 
@@ -590,5 +590,5 @@ module.exports = {
   isCachePopulated,
   triggerSync,
   triggerReconcile,
-  getCacheStatus,
+  getCacheStatus
 };

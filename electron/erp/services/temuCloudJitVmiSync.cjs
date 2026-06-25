@@ -4,6 +4,7 @@
 //          → 本地 ERP 通过 ATTACH cloud db 跑本同步器 → 落本地 ERP 表。
 
 const crypto = require("crypto");
+const { queryAll, queryOne, execute, withTransaction} = require("../../db/connection.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const ROBOT_KEY = "temu_additional_robot";
@@ -35,22 +36,22 @@ function normalizeCursor(value) {
   return new Date(ms - 1000).toISOString().replace("T", " ").replace(/\.\d+Z?$/, "");
 }
 
-function getJitCursor(db, companyId) {
-  const row = db.prepare(`
+async function getJitCursor(db, companyId) {
+  const row = await queryOne(db, `
     SELECT MAX(updated_at) AS cursor FROM erp_temu_jit_status WHERE company_id = ?
-  `).get(companyId);
+  `, [companyId]);
   return normalizeCursor(row?.cursor);
 }
 
-function getVmiCursor(db, companyId) {
-  const row = db.prepare(`
+async function getVmiCursor(db, companyId) {
+  const row = await queryOne(db, `
     SELECT MAX(updated_at) AS cursor FROM erp_temu_vmi_suborder WHERE company_id = ?
-  `).get(companyId);
+  `, [companyId]);
   return normalizeCursor(row?.cursor);
 }
 
-function syncJit(db, { companyId, since, now, limit }) {
-  const rows = db.prepare(`
+async function syncJit(db, { companyId, since, now, limit }) {
+  const rows = await queryAll(db, `
     SELECT mall_id, site, stat_date, skc_id, sku_id, product_name,
            jit_status, jit_close_time, suggest_close,
            raw_json, last_updated_at
@@ -60,9 +61,34 @@ function syncJit(db, { companyId, since, now, limit }) {
       AND skc_id IS NOT NULL AND skc_id <> ''
     ORDER BY last_updated_at ASC
     LIMIT @limit
-  `).all({ since, limit });
+  `, { since, limit });
   if (!rows.length) return { upserted: 0, skipped: 0, latestCursor: since };
-  const upsert = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  let upserted = 0;
+  let skipped = 0;
+  let latestCursor = since;
+  for (const row of rows) {
+    if (!row.mall_id || !row.skc_id || !row.stat_date) {skipped += 1;continue;}
+    await execute(db, `
     INSERT INTO erp_temu_jit_status (
       id, company_id, platform_shop_id, shop_name, skc, sku_code,
       product_name, jit_status, jit_close_time, suggest_close,
@@ -81,34 +107,9 @@ function syncJit(db, { companyId, since, now, limit }) {
       suggest_close = excluded.suggest_close,
       raw_json = excluded.raw_json,
       updated_at = excluded.updated_at
-  `);
-  let upserted = 0;
-  let skipped = 0;
-  let latestCursor = since;
-  for (const row of rows) {
-    if (!row.mall_id || !row.skc_id || !row.stat_date) { skipped += 1; continue; }
-    upsert.run({
-      id: stableId("temu_jit_status", [companyId, row.mall_id, row.skc_id, row.stat_date]),
-      company_id: companyId,
-      platform_shop_id: String(row.mall_id),
-      skc: String(row.skc_id),
-      sku_code: row.sku_id ? String(row.sku_id) : null,
-      product_name: row.product_name || null,
-      jit_status: row.jit_status || null,
-      jit_close_time: row.jit_close_time || null,
-      suggest_close: row.suggest_close == null ? 0 : (row.suggest_close ? 1 : 0),
-      stat_date: row.stat_date,
-      raw_json: row.raw_json || "{}",
-      now,
-    });
-    upserted += 1;
-    if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;
-  }
-  return { upserted, skipped, latestCursor };
-}
-
-function syncVmi(db, { companyId, since, now, limit }) {
-  const rows = db.prepare(`
+  `, { id: stableId("temu_jit_status", [companyId, row.mall_id, row.skc_id, row.stat_date]), company_id: companyId, platform_shop_id: String(row.mall_id), skc: String(row.skc_id), sku_code: row.sku_id ? String(row.sku_id) : null, product_name: row.product_name || null, jit_status: row.jit_status || null, jit_close_time: row.jit_close_time || null, suggest_close: row.suggest_close == null ? 0 : row.suggest_close ? 1 : 0, stat_date: row.stat_date, raw_json: row.raw_json || "{}", now });upserted += 1;if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;}return { upserted, skipped, latestCursor };}
+async function syncVmi(db, { companyId, since, now, limit }) {
+  const rows = await queryAll(db, `
     SELECT mall_id, site, stock_order_no, delivery_order_sn, delivery_batch_sn,
            skc_id, sku_id, sku_ext_code, product_name,
            demand_qty, temu_status, order_time, raw_json, last_updated_at
@@ -118,9 +119,40 @@ function syncVmi(db, { companyId, since, now, limit }) {
       AND mall_id IS NOT NULL AND mall_id <> ''
     ORDER BY last_updated_at ASC
     LIMIT @limit
-  `).all({ since, limit });
+  `, { since, limit });
   if (!rows.length) return { upserted: 0, skipped: 0, latestCursor: since };
-  const upsert = db.prepare(`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  let upserted = 0;
+  let skipped = 0;
+  let latestCursor = since;
+  for (const row of rows) {
+    const subOrderId = String(row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || "").trim();
+    if (!row.mall_id || !subOrderId) {skipped += 1;continue;}
+    const statDate = row.order_time ?
+    String(row.order_time).slice(0, 10) :
+    String(row.last_updated_at || now).slice(0, 10);
+    await execute(db, `
     INSERT INTO erp_temu_vmi_suborder (
       id, company_id, platform_shop_id, shop_name, sub_order_id, skc,
       sku_code, product_name, quantity, order_status, order_type,
@@ -141,45 +173,14 @@ function syncVmi(db, { companyId, since, now, limit }) {
       create_time = excluded.create_time,
       raw_json = excluded.raw_json,
       updated_at = excluded.updated_at
-  `);
-  let upserted = 0;
-  let skipped = 0;
-  let latestCursor = since;
-  for (const row of rows) {
-    const subOrderId = String(row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || "").trim();
-    if (!row.mall_id || !subOrderId) { skipped += 1; continue; }
-    const statDate = row.order_time
-      ? String(row.order_time).slice(0, 10)
-      : String(row.last_updated_at || now).slice(0, 10);
-    upsert.run({
-      id: stableId("temu_vmi_suborder", [companyId, row.mall_id, subOrderId, statDate]),
-      company_id: companyId,
-      platform_shop_id: String(row.mall_id),
-      sub_order_id: subOrderId,
-      skc: row.skc_id ? String(row.skc_id) : null,
-      sku_code: row.sku_ext_code || row.sku_id || null,
-      product_name: row.product_name || null,
-      quantity: Number.isFinite(Number(row.demand_qty)) ? Number(row.demand_qty) : 0,
-      order_status: row.temu_status || null,
-      create_time: row.order_time || null,
-      stat_date: statDate,
-      raw_json: row.raw_json || "{}",
-      now,
-    });
-    upserted += 1;
-    if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;
-  }
-  return { upserted, skipped, latestCursor };
-}
-
-class TemuCloudJitVmiSync {
+  `, { id: stableId("temu_vmi_suborder", [companyId, row.mall_id, subOrderId, statDate]), company_id: companyId, platform_shop_id: String(row.mall_id), sub_order_id: subOrderId, skc: row.skc_id ? String(row.skc_id) : null, sku_code: row.sku_ext_code || row.sku_id || null, product_name: row.product_name || null, quantity: Number.isFinite(Number(row.demand_qty)) ? Number(row.demand_qty) : 0, order_status: row.temu_status || null, create_time: row.order_time || null, stat_date: statDate, raw_json: row.raw_json || "{}", now });upserted += 1;if (row.last_updated_at && row.last_updated_at > latestCursor) latestCursor = row.last_updated_at;}return { upserted, skipped, latestCursor };}class TemuCloudJitVmiSync {
   constructor({ db, attachCloudDb }) {
     if (!db) throw new Error("TemuCloudJitVmiSync requires db");
     this.db = db;
     this.attachCloudDb = attachCloudDb;
   }
 
-  sync(payload = {}) {
+  async sync(payload = {}) {
     const companyId = String(payload.companyId || payload.company_id || DEFAULT_COMPANY_ID);
     const limit = Math.min(20000, Math.max(1, Number(payload.limit) || 5000));
     if (!ensureCloudAttached(this.db, this.attachCloudDb)) {
@@ -187,29 +188,29 @@ class TemuCloudJitVmiSync {
     }
     const now = nowIso();
     const runId = stableId("temu_additional_run", [companyId, now]);
-    this.db.prepare(`
+    await execute(this.db, `
       INSERT INTO erp_temu_robot_sync_runs (
         id, company_id, robot_key, shop_count, sku_count, price_log_count,
         jit_count, vmi_count, status, error, started_at, finished_at
       ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 'running', NULL, ?, NULL)
-    `).run(runId, companyId, ROBOT_KEY, now);
+    `, [runId, companyId, ROBOT_KEY, now]);
 
     try {
-      const sinceJit = payload.sinceJit || payload.since || getJitCursor(this.db, companyId);
-      const sinceVmi = payload.sinceVmi || payload.since || getVmiCursor(this.db, companyId);
-      const stats = this.db.transaction(() => {
-        const jitStats = syncJit(this.db, { companyId, since: sinceJit, now, limit });
-        const vmiStats = syncVmi(this.db, { companyId, since: sinceVmi, now, limit });
-        return { jitStats, vmiStats };
-      })();
+      const sinceJit = payload.sinceJit || payload.since || (await getJitCursor(this.db, companyId));
+      const sinceVmi = payload.sinceVmi || payload.since || (await getVmiCursor(this.db, companyId));
+      const stats = await withTransaction(this.db, async (txDb) => {
+          const jitStats = await syncJit(this.db, { companyId, since: sinceJit, now, limit });
+          const vmiStats = await syncVmi(this.db, { companyId, since: sinceVmi, now, limit });
+          return { jitStats, vmiStats };
+        });
       const finishedAt = nowIso();
-      this.db.prepare(`
+      await execute(this.db, `
         UPDATE erp_temu_robot_sync_runs
         SET shop_count = 0, sku_count = 0, price_log_count = 0,
             jit_count = ?, vmi_count = ?, status = 'success',
             error = NULL, finished_at = ?
         WHERE id = ?
-      `).run(stats.jitStats.upserted, stats.vmiStats.upserted, finishedAt, runId);
+      `, [stats.jitStats.upserted, stats.vmiStats.upserted, finishedAt, runId]);
       return {
         runId,
         companyId,
@@ -220,16 +221,16 @@ class TemuCloudJitVmiSync {
         vmiSkipped: stats.vmiStats.skipped,
         vmiCursor: stats.vmiStats.latestCursor,
         startedAt: now,
-        finishedAt,
+        finishedAt
       };
     } catch (error) {
       const finishedAt = nowIso();
       try {
-        this.db.prepare(`
+        await execute(this.db, `
           UPDATE erp_temu_robot_sync_runs
           SET status = 'failed', error = ?, finished_at = ?
           WHERE id = ?
-        `).run(String(error?.message || error).slice(0, 2000), finishedAt, runId);
+        `, [String(error?.message || error).slice(0, 2000), finishedAt, runId]);
       } catch {}
       throw error;
     }
@@ -239,5 +240,5 @@ class TemuCloudJitVmiSync {
 module.exports = {
   TemuCloudJitVmiSync,
   DEFAULT_COMPANY_ID,
-  ROBOT_KEY,
+  ROBOT_KEY
 };

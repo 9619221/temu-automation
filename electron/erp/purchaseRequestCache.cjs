@@ -67,7 +67,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-function openCacheDb() {
+async function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -75,7 +75,7 @@ function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  db.exec(`
+  await execSql(db, `
     CREATE TABLE IF NOT EXISTS purchase_request_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -110,19 +110,19 @@ function openCacheDb() {
 
 function closeCacheDb() {
   if (cacheDb) {
-    try { cacheDb.close(); } catch { /* ignore */ }
+    try {cacheDb.close();} catch {/* ignore */}
     cacheDb = null;
   }
 }
 
-function getMeta(companyId) {
+async function getMeta(companyId) {
   const db = openCacheDb();
-  return db.prepare("SELECT * FROM purchase_request_sync_meta WHERE company_id = ?").get(companyId) || null;
+  return (await queryOne(db, "SELECT * FROM purchase_request_sync_meta WHERE company_id = ?", [companyId])) || null;
 }
 
-function setMeta(companyId, fields = {}) {
+async function setMeta(companyId, fields = {}) {
   const db = openCacheDb();
-  db.prepare(`
+  await execute(db, `
     INSERT INTO purchase_request_sync_meta (company_id, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id) DO UPDATE SET
@@ -130,20 +130,20 @@ function setMeta(companyId, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `).run({
+  `, {
     company_id: companyId,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
     last_sync_at: fields.lastSyncAt != null ? fields.lastSyncAt : null,
-    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null,
+    last_reconcile_at: fields.lastReconcileAt != null ? fields.lastReconcileAt : null
   });
 }
 
-function isCachePopulated(companyId) {
+async function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
     const db = openCacheDb();
-    const row = db.prepare("SELECT 1 FROM purchase_request_cache WHERE company_id = ? LIMIT 1").get(companyId);
+    const row = await queryOne(db, "SELECT 1 FROM purchase_request_cache WHERE company_id = ? LIMIT 1", [companyId]);
     return Boolean(row);
   } catch {
     return false;
@@ -152,7 +152,7 @@ function isCachePopulated(companyId) {
 
 // 读缓存。返回 null 表示无法用缓存（无 companyId / 缓存空 / 打开失败），调用方据此降级回跨海。
 // 默认返回该 company 全部活跃找品富行（payload 原样），前端照原逻辑分队列 / 计数 / 分页。
-function getCachedPurchaseRequests(params = {}) {
+async function getCachedPurchaseRequests(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -168,19 +168,19 @@ function getCachedPurchaseRequests(params = {}) {
   const search = optionalString(params.search);
   if (search) {
     conditions.push(
-      "(internal_sku_code LIKE @search OR product_name LIKE @search OR account_name LIKE @search OR requested_by_name LIKE @search OR id LIKE @search)",
+      "(internal_sku_code LIKE @search OR product_name LIKE @search OR account_name LIKE @search OR requested_by_name LIKE @search OR id LIKE @search)"
     );
     args.search = `%${search}%`;
   }
   // 默认不限条数（找品量中等，本地查询毫秒级）；保留 limit/offset 以备将来。
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = db.prepare(`
+  const rows = await queryAll(db, `
     SELECT payload_json FROM purchase_request_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY updated_at DESC
     LIMIT @limit OFFSET @offset
-  `).all({ ...args, limit, offset });
+  `, { ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
@@ -198,7 +198,7 @@ function rowToCacheColumns(companyId, row, now) {
     requested_by_name: row.requestedByName != null ? String(row.requestedByName) : null,
     updated_at: row.updatedAt != null ? String(row.updatedAt) : null,
     payload: JSON.stringify(row),
-    cached_at: now,
+    cached_at: now
   };
 }
 
@@ -214,28 +214,28 @@ const UPSERT_SQL = `
     updated_at = @updated_at, payload_json = @payload, cached_at = @cached_at
 `;
 
-function upsertRequests(companyId, rows) {
+async function upsertRequests(companyId, rows) {
   if (!rows.length) return;
   const db = openCacheDb();
   const now = nowIso();
-  const stmt = db.prepare(UPSERT_SQL);
-  const tx = db.transaction((items) => {
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run(rowToCacheColumns(companyId, row, now));
-    }
-  });
-  tx(rows);
-}
 
-function deleteRequests(companyId, ids) {
-  if (!ids.length) return;
-  const db = openCacheDb();
-  const stmt = db.prepare("DELETE FROM purchase_request_cache WHERE company_id = ? AND id = ?");
-  const tx = db.transaction((list) => {
-    for (const id of list) stmt.run(companyId, String(id));
-  });
-  tx(ids);
+
+
+
+
+
+  await withTransaction(db, async (txDb) => {const items =
+
+
+
+
+
+
+
+    rows;for (const row of items) {if (!row || !row.id) continue;await execute(txDb, UPSERT_SQL, [rowToCacheColumns(companyId, row, now)]);}}
+
+  );}async function deleteRequests(companyId, ids) {if (!ids.length) return;const db = openCacheDb();await withTransaction(db, async (txDb) => {const list =
+    ids;for (const id of list) await execute(txDb, "DELETE FROM purchase_request_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});
 }
 
 async function fetchRequestPage({ since, includeDeleted, limit, offset }) {
@@ -245,9 +245,9 @@ async function fetchRequestPage({ since, includeDeleted, limit, offset }) {
   const payload = await clientRuntime.remoteRequest("/api/purchase/requests", {
     method: "POST",
     body,
-    timeoutMs: 120000,
+    timeoutMs: 120000
   });
-  return (payload && Array.isArray(payload.requests)) ? payload.requests : [];
+  return payload && Array.isArray(payload.requests) ? payload.requests : [];
 }
 
 // 全量重建：拉所有找品行到内存后一个事务替换该 company 缓存（中途失败不破坏旧缓存）。
@@ -265,16 +265,16 @@ async function syncFull(companyId) {
     if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;
   }
   const db = openCacheDb();
-  const now = nowIso();
-  const stmt = db.prepare(UPSERT_SQL);
-  const replaceTx = db.transaction((items) => {
-    db.prepare("DELETE FROM purchase_request_cache WHERE company_id = ?").run(companyId);
-    for (const row of items) {
-      if (!row || !row.id) continue;
-      stmt.run(rowToCacheColumns(companyId, row, now));
-    }
-  });
-  replaceTx(all);
+  const now = nowIso();await withTransaction(db,
+
+  async (txDb) => {const items =
+
+
+
+
+
+
+    all;await execute(txDb, "DELETE FROM purchase_request_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, UPSERT_SQL, [rowToCacheColumns(companyId, row, now)]);}});
   setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });
   return { mode: "full", total: all.length };
 }
@@ -315,7 +315,7 @@ async function reconcileDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true }; // 防御：空集不敢全删
   const db = openCacheDb();
-  const localIds = db.prepare("SELECT id FROM purchase_request_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
+  const localIds = (await queryAll(db, "SELECT id FROM purchase_request_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteRequests(companyId, stale);
   setMeta(companyId, { lastReconcileAt: nowIso() });
@@ -326,9 +326,9 @@ async function reconcileDeletes(companyId) {
 function withLock(companyId, key, fn) {
   const lockKey = `${companyId}:${key}`;
   if (syncLocks.has(lockKey)) return syncLocks.get(lockKey);
-  const promise = Promise.resolve()
-    .then(fn)
-    .finally(() => syncLocks.delete(lockKey));
+  const promise = Promise.resolve().
+  then(fn).
+  finally(() => syncLocks.delete(lockKey));
   syncLocks.set(lockKey, promise);
   return promise;
 }
@@ -340,9 +340,9 @@ async function triggerSync(options = {}) {
   const runtime = clientRuntime.getRuntimeStatus();
   if (runtime.mode !== "client" || !runtime.serverUrl) return { skipped: true, reason: "not-client" };
   const mode = options.mode === "full" ? "full" : "incremental";
-  return withLock(companyId, "sync", async () => (
-    mode === "full" ? syncFull(companyId) : syncIncremental(companyId)
-  ));
+  return withLock(companyId, "sync", async () =>
+  mode === "full" ? syncFull(companyId) : syncIncremental(companyId)
+  );
 }
 
 // 对外：触发硬删对账（独立锁，可与 sync 并行）。
@@ -354,13 +354,13 @@ async function triggerReconcile(options = {}) {
   return withLock(companyId, "reconcile", () => reconcileDeletes(companyId));
 }
 
-function getCacheStatus(options = {}) {
+async function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, count: 0, populated: false };
   let count = 0;
   try {
     const db = openCacheDb();
-    count = db.prepare("SELECT COUNT(*) AS c FROM purchase_request_cache WHERE company_id = ?").get(companyId).c;
+    count = (await queryOne(db, "SELECT COUNT(*) AS c FROM purchase_request_cache WHERE company_id = ?", [companyId])).c;
   } catch {
     return { companyId, count: 0, populated: false };
   }
@@ -373,7 +373,7 @@ function getCacheStatus(options = {}) {
     lastFullAt: meta?.last_full_at || null,
     lastSyncAt: meta?.last_sync_at || null,
     lastReconcileAt: meta?.last_reconcile_at || null,
-    syncing: syncLocks.has(`${companyId}:sync`),
+    syncing: syncLocks.has(`${companyId}:sync`)
   };
 }
 
@@ -384,5 +384,5 @@ module.exports = {
   isCachePopulated,
   triggerSync,
   triggerReconcile,
-  getCacheStatus,
+  getCacheStatus
 };

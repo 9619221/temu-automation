@@ -4,10 +4,11 @@ const { JushuitanOperationalBridge } = require("../electron/erp/services/jushuit
 
 const sourceKeys = process.argv.slice(2).map((value) => String(value || "").trim()).filter(Boolean);
 const companyId = process.env.COMPANY_ID || "company_default";
+(async () => {
 const db = openErpDatabase();
 
 try {
-  runMigrations({ db });
+  await runMigrations({ db });
   const bridge = new JushuitanOperationalBridge({ db });
   const result = bridge.sync({ companyId, sourceKeys });
   const sourceCounts = db.prepare(`
@@ -32,3 +33,5 @@ try {
 } finally {
   db.close();
 }
+
+})().catch(e => { console.error(e); process.exit(1); });
