@@ -34,6 +34,7 @@ import { roleLabel } from "../../utils/erpRoleAccess";
 import { useErpPermissions } from "../../contexts/ErpPermissionContext";
 import BrandMark from "../BrandMark";
 import ExtensionInstallGuide from "../ExtensionInstallGuide";
+import { useDeductionGuard } from "../InventoryDeductionGuard";
 
 const { Content, Header, Sider } = Layout;
 
@@ -119,15 +120,23 @@ export default function AppLayout() {
   const canManageAccounts = canMenu("/accounts");
   const canViewLogs = canMenu("/logs");
   const isStudioRoute = location.pathname.startsWith("/image-studio");
+  const { total: undeductedTotal } = useDeductionGuard();
 
   const visibleMenuItems = useMemo(() => (
     menuItems
       .map((group) => ({
         ...group,
-        children: group.children.filter((item) => canMenu(item.key)),
+        children: group.children
+          .filter((item) => canMenu(item.key))
+          .map((item) => {
+            if (item.key === "/qc-outbound" && undeductedTotal > 0) {
+              return { ...item, label: <Badge count={undeductedTotal} size="small" offset={[8, 0]}>{item.label}</Badge> };
+            }
+            return item;
+          }),
       }))
       .filter((group) => group.children.length > 0)
-  ), [canMenu]);
+  ), [canMenu, undeductedTotal]);
 
   const recentErrors = Object.entries(taskStates)
     .filter(([, state]) => state.status === "error")

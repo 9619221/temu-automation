@@ -13,6 +13,7 @@ import {
 } from "./utils/multiStore";
 import BrandMark from "./components/BrandMark";
 import OperationsExtensionGate from "./components/OperationsExtensionGate";
+import { InventoryDeductionGuard } from "./components/InventoryDeductionGuard";
 import { recordRouteOpen, exportPerfReport, buildPerfReport } from "./utils/perfLog";
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
@@ -328,7 +329,9 @@ function App() {
                 path="/"
                 element={(
                   <RequireAuth>
-                    <AppLayout key={`layout-${accountViewVersion}`} />
+                    <InventoryDeductionGuard>
+                      <AppLayout key={`layout-${accountViewVersion}`} />
+                    </InventoryDeductionGuard>
                   </RequireAuth>
                 )}
               >

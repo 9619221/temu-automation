@@ -501,6 +501,7 @@ async function ensureRuntimeDefaults() {
   await disableFeishuSupplierAutoImport("bootstrap").catch((e) => console.warn("[sw] feishu auto disable err", e?.message || e));
   // 启动后延迟 10 秒触发采集（等 tryAutoConfigure 完成拿到 token）
   setTimeout(() => {
+    ensureAgentSellerTab().then((t) => console.log("[sw] boot ensureTab:", t?.id || "none")).catch((e) => console.warn("[sw] boot ensureTab err", e?.message || e));
     collectHighPriceFlowFromTargets().then((r) => console.log("[sw] hpf boot collect:", r)).catch((e) => console.warn("[sw] hpf boot err", e?.message || e));
     bootEnrollSkcProbe().catch((e) => console.warn("[sw] enroll-skc boot err", e?.message || e));
     collectPriceAdjustActivities().then((r) => console.log("[sw] price-adjust boot:", JSON.stringify(r))).catch((e) => console.warn("[sw] price-adjust boot err", e?.message || e));
@@ -600,6 +601,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   });
   // 顺便心跳到 cloud 做远程诊断
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
+  ensureAgentSellerTab().catch((e) => console.warn("[sw] ensureTab err", e?.message || e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
   collectActivityMatchForCurrentMall().catch((e) => console.warn("[sw] activity match collect err", e?.message || e));
   collectActivityMatchFromTargets().catch((e) => console.warn("[sw] activity match targets collect err", e?.message || e));
@@ -848,13 +850,39 @@ async function collectActivityLibraryFromTargets() {
 }
 
 // ---------- 流量分析主动直采（采当前登录店，铺开 temu_product_flow_snapshot） ----------
+
+const ENSURE_TAB_URL = "https://agentseller.temu.com/main/flux-analysis-full";
+const ENSURE_TAB_WAIT_MS = 8000;
+const ENSURE_TAB_POLL_MS = 500;
+
+async function ensureAgentSellerTab() {
+  const existing = await chrome.tabs.query({
+    url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+  });
+  if (existing.length > 0) return existing.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  const tab = await chrome.tabs.create({ url: ENSURE_TAB_URL, active: false });
+  const deadline = Date.now() + ENSURE_TAB_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, ENSURE_TAB_POLL_MS));
+    try {
+      const t = await chrome.tabs.get(tab.id);
+      if (t.status === "complete") return t;
+    } catch { return null; }
+  }
+  return tab;
+}
+
 // 用 scripting 在 agentseller 标签页取当前 mallid（manifest 无 cookies 权限，借 scripting）
 async function getCurrentAgentSellerMall() {
   try {
-    const tabs = await chrome.tabs.query({
+    let tabs = await chrome.tabs.query({
       url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
     });
-    if (!tabs.length) return null;
+    if (!tabs.length) {
+      const created = await ensureAgentSellerTab();
+      if (!created) return null;
+      tabs = [created];
+    }
     const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
     const [res] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -1546,6 +1574,7 @@ async function collectFlowForCurrentMall() {
   }
   return { ok: true, enqueuedCount, mall: cur.mallId };
 }
+self.ensureAgentSellerTab = ensureAgentSellerTab;
 self.collectFlowForCurrentMall = collectFlowForCurrentMall;
 
 async function collectFlowTrendsForProducts(mallId, productIds, origin, siteTag) {

@@ -22315,6 +22315,48 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       // 自动发货·待配商品清单(已接单待发货涉及的商品 + 现有映射)，供前端表格 + Excel 模板。
       return { action, products: listShippableProducts(db) };
     }
+    case "get_undeducted_consigns": {
+      const eff = computeEffectivePermissions(actor);
+      const mallIds = (eff.isPrivileged || eff.allStores)
+        ? null
+        : (eff.mallIds || []).filter(Boolean);
+      if (mallIds && mallIds.length === 0) return { action, total: 0, overdueCount: 0, items: [] };
+      const mallFilter = mallIds ? `AND c.mall_id IN (${mallIds.map(() => "?").join(",")})` : "";
+      const sql = `
+        SELECT c.mall_id, c.so_id, c.product_name, c.sku_ext_codes, c.demand_qty,
+               c.delivered_qty, c.temu_status, c.deliver_time, c.order_time,
+               m.mall_name AS store_name
+        FROM erp_temu_openapi_consign c
+        LEFT JOIN erp_consign_local_state ls ON ls.mall_id = c.mall_id AND ls.so_id = c.so_id
+        LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
+        WHERE c.temu_status = '已收货'
+          AND COALESCE(ls.inventory_deducted, 0) = 0
+          AND COALESCE(ls.deduction_ignored, 0) = 0
+          ${mallFilter}
+        ORDER BY c.deliver_time ASC
+      `;
+      const params = mallIds || [];
+      const rows = db.prepare(sql).all(...params);
+      const now = Date.now();
+      const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+      const items = rows.map((r) => {
+        const deliverTs = r.deliver_time ? new Date(r.deliver_time).getTime() : (r.order_time ? new Date(r.order_time).getTime() : 0);
+        const overdue = deliverTs > 0 && (now - deliverTs) > THREE_DAYS_MS;
+        return { ...r, overdue };
+      });
+      const overdueCount = items.filter((i) => i.overdue).length;
+      return { action, total: items.length, overdueCount, items };
+    }
+    case "ignore_consign_deduction": {
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id, "soId");
+      db.prepare(`
+        INSERT INTO erp_consign_local_state (mall_id, so_id, deduction_ignored, updated_at)
+        VALUES (?, ?, 1, datetime('now'))
+        ON CONFLICT(mall_id, so_id) DO UPDATE SET deduction_ignored = 1, updated_at = datetime('now')
+      `).run(mallId, soId);
+      return { action, ok: true, mallId, soId };
+    }
     default:
       throw new Error(`Unsupported inventory action: ${action}`);
   }

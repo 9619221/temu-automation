@@ -50,6 +50,7 @@ import PageHeader from "../components/PageHeader";
 import OtherInoutSection from "../components/OtherInoutSection";
 import BarcodeLabelModal from "../components/BarcodeLabelModal";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { useDeductionGuard } from "../components/InventoryDeductionGuard";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 import type { TemuStockOrderRow } from "../utils/cloudClient";
 
@@ -560,6 +561,7 @@ const SelectableConsignTable = React.memo(function SelectableConsignTable({
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
+  const deductionGuard = useDeductionGuard();
   const cachedData = useMemo(
     () => readPageCache<OutboundCache>(OUTBOUND_CACHE_KEY, {}),
     [],
@@ -1729,6 +1731,26 @@ export default function QcOutboundCenter() {
     }
   }, [erp]);
 
+  const undeductedKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const it of deductionGuard.items) s.add(`${it.mall_id}:${it.so_id}`);
+    return s;
+  }, [deductionGuard.items]);
+
+  const handleIgnoreDeduction = useCallback(async (row: ConsignDeliverUnifiedRow) => {
+    if (!erp?.inventory?.action) return;
+    const mallId = String(row.rawCloud?.mall_id || "");
+    const soId = row.soId || "";
+    if (!mallId || !soId) return;
+    try {
+      await erp.inventory.action({ action: "ignore_consign_deduction", mallId, soId });
+      message.success("已忽略该单的库存扣减提醒");
+      deductionGuard.refresh();
+    } catch (e: any) {
+      message.error(e?.message || "忽略失败");
+    }
+  }, [erp, deductionGuard]);
+
   const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
     const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
     {
@@ -1786,7 +1808,7 @@ export default function QcOutboundCenter() {
     {
       title: "erp状态",
       key: "erpStatus",
-      width: 110,
+      width: 130,
       onCell: (row) => {
         const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核";
         const st = stockStatusCellStyle(s);
@@ -1794,7 +1816,18 @@ export default function QcOutboundCenter() {
       },
       render: (_value, row) => {
         const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核";
-        return <span className="status-cell-text">{s}</span>;
+        const mallId = String(row.rawCloud?.mall_id || "");
+        const needsDeduction = mallId && row.soId && undeductedKeys.has(`${mallId}:${row.soId}`);
+        return (
+          <Space direction="vertical" size={2}>
+            <span className="status-cell-text">{s}</span>
+            {needsDeduction ? (
+              <Button type="link" size="small" danger style={{ padding: 0, height: "auto", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); handleIgnoreDeduction(row); }}>
+                忽略扣减
+              </Button>
+            ) : null}
+          </Space>
+        );
       },
     },
     {
@@ -1999,7 +2032,7 @@ export default function QcOutboundCenter() {
         onHeaderCell: buildColumnMenuHeaderProps,
       };
     });
-  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage, parsedAddrCache]);
+  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, handleIgnoreDeduction, undeductedKeys, resolveUnifiedRowLink, unifiedColumnConfig, getShipStage, parsedAddrCache]);
 
   const handleOnRow = useCallback((row: ConsignDeliverUnifiedRow) => ({
     onMouseEnter: () => { void loadUnifiedItems(row); void loadCloudItems(row); },
@@ -2076,6 +2109,20 @@ export default function QcOutboundCenter() {
           </div>,
         ]}
       />
+
+      {deductionGuard.total > 0 ? (
+        <Alert
+          className="qc-outbound-sync-alert"
+          type={deductionGuard.overdueCount > 0 ? "error" : "warning"}
+          showIcon
+          banner
+          message={
+            deductionGuard.overdueCount > 0
+              ? `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存（其中 ${deductionGuard.overdueCount} 笔已超 3 天），请尽快逐单确认发货或忽略`
+              : `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存，请逐单确认发货或忽略`
+          }
+        />
+      ) : null}
 
       {unifiedError ? (
         <Alert
