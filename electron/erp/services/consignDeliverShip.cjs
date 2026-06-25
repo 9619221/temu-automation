@@ -169,6 +169,9 @@ function shipConsignDelivery({ db, services, oId, companyId, actor }) {
       company_id: companyId,
       o_id: Number(oId),
     });
+    try {
+      db.prepare(`UPDATE temu_consign_unified_snapshot SET display_status = '已发货' WHERE so_id = @so_id AND company_id = @company_id`).run({ so_id: String(head.so_id), company_id: companyId });
+    } catch { /* 快照表不存在时忽略 */ }
     return ledger;
   });
   const ledger = run();
@@ -211,6 +214,9 @@ function unshipConsignDelivery({ db, services, oId, companyId, actor }) {
       company_id: companyId,
       o_id: Number(oId),
     });
+    try {
+      db.prepare(`UPDATE temu_consign_unified_snapshot SET display_status = COALESCE((SELECT status FROM jst_consign_deliveries WHERE company_id = @company_id AND o_id = @o_id), '已付款待审核') WHERE so_id = @so_id AND company_id = @company_id`).run({ so_id: String(head.so_id), company_id: companyId, o_id: Number(oId) });
+    } catch { /* 快照表不存在时忽略 */ }
     return lines.length;
   });
   const restored = run();
@@ -379,6 +385,9 @@ function shipCloudConsignDelivery({ db, services, mallId, soId, actor }) {
       ledger.push({ skuKey: line.skuKey, skuId: line.skuId, accountId: line.accountId, qty: line.qty, bundleSkuCode: line.bundleSkuCode, lines: outLines });
     }
     upsertCloudShipState(db, { mallId, soId, ledger, actor, now });
+    try {
+      db.prepare(`UPDATE temu_consign_unified_snapshot SET display_status = '已发货' WHERE so_id = @so_id`).run({ so_id: String(soId) });
+    } catch { /* 快照表不存在时忽略 */ }
     return ledger;
   });
   const ledger = run();
@@ -422,6 +431,9 @@ function unshipCloudConsignDelivery({ db, services, mallId, soId, actor }) {
       mall_id: String(mallId),
       so_id: String(soId),
     });
+    try {
+      db.prepare(`UPDATE temu_consign_unified_snapshot SET display_status = '已付款待审核' WHERE so_id = @so_id`).run({ so_id: String(soId) });
+    } catch { /* 快照表不存在时忽略 */ }
     return Array.isArray(ledger) ? ledger.length : 0;
   });
   const restored = run();

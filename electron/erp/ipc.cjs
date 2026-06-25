@@ -7288,7 +7288,8 @@ function listSkuSwapOtherInout(db, params = {}) {
   try {
     legs = db.prepare(`
       SELECT l.source_doc_id AS doc, l.type AS type, l.qty_delta AS qd, l.unit_cost AS uc,
-             l.created_at AS ts, COALESCE(u.name, l.created_by) AS creator, s.internal_sku_code AS code,
+             l.created_at AS ts, l.cancelled_at AS cancelled_at,
+             COALESCE(u.name, l.created_by) AS creator, s.internal_sku_code AS code,
              acct.name AS store
       FROM erp_inventory_ledger_entries l
       LEFT JOIN erp_skus s ON s.id = l.sku_id
@@ -7302,7 +7303,8 @@ function listSkuSwapOtherInout(db, params = {}) {
   const byDoc = new Map();
   for (const r of legs) {
     let g = byDoc.get(r.doc);
-    if (!g) { g = { doc: r.doc, out: [], in: [], creator: null, tsList: [], stores: new Set() }; byDoc.set(r.doc, g); }
+    if (!g) { g = { doc: r.doc, out: [], in: [], creator: null, tsList: [], stores: new Set(), cancelledAt: null }; byDoc.set(r.doc, g); }
+    if (r.cancelled_at && !g.cancelledAt) g.cancelledAt = r.cancelled_at;
     g.tsList.push(r.ts);
     if (r.creator && !g.creator) g.creator = r.creator;
     // 店铺跟着 SKU 走：一单可能涉及换出/换入多个店铺，去重后全部列出。
@@ -7325,7 +7327,7 @@ function listSkuSwapOtherInout(db, params = {}) {
       ioId: g.doc,
       ioDate,
       type: "商品编码换货",
-      status: "生效",
+      status: g.cancelledAt ? "已取消" : "生效",
       fStatus: null,
       whId: null, lwhId: null, lwhName: null,
       warehouse: "本地库存调拨",
@@ -7352,7 +7354,8 @@ function listSkuSwapOtherInout(db, params = {}) {
   const typeFilter = optionalString(params.type);
   if (typeFilter && typeFilter !== "商品编码换货") return [];
   const statusFilter = optionalString(params.status);
-  if (statusFilter && statusFilter !== "生效") return [];
+  if (statusFilter && statusFilter !== "生效" && statusFilter !== "已取消") return [];
+  if (statusFilter) rows = rows.filter((r) => r.status === statusFilter);
   const dateFrom = optionalString(params.dateFrom || params.date_from);
   if (dateFrom) rows = rows.filter((r) => (r.ioDate || "") >= dateFrom);
   const dateTo = optionalString(params.dateTo || params.date_to);
@@ -15479,7 +15482,9 @@ async function runScheduledMessageReprocess({ maxAgeHours = 168, limit = 100, lo
   if (!candidates.length) return { processed: 0, results: [] };
   const log = typeof logger === "function" ? logger : () => {};
   const results = [];
-  for (const event of candidates) {
+  for (let _mri = 0; _mri < candidates.length; _mri++) {
+    if (_mri > 0 && _mri % 10 === 0) await new Promise(r => setImmediate(r));
+    const event = candidates[_mri];
     try {
       const processResult = reprocess1688MessageEventRow(event, { db, services });
       const status = processResult.status === "processed"
@@ -22065,6 +22070,78 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       });
       return { action, ...run() };
     }
+    case "revert_swap_sku": {
+      const sourceDocId = requireString(payload.sourceDocId, "sourceDocId");
+      const legs = db.prepare(`
+        SELECT l.id, l.type, l.qty_delta AS qd, l.unit_cost AS uc, l.sku_id, l.batch_id,
+               s.account_id, s.internal_sku_code AS code
+        FROM erp_inventory_ledger_entries l
+        LEFT JOIN erp_skus s ON s.id = l.sku_id
+        WHERE l.source_doc_id = ? AND l.type IN ('sku_swap_out', 'sku_swap_in')
+      `).all(sourceDocId);
+      if (!legs.length) throw new Error(`换货单 ${sourceDocId} 不存在或已撤销`);
+      const outLeg = legs.find((r) => r.type === "sku_swap_out");
+      const inLeg = legs.find((r) => r.type === "sku_swap_in");
+      if (!outLeg || !inLeg) throw new Error("换货流水不完整，缺少换出或换入记录");
+      const fromSkuId = outLeg.sku_id;
+      const toSkuId = inLeg.sku_id;
+      const fromQty = Math.abs(Number(outLeg.qd) || 0);
+      const toQty = Math.abs(Number(inLeg.qd) || 0);
+      const fromUnitCost = Number(outLeg.uc) || 0;
+      const fromAmount = fromQty * fromUnitCost;
+      const fromAccountId = outLeg.account_id;
+      const toAccountId = inLeg.account_id;
+      if (!fromAccountId || !toAccountId) throw new Error("换货 SKU 缺少店铺绑定");
+      const run = db.transaction(() => {
+        const now = nowIso();
+        // 1. 反向成本：换出方加回货值，换入方扣除货值
+        services.inventory.adjustSkuInventoryValue(fromSkuId, fromQty, fromAmount);
+        services.inventory.adjustSkuInventoryValue(toSkuId, -toQty, -fromAmount);
+        // 2. 标记流水为已取消（解除换入腿的 batch_id FK，以便删批次）
+        db.prepare(`
+          UPDATE erp_inventory_ledger_entries
+          SET cancelled_at = ?, batch_id = NULL
+          WHERE id = ? AND type = 'sku_swap_in'
+        `).run(now, inLeg.id);
+        db.prepare(`
+          UPDATE erp_inventory_ledger_entries
+          SET cancelled_at = ?
+          WHERE id = ? AND type = 'sku_swap_out'
+        `).run(now, outLeg.id);
+        // 3. 删除换入方的批次（applyDirectInbound 创建的）
+        if (inLeg.batch_id) {
+          db.prepare("DELETE FROM erp_inventory_batches WHERE id = ?").run(inLeg.batch_id);
+        }
+        // 4. 给换出方补回一个等额批次
+        const batchId = createId("batch");
+        db.prepare(`
+          INSERT INTO erp_inventory_batches (
+            id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
+            received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
+            rework_qty, unit_landed_cost, qc_status, location_code,
+            received_at, created_at, updated_at
+          ) VALUES (
+            @id, @account_id, @batch_code, @sku_id, NULL, NULL,
+            @qty, @qty, 0, 0, 0,
+            0, @unit_landed_cost, 'passed', NULL,
+            @now, @now, @now
+          )
+        `).run({
+          id: batchId,
+          account_id: fromAccountId,
+          batch_code: `REVERT-swap-${Date.now().toString(36).toUpperCase()}`,
+          sku_id: fromSkuId,
+          qty: fromQty,
+          unit_landed_cost: fromUnitCost,
+          now,
+        });
+        return {
+          fromSkuId, toSkuId, fromQty, toQty, fromAmount,
+          fromUnitCost, fromCode: outLeg.code, toCode: inLeg.code,
+        };
+      });
+      return { action, ...run() };
+    }
     case "consign_deliver_ship": {
       // 送仓托管行本地确认发货：按明细把货从本地仓扣掉（发到 Temu 仓）。
       const oId = requireString(payload.oId || payload.o_id, "oId");
@@ -22322,6 +22399,10 @@ function performInventoryAction(payload = {}, actorInput = {}) {
         : (eff.mallIds || []).filter(Boolean);
       if (mallIds && mallIds.length === 0) return { action, total: 0, overdueCount: 0, items: [] };
       const mallFilter = mallIds ? `AND c.mall_id IN (${mallIds.map(() => "?").join(",")})` : "";
+      const hasSnapshot = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'").get();
+      const excludeShipped = hasSnapshot
+        ? `AND NOT EXISTS (SELECT 1 FROM temu_consign_unified_snapshot s WHERE s.so_id = c.so_id AND s.display_status = '已发货')`
+        : "";
       const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
       const baseWhere = `
         c.temu_status = '已收货'
@@ -22330,6 +22411,7 @@ function performInventoryAction(payload = {}, actorInput = {}) {
           WHERE ls.mall_id = c.mall_id AND ls.so_id = c.so_id
             AND (ls.inventory_deducted = 1 OR ls.deduction_ignored = 1)
         )
+        ${excludeShipped}
         ${mallFilter}
       `;
       const params = mallIds || [];
@@ -22350,8 +22432,7 @@ function performInventoryAction(payload = {}, actorInput = {}) {
         FROM erp_temu_openapi_consign c
         LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
         WHERE ${baseWhere}
-        ORDER BY overdue DESC, c.deliver_time ASC
-        LIMIT 50
+        ORDER BY store_name ASC, overdue DESC, c.deliver_time ASC
       `).all(threeDaysAgo, ...params);
       return { action, total, overdueCount, items };
     }

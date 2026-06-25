@@ -7218,14 +7218,15 @@ body {
 }
 
 /* 状态单元格：用 CSS 变量驱动背景色，悬浮时不被覆盖 */
-td.status-cell-colored {
+.status-cell-colored {
   background: var(--status-bg, transparent) !important;
   text-align: center;
+  vertical-align: middle;
   padding: 0 !important;
 }
-.erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > td.status-cell-colored,
-.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > td.status-cell-colored,
-.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected:hover > td.status-cell-colored {
+.erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > .status-cell-colored,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > .status-cell-colored,
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected:hover > .status-cell-colored {
   background: var(--status-bg, transparent) !important;
 }
 .status-cell-text {

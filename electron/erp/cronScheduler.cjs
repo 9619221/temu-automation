@@ -35,7 +35,7 @@ class CronScheduler {
 
   start(initialDelayMs = 60000) {
     this._stopped = false;
-    const STAGGER = 30000;
+    const STAGGER = 60000;
     let offset = 0;
     for (const [name, task] of this._tasks) {
       const delay = initialDelayMs + offset;
@@ -97,6 +97,9 @@ class CronScheduler {
           task.lastRun = Date.now();
           task.lastDurationMs = Date.now() - t0;
           this._currentChild = null;
+        }
+        if (this._queue.length > 0 && !this._stopped) {
+          await new Promise(r => setTimeout(r, 30000));
         }
       }
     } finally {

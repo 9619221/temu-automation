@@ -111,7 +111,7 @@ async function rebuildSnapshotInternal(db, opts = {}) {
   db.exec("DROP TABLE IF EXISTS temu_consign_unified_snapshot_new");
   db.exec(`CREATE TABLE temu_consign_unified_snapshot_new (
     company_id TEXT NOT NULL, so_id TEXT, source TEXT, jst_status TEXT,
-    display_status TEXT, online_status TEXT, order_key TEXT, search_blob TEXT,
+    display_status TEXT, online_status TEXT, order_key TEXT, shop_name TEXT, search_blob TEXT,
     payload_json TEXT NOT NULL, rebuilt_at INTEGER NOT NULL
   )`);
 
@@ -130,8 +130,8 @@ async function rebuildSnapshotInternal(db, opts = {}) {
   const BATCH_SIZE = 1000;
   const ins = db.prepare(`
     INSERT INTO temu_consign_unified_snapshot_new
-      (company_id, so_id, source, jst_status, display_status, online_status, order_key, search_blob, payload_json, rebuilt_at)
-    VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @online_status, @order_key, @search_blob, @payload_json, @rebuilt_at)
+      (company_id, so_id, source, jst_status, display_status, online_status, order_key, shop_name, search_blob, payload_json, rebuilt_at)
+    VALUES (@company_id, @so_id, @source, @jst_status, @display_status, @online_status, @order_key, @shop_name, @search_blob, @payload_json, @rebuilt_at)
   `);
   const insertBatch = db.transaction((batch) => {
     for (const p of batch) ins.run(p);
@@ -146,9 +146,10 @@ async function rebuildSnapshotInternal(db, opts = {}) {
       so_id: row.so_id || null,
       source: row.source || null,
       jst_status: row.jst_status || null,
-      display_status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
+      display_status: row.local_status_override || row.jst_status || "已付款待审核",
       online_status: row.cloud_temu_status || null,
       order_key: row.jst_order_date || row.cloud_order_time || null,
+      shop_name: row.cloud_shop_name || row.jst_shop_name || null,
       search_blob: buildSearchBlob(row),
       payload_json: JSON.stringify(toPayload(row)),
       rebuilt_at: rebuiltAt,
@@ -186,8 +187,12 @@ async function rebuildSnapshotInternal(db, opts = {}) {
       ON temu_consign_unified_snapshot(company_id, source);
     CREATE INDEX idx_consign_unified_snap_company_status
       ON temu_consign_unified_snapshot(company_id, display_status);
+    CREATE INDEX idx_consign_unified_snap_company_shop
+      ON temu_consign_unified_snapshot(company_id, shop_name);
     CREATE INDEX idx_consign_unified_snap_company_online_status
       ON temu_consign_unified_snapshot(company_id, online_status);
+    CREATE INDEX idx_consign_snap_status_online
+      ON temu_consign_unified_snapshot(company_id, display_status, online_status);
   `);
 
   logger(`完成：共 ${totalRows} 行, 总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);

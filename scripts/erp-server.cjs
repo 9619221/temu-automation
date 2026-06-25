@@ -103,26 +103,11 @@ function setupCronScheduler(erpDbPath) {
   scheduler.register("sku-sales", 15 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-sku-sales.cjs"), envBase);
 
-  scheduler.register("product-panel", 20 * 60 * 1000,
-    path.join(scriptsDir, "refresh-product-panel.cjs"), { ...envBase, CLOUD_DB });
-
-  scheduler.register("ops-reports", 20 * 60 * 1000,
-    path.join(scriptsDir, "refresh-ops-reports.cjs"), { ...envBase, CLOUD_DB });
-
-  scheduler.register("openapi-consign", 6 * 60 * 60 * 1000,
-    path.join(scriptsDir, "refresh-openapi-consign.cjs"), envBase);
-
-  scheduler.register("consign-snapshot", 6 * 60 * 60 * 1000,
-    path.join(scriptsDir, "rebuild-consign-snapshot.cjs"), envBase);
-
   scheduler.register("firstship", 30 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-firstship.cjs"), envBase);
 
   scheduler.register("goods-created", 30 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-goods-created.cjs"), envBase);
-
-  scheduler.register("qc", 3 * 60 * 60 * 1000,
-    path.join(scriptsDir, "refresh-openapi-qc.cjs"), { ...envBase, QC_SINCE_DAYS: "7" });
 
   scheduler.register("mall-addresses", 24 * 60 * 60 * 1000,
     path.join(scriptsDir, "refresh-openapi-mall-addresses.cjs"), envBase);
@@ -132,6 +117,21 @@ function setupCronScheduler(erpDbPath) {
     scheduler.register("settlement-income", settlementIntervalMin * 60 * 1000,
       path.join(scriptsDir, "sync-temu-settlement-income.cjs"), envBase);
   }
+
+  scheduler.register("qc", 3 * 60 * 60 * 1000,
+    path.join(scriptsDir, "refresh-openapi-qc.cjs"), { ...envBase, QC_SINCE_DAYS: "7" });
+
+  scheduler.register("product-panel", 60 * 60 * 1000,
+    path.join(scriptsDir, "refresh-product-panel.cjs"), { ...envBase, CLOUD_DB });
+
+  scheduler.register("ops-reports", 60 * 60 * 1000,
+    path.join(scriptsDir, "refresh-ops-reports.cjs"), { ...envBase, CLOUD_DB });
+
+  scheduler.register("openapi-consign", 6 * 60 * 60 * 1000,
+    path.join(scriptsDir, "refresh-openapi-consign.cjs"), envBase);
+
+  scheduler.register("consign-snapshot", 1 * 60 * 60 * 1000,
+    path.join(scriptsDir, "rebuild-consign-snapshot.cjs"), envBase);
 
   cronScheduler = scheduler;
   return { scheduler };
@@ -173,10 +173,10 @@ async function main() {
       .catch((e) => console.warn(`[prewarm] purchase/workbench failed: ${e.message}`));
   }, 45_000);
 
-  // 120s: cron 串行调度器（各任务再依次错开 10s；在 prewarm 完成后启动，避免争磁盘）
+  // cron 串行调度器：首次延迟 5 分钟，让 HTTP 服务先稳定可用
   try {
     const cron = setupCronScheduler(result.initResult.dbPath);
-    if (cron) cron.scheduler.start(300 * 1000);
+    if (cron) cron.scheduler.start(5 * 60 * 1000);
   } catch (e) {
     console.warn("[cron-scheduler] setup failed:", e?.message || e);
   }

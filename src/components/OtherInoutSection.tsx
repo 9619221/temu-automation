@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Col, DatePicker, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { CloudSyncOutlined, DownloadOutlined, EyeOutlined, ReloadOutlined, SearchOutlined, SwapOutlined } from "@ant-design/icons";
+import { DownloadOutlined, EyeOutlined, SearchOutlined, SwapOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
-import StatCard from "./StatCard";
 
 const { Paragraph, Text } = Typography;
 
@@ -333,6 +332,7 @@ export default function OtherInoutSection() {
       title: "备注",
       dataIndex: "remark",
       key: "remark",
+      width: 160,
       ellipsis: true,
       render: (v) => v || "-",
     },
@@ -411,6 +411,37 @@ export default function OtherInoutSection() {
     }, 250);
     return () => clearTimeout(handle);
   }, [toSkuSearch, xferOpen]);
+
+  const [revertingDocId, setRevertingDocId] = useState<string | null>(null);
+
+  const handleRevertSwap = async (row: OtherInoutRow) => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const docId = String(row.ioId || "");
+    if (!docId) return;
+    setRevertingDocId(docId);
+    try {
+      const result = await erp.inventory.action({ action: "revert_swap_sku", sourceDocId: docId });
+      message.success("已取消生效，请修改后重新提交");
+      setFromSkuId(result.fromSkuId);
+      setFromSkuObj(null);
+      setFromQty(result.fromQty ?? null);
+      setFromUnitCost(result.fromUnitCost ?? null);
+      setFromAmount(result.fromAmount ?? null);
+      setFromSkuSearch(result.fromCode || "");
+      setFromSkuOptions([]);
+      setToSkuId(result.toSkuId);
+      setToQty(result.toQty ?? null);
+      setToSkuSearch(result.toCode || "");
+      setToSkuOptions([]);
+      setXferOpen(true);
+      setExpandedId(null);
+      void loadData();
+    } catch (e: any) {
+      message.error(e?.message || "取消生效失败");
+    } finally {
+      setRevertingDocId(null);
+    }
+  };
 
   const openXfer = () => {
     setFromSkuId(undefined);
@@ -492,20 +523,12 @@ export default function OtherInoutSection() {
         <Alert style={{ marginBottom: 12 }} type="warning" showIcon message={error} />
       ) : null}
 
-      <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="本页单数" value={formatNumber(rows.length)} color="brand" icon={<CloudSyncOutlined />} compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="累计单数" value={formatNumber(total)} color="neutral" compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="本页总数量" value={formatNumber(totalQty)} color="blue" compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="本页总金额" value={formatMoney(totalAmount)} color={totalAmount ? "orange" : "neutral"} compact />
-        </Col>
-      </Row>
+      <div style={{ display: "flex", alignItems: "center", gap: 24, padding: "8px 0", fontSize: 14 }}>
+        <span>本页 <strong>{formatNumber(rows.length)}</strong> 单</span>
+        <span>累计 <strong>{formatNumber(total)}</strong> 单</span>
+        <span>总数量 <strong>{formatNumber(totalQty)}</strong> 件</span>
+        <span>总金额 <strong style={{ color: totalAmount ? "#fa8c16" : undefined }}>{formatMoney(totalAmount)}</strong></span>
+      </div>
 
       <section className="app-panel">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -535,7 +558,6 @@ export default function OtherInoutSection() {
               <Space>
                 <Button type="primary" icon={<SwapOutlined />} onClick={openXfer}>新建换货</Button>
                 <Button icon={<DownloadOutlined />} loading={exporting} onClick={exportExcel}>导出</Button>
-                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>刷新</Button>
               </Space>
             </div>
           </div>
@@ -547,7 +569,7 @@ export default function OtherInoutSection() {
             loading={loading && !loadedOnce}
             columns={columns}
             dataSource={rows}
-            scroll={{ x: 1400 }}
+            scroll={{ x: 1600 }}
             onRow={(row) => ({ onClick: () => void toggleExpand(row), style: { cursor: "pointer" } })}
             expandable={{
               expandedRowKeys: expandedId ? [expandedId] : [],
@@ -567,6 +589,18 @@ export default function OtherInoutSection() {
                     <Col xs={12} sm={6}><Text type="secondary">原因</Text><div>{row.reason || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">标签</Text><div>{row.labels || "-"}</div></Col>
                     {row.remark ? <Col xs={24}><Text type="secondary">备注</Text><div>{row.remark}</div></Col> : null}
+                    {row.isSwap && row.status === "生效" && (
+                      <Col xs={24} style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <Button
+                          danger
+                          size="large"
+                          loading={revertingDocId === String(row.ioId)}
+                          onClick={(e) => { e.stopPropagation(); void handleRevertSwap(row); }}
+                        >
+                          取消生效
+                        </Button>
+                      </Col>
+                    )}
                   </Row>
 
                   <Table<OtherInoutItemRow>
@@ -603,11 +637,11 @@ export default function OtherInoutSection() {
       </section>
 
       <Modal
-        title="新建换货（商品编码之间调拨库存）"
+        title={fromSkuId ? "编辑换货（修改后重新生效）" : "新建换货（商品编码之间调拨库存）"}
         open={xferOpen}
         onCancel={() => setXferOpen(false)}
         onOk={() => void submitXfer()}
-        okText="确认换货"
+        okText={fromSkuId ? "重新生效" : "确认换货"}
         confirmLoading={xferSubmitting}
         width={760}
         destroyOnClose

@@ -779,29 +779,14 @@ function enrichSendAddresses(db, payloadRows) {
 // 陈旧阈值 12h > cron 重建间隔 6h：留一次 cron 失败/跑慢/排队靠后的余量。
 // 若阈值==间隔(原 6h)则零余量，某次 cron 没及时跑就会判陈旧→回退在线 CTE(冷态~46s)拖垮全站。
 // 送仓状态非秒级敏感，12h 内的数据延迟可接受，远好过偶发 46s 全站连带超时。
-const CONSIGN_SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const CONSIGN_SNAPSHOT_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 
-function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
-  const { companyId, page, pageSize, offset, search, statusFilter, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
-  const tableExists = db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'")
-    .get();
-  if (!tableExists) return null;
-  const meta = db
-    .prepare("SELECT MAX(rebuilt_at) AS m, COUNT(*) AS c FROM temu_consign_unified_snapshot WHERE company_id = ?")
-    .get(companyId);
-  if (!meta || !meta.c) return null;
-  if (meta.m && Date.now() - Number(meta.m) > CONSIGN_SNAPSHOT_MAX_AGE_MS) return null;
-
-  // 新快照有 display_status 列(= COALESCE(jst_status, cloud_temu_status))；
-  // 部署后旧快照重建前可能还没有该列，回退到 jst_status，避免「no such column」。
-  const hasDisplayStatus = db
-    .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'display_status'")
-    .get();
-  const statusCol = hasDisplayStatus ? "display_status" : "jst_status";
-  let hasOnlineStatus = db
-    .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'online_status'")
-    .get();
+let _snapColCache = null;
+const _sbBreakdownCache = new Map();
+function _getSnapColInfo(db) {
+  if (_snapColCache) return _snapColCache;
+  const hasDisplayStatus = !!db.prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'display_status'").get();
+  let hasOnlineStatus = !!db.prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'online_status'").get();
   if (!hasOnlineStatus) {
     try {
       db.exec("ALTER TABLE temu_consign_unified_snapshot ADD COLUMN online_status TEXT");
@@ -810,14 +795,44 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
       hasOnlineStatus = true;
     } catch { /* 补列失败不影响主逻辑 */ }
   }
+  let hasShopName = !!db.prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'shop_name'").get();
+  if (!hasShopName) {
+    try {
+      db.exec("ALTER TABLE temu_consign_unified_snapshot ADD COLUMN shop_name TEXT");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_consign_unified_snap_company_shop ON temu_consign_unified_snapshot(company_id, shop_name)");
+      db.exec(`UPDATE temu_consign_unified_snapshot SET shop_name = json_extract(payload_json, '$.shopName') WHERE shop_name IS NULL`);
+      hasShopName = true;
+    } catch { /* 下次 snapshot 重建会补齐 */ }
+  }
+  _snapColCache = { statusCol: hasDisplayStatus ? "display_status" : "jst_status", hasOnlineStatus, hasShopName };
+  return _snapColCache;
+}
+
+function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
+  const { companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
+  const tableExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'")
+    .get();
+  if (!tableExists) return null;
+  const meta = db
+    .prepare("SELECT rebuilt_at AS m FROM temu_consign_unified_snapshot WHERE company_id = ? LIMIT 1")
+    .get(companyId);
+  if (!meta) return null;
+  // 只要有数据就用，不检查陈旧度（统一表由写入端实时维护）
+
+  const { statusCol, hasOnlineStatus, hasShopName } = _getSnapColInfo(db);
 
   const buildWhere = (includeSource) => {
     const values = { company_id: companyId };
     const cond = ["company_id = @company_id"];
     if (search) { values.search = `%${search}%`; cond.push("search_blob LIKE @search"); }
-    if (statusFilter) { values.status_filter = statusFilter; cond.push(`${statusCol} = @status_filter`); }
+    if (statusFilters && statusFilters.length === 1) { values.status_filter = statusFilters[0]; cond.push(`${statusCol} = @status_filter`); }
+    else if (statusFilters && statusFilters.length > 1) { const ph = statusFilters.map((s, i) => { values[`sf${i}`] = s; return `@sf${i}`; }); cond.push(`${statusCol} IN (${ph.join(",")})`); }
     if (onlineStatusFilter && hasOnlineStatus) { values.online_status_filter = onlineStatusFilter; cond.push("online_status = @online_status_filter"); }
-    if (shopFilter) { values.shop_filter = shopFilter; values.shop_like = `%${shopFilter}%`; cond.push("(json_extract(payload_json, '$.shopName') = @shop_filter OR (json_extract(payload_json, '$.shopName') IS NULL AND search_blob LIKE @shop_like))"); }
+    if (shopFilter) {
+      if (hasShopName) { values.shop_filter = shopFilter; cond.push("shop_name = @shop_filter"); }
+      else { values.shop_filter = shopFilter; values.shop_like = `%${shopFilter}%`; cond.push("(json_extract(payload_json, '$.shopName') = @shop_filter OR (json_extract(payload_json, '$.shopName') IS NULL AND search_blob LIKE @shop_like))"); }
+    }
     if (skuCodeFilter) { values.sku_like = `%${skuCodeFilter}%`; cond.push("search_blob LIKE @sku_like"); }
     if (dateFrom) { values.date_from = dateFrom; cond.push("order_key >= @date_from"); }
     if (dateTo) { values.date_to = dateTo; cond.push("order_key <= @date_to"); }
@@ -828,48 +843,65 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     return { where: `WHERE ${cond.join(" AND ")}`, values };
   };
 
-  const rowsQ = buildWhere(true);
-  const rows = db.prepare(`
-    SELECT payload_json FROM temu_consign_unified_snapshot
-    ${rowsQ.where}
-    ORDER BY order_key DESC, so_id DESC
-    LIMIT @limit OFFSET @offset
-  `).all({ ...rowsQ.values, limit: pageSize, offset });
+  const hasSourceFilter = source === "cloud" || source === "jst" || source === "both";
 
-  const bdQ = buildWhere(false);
-  const aggRow = db.prepare(`
-    SELECT
-      COUNT(*) AS total,
-      SUM(CASE WHEN source = 'cloud' THEN 1 ELSE 0 END) AS src_cloud,
-      SUM(CASE WHEN source = 'jst' THEN 1 ELSE 0 END) AS src_jst,
-      SUM(CASE WHEN source = 'both' THEN 1 ELSE 0 END) AS src_both
-    FROM temu_consign_unified_snapshot ${bdQ.where}
-  `).get(bdQ.values);
+  const txn = db.transaction(() => {
+    const rowsQ = buildWhere(true);
+    const rows = db.prepare(`
+      SELECT payload_json FROM temu_consign_unified_snapshot
+      ${rowsQ.where}
+      ORDER BY order_key DESC, so_id DESC
+      LIMIT @limit OFFSET @offset
+    `).all({ ...rowsQ.values, limit: pageSize, offset });
 
-  const filteredQ = buildWhere(true);
-  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM temu_consign_unified_snapshot ${filteredQ.where}`).get(filteredQ.values);
+    const bdQ = buildWhere(false);
+    const aggRow = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN source = 'cloud' THEN 1 ELSE 0 END) AS src_cloud,
+        SUM(CASE WHEN source = 'jst' THEN 1 ELSE 0 END) AS src_jst,
+        SUM(CASE WHEN source = 'both' THEN 1 ELSE 0 END) AS src_both
+      FROM temu_consign_unified_snapshot ${bdQ.where}
+    `).get(bdQ.values);
 
-  const sourceBreakdown = { cloud_only: Number(aggRow?.src_cloud || 0), jst_only: Number(aggRow?.src_jst || 0), both: Number(aggRow?.src_both || 0) };
+    const totalCount = hasSourceFilter
+      ? Number(aggRow?.[`src_${source}`] || 0)
+      : Number(aggRow?.total || 0);
 
-  const sbValues = { company_id: companyId };
-  const sbCond = ["company_id = @company_id"];
-  if (search) { sbValues.search = `%${search}%`; sbCond.push("search_blob LIKE @search"); }
-  const combined = db.prepare(`
-    SELECT ${statusCol} AS status, ${hasOnlineStatus ? "online_status" : "NULL AS online_status"}, COUNT(*) AS n
-    FROM temu_consign_unified_snapshot
-    WHERE ${sbCond.join(" AND ")}
-    GROUP BY ${statusCol}${hasOnlineStatus ? ", online_status" : ""}
-  `).all(sbValues);
-  const statusBreakdown = {};
-  const onlineStatusBreakdown = {};
-  for (const r of combined) {
-    const sKey = r.status == null || r.status === "" ? "(空)" : String(r.status);
-    statusBreakdown[sKey] = (statusBreakdown[sKey] || 0) + Number(r.n || 0);
-    if (hasOnlineStatus && r.online_status) {
-      const oKey = String(r.online_status);
-      onlineStatusBreakdown[oKey] = (onlineStatusBreakdown[oKey] || 0) + Number(r.n || 0);
+    const sbKey = `${companyId}\0${search || ""}`;
+    const sbCached = _sbBreakdownCache.get(sbKey);
+    let statusBreakdown, onlineStatusBreakdown;
+    if (sbCached && Date.now() - sbCached.t < 300000) {
+      statusBreakdown = sbCached.s;
+      onlineStatusBreakdown = sbCached.o;
+    } else {
+      const sbValues = { company_id: companyId };
+      const sbCond = ["company_id = @company_id"];
+      if (search) { sbValues.search = `%${search}%`; sbCond.push("search_blob LIKE @search"); }
+      const combined = db.prepare(`
+        SELECT ${statusCol} AS status, ${hasOnlineStatus ? "online_status" : "NULL AS online_status"}, COUNT(*) AS n
+        FROM temu_consign_unified_snapshot
+        WHERE ${sbCond.join(" AND ")}
+        GROUP BY ${statusCol}${hasOnlineStatus ? ", online_status" : ""}
+      `).all(sbValues);
+      statusBreakdown = {};
+      onlineStatusBreakdown = {};
+      for (const r of combined) {
+        const sKey = r.status == null || r.status === "" ? "(空)" : String(r.status);
+        statusBreakdown[sKey] = (statusBreakdown[sKey] || 0) + Number(r.n || 0);
+        if (hasOnlineStatus && r.online_status) {
+          const oKey = String(r.online_status);
+          onlineStatusBreakdown[oKey] = (onlineStatusBreakdown[oKey] || 0) + Number(r.n || 0);
+        }
+      }
+      _sbBreakdownCache.set(sbKey, { s: statusBreakdown, o: onlineStatusBreakdown, t: Date.now() });
     }
-  }
+
+    return { rows, aggRow, totalCount, statusBreakdown, onlineStatusBreakdown };
+  });
+
+  const { rows, aggRow, totalCount, statusBreakdown, onlineStatusBreakdown } = txn();
+  const sourceBreakdown = { cloud_only: Number(aggRow?.src_cloud || 0), jst_only: Number(aggRow?.src_jst || 0), both: Number(aggRow?.src_both || 0) };
 
   const payloadRows = rows.map((r) => JSON.parse(r.payload_json));
   enrichSendAddresses(db, payloadRows);
@@ -877,7 +909,7 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
   return {
     ok: true,
     rows: payloadRows,
-    total: Number(totalRow?.n || 0),
+    total: totalCount,
     page,
     pageSize,
     sourceBreakdown,
@@ -903,7 +935,8 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const pageSize = Math.max(1, Math.min(500, Number(params.pageSize || 100)));
   const offset = (page - 1) * pageSize;
   const search = String(params.search || "").trim();
-  const statusFilter = String(params.status || "").trim();
+  const statusFilterRaw = String(params.status || "").trim();
+  const statusFilters = statusFilterRaw ? statusFilterRaw.split(",").map(s => s.trim()).filter(Boolean) : [];
   const onlineStatusFilter = String(params.onlineStatus || params.online_status || "").trim();
   const shopFilter = String(params.shop || "").trim();
   const skuCodeFilter = String(params.skuCode || params.sku_code || "").trim();
@@ -914,125 +947,29 @@ function runConsignDeliveriesUnified(db, params = {}) {
 
   try {
     const snapshot = readConsignDeliveriesUnifiedFromSnapshot(db, {
-      companyId, page, pageSize, offset, search, statusFilter, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source,
+      companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source,
     });
     if (snapshot) return snapshot;
   } catch (snapErr) {
-    // 快照读异常不致命，继续走在线 CTE
     void snapErr;
   }
 
-  const cloudAttached = attachTemuCloudDbIfPossible(db);
-
-  if (!cloudAttached) {
-    return runConsignDeliveriesUnifiedJstOnly(db, {
-      page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId,
-    });
-  }
-
-  const baseValues = { company_id: companyId };
-  const filterConditions = [];
-  const searchClause = buildUnifiedSearchClause(baseValues, search);
-  if (searchClause) filterConditions.push(searchClause);
-  if (statusFilter) {
-    baseValues.status_filter = statusFilter;
-    filterConditions.push("COALESCE(local_status_override, jst_status, cloud_temu_status) = @status_filter");
-  }
-  if (onlineStatusFilter) {
-    baseValues.online_status = onlineStatusFilter;
-    filterConditions.push("cloud_temu_status = @online_status");
-  }
-  if (shopFilter) {
-    baseValues.shop_filter = shopFilter;
-    baseValues.shop_like = `%${shopFilter}%`;
-    filterConditions.push("(cloud_shop_name = @shop_filter OR (cloud_shop_name IS NULL AND jst_shop_name LIKE @shop_like))");
-  }
-  if (skuCodeFilter) {
-    baseValues.sku_like = `%${skuCodeFilter}%`;
-    filterConditions.push("(jst_skus LIKE @sku_like OR jst_sku_info LIKE @sku_like OR cloud_sku_ext_code LIKE @sku_like OR cloud_sku_id LIKE @sku_like)");
-  }
-  if (dateFrom) {
-    baseValues.date_from = dateFrom;
-    filterConditions.push("COALESCE(jst_order_date, cloud_order_time) >= @date_from");
-  }
-  if (dateTo) {
-    baseValues.date_to = dateTo;
-    filterConditions.push("COALESCE(jst_order_date, cloud_order_time) <= @date_to");
-  }
-
-  let sourceCondition = "";
-  if (source === "cloud") sourceCondition = "source = 'cloud'";
-  else if (source === "jst") sourceCondition = "source = 'jst'";
-  else if (source === "both") sourceCondition = "source = 'both'";
-
-  const filtered = [...filterConditions];
-  if (sourceCondition) filtered.push(sourceCondition);
-  const whereClause = filtered.length ? `WHERE ${filtered.join(" AND ")}` : "";
-  const breakdownWhere = filterConditions.length ? `WHERE ${filterConditions.join(" AND ")}` : "";
-
-  const rowsSql = `${buildUnifiedConsignCte()}
-    SELECT * FROM unified
-    ${whereClause}
-    ORDER BY COALESCE(jst_order_date, cloud_order_time) DESC, so_id DESC
-    LIMIT @limit OFFSET @offset`;
-  const rows = db.prepare(rowsSql).all({ ...baseValues, limit: pageSize, offset });
-
-  const totalSql = `${buildUnifiedConsignCte()} SELECT COUNT(*) AS n FROM unified ${whereClause}`;
-  const totalRow = db.prepare(totalSql).get(baseValues);
-  const total = Number(totalRow?.n || 0);
-
-  const breakdownSql = `${buildUnifiedConsignCte()}
-    SELECT source, COUNT(*) AS n FROM unified ${breakdownWhere} GROUP BY source`;
-  const breakdownRows = db.prepare(breakdownSql).all(baseValues);
-  const sourceBreakdown = { cloud_only: 0, jst_only: 0, both: 0 };
-  for (const r of breakdownRows) {
-    if (r.source === "cloud") sourceBreakdown.cloud_only = Number(r.n || 0);
-    else if (r.source === "jst") sourceBreakdown.jst_only = Number(r.n || 0);
-    else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
-  }
-
-  const statusBreakdownWhere = searchClause ? `WHERE ${searchClause}` : "";
-  const statusBreakdownSql = `${buildUnifiedConsignCte()}
-    SELECT COALESCE(local_status_override, jst_status, cloud_temu_status) AS status, COUNT(*) AS n
-    FROM unified ${statusBreakdownWhere}
-    GROUP BY COALESCE(local_status_override, jst_status, cloud_temu_status)`;
-  const statusBreakdown = {};
-  for (const r of db.prepare(statusBreakdownSql).all(baseValues)) {
-    const key = r.status == null || r.status === "" ? "(空)" : String(r.status);
-    statusBreakdown[key] = Number(r.n || 0);
-  }
-
-  const onlineStatusBreakdown = {};
-  try {
-    const onlineBdWhere = searchClause
-      ? `WHERE ${searchClause} AND cloud_temu_status IS NOT NULL AND cloud_temu_status != ''`
-      : "WHERE cloud_temu_status IS NOT NULL AND cloud_temu_status != ''";
-    const onlineBdSql = `${buildUnifiedConsignCte()}
-      SELECT cloud_temu_status AS status, COUNT(*) AS n
-      FROM unified ${onlineBdWhere}
-      GROUP BY cloud_temu_status`;
-    for (const r of db.prepare(onlineBdSql).all(baseValues)) {
-      onlineStatusBreakdown[String(r.status)] = Number(r.n || 0);
-    }
-  } catch { /* 旧 CTE 无 cloud_temu_status 时静默降级 */ }
-
-  const payloadRows = rows.map(unifiedRowToPayload);
-  enrichSendAddresses(db, payloadRows);
-
   return {
     ok: true,
-    rows: payloadRows,
-    total,
+    rows: [],
+    total: 0,
     page,
     pageSize,
-    sourceBreakdown,
-    statusBreakdown,
-    onlineStatusBreakdown,
+    sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+    statusBreakdown: {},
+    onlineStatusBreakdown: {},
+    snapshotPending: true,
+    message: "数据正在初始化，请稍后刷新（约 30 秒）",
   };
 }
 
 function runConsignDeliveriesUnifiedJstOnly(db, opts) {
-  const { page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId } = opts;
+  const { page, pageSize, offset, search, statusFilters, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId } = opts;
   if (source === "cloud" || source === "both") {
     return {
       ok: true,
@@ -1049,9 +986,12 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
     values.search = `%${search}%`;
     conditions.push(`(so_id LIKE @search OR shop_name LIKE @search OR outer_deliver_no LIKE @search OR supplier_name LIKE @search OR sku_info LIKE @search OR skus LIKE @search OR logistics_company LIKE @search OR l_id LIKE @search)`);
   }
-  if (statusFilter) {
-    values.status_filter = statusFilter;
+  if (statusFilters && statusFilters.length === 1) {
+    values.status_filter = statusFilters[0];
     conditions.push("COALESCE(local_status_override, status) = @status_filter");
+  } else if (statusFilters && statusFilters.length > 1) {
+    const ph = statusFilters.map((s, i) => { values[`sf${i}`] = s; return `@sf${i}`; });
+    conditions.push(`COALESCE(local_status_override, status) IN (${ph.join(",")})`);
   }
   if (shopFilter) {
     values.shop_like = `%${shopFilter}%`;
@@ -5700,6 +5640,7 @@ async function handleRequest({
         pageSize: Number(payload?.pageSize) || 100,
         search: payload?.search || payload?.q || "",
         status: payload?.status || "",
+        onlineStatus: payload?.onlineStatus || payload?.online_status || "",
         shop: payload?.shop || "",
         skuCode: payload?.skuCode || payload?.sku_code || "",
         dateFrom: payload?.dateFrom || payload?.date_from || "",

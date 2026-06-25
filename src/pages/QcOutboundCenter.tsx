@@ -586,7 +586,7 @@ export default function QcOutboundCenter() {
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useSessionState(qcViewKey("tab"), "cloud");
-  const [stockStatus, setStockStatus] = useSessionState(qcViewKey("status"), "");
+  const [stockStatus, setStockStatus] = useSessionState<string[]>(qcViewKey("status"), []);
   const [onlineStatus, setOnlineStatus] = useSessionState(qcViewKey("onlineStatus"), "");
   const [stockShop, setStockShop] = useSessionState(qcViewKey("shop"), "");
   const [mallOptions, setMallOptions] = useState<{ value: string; label: string }[]>([]);
@@ -660,7 +660,7 @@ export default function QcOutboundCenter() {
     page: number;
     pageSize: number;
     search: string;
-    status: string;
+    status: string[] | string;
     onlineStatus?: string;
     shop?: string;
     skuCode?: string;
@@ -676,7 +676,7 @@ export default function QcOutboundCenter() {
         page: params.page,
         pageSize: params.pageSize,
         search: params.search || undefined,
-        status: params.status || undefined,
+        status: Array.isArray(params.status) ? params.status.join(",") : params.status || undefined,
         onlineStatus: params.onlineStatus || undefined,
         shop: params.shop || undefined,
         skuCode: params.skuCode || undefined,
@@ -688,7 +688,9 @@ export default function QcOutboundCenter() {
       setUnifiedError(null);
       setUnifiedLoadedAt(new Date().toISOString());
       persistCache(outboundData, accounts, result);
-      if (params.notify) {
+      if ((result as any).snapshotPending) {
+        message.warning((result as any).message || "数据正在初始化，请稍后刷新");
+      } else if (params.notify) {
         message.success(`送仓托管已加载 ${result.rows.length}/${result.total} 条`);
       }
     } catch (error: any) {
@@ -939,24 +941,21 @@ export default function QcOutboundCenter() {
 
   useEffect(() => {
     if (!unifiedRows.length) return;
-    let cancelled = false;
     const MAX_PREFETCH = 20;
     const targets = unifiedRows.slice(0, MAX_PREFETCH);
     const seen = prefetchedKeysRef.current;
-    (async () => {
-      for (const row of targets) {
-        if (cancelled) break;
+    const tasks = targets
+      .filter((row) => {
         const key = row.rawJst?.o_id ? `jst:${row.rawJst.o_id}` : (row.soId ? `cloud:${row.soId}` : "");
-        if (!key || seen.has(key)) continue;
+        if (!key || seen.has(key)) return false;
         seen.add(key);
-        try {
-          await loadUnifiedItems(row);
-          await loadCloudItems(row);
-        } catch { /* ignore */ }
-        await new Promise((r) => setTimeout(r, 80));
-      }
-    })();
-    return () => { cancelled = true; };
+        return true;
+      })
+      .map((row) => Promise.all([
+        loadUnifiedItems(row).catch(() => {}),
+        loadCloudItems(row).catch(() => {}),
+      ]));
+    void Promise.all(tasks);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unifiedRows]);
 
@@ -2069,18 +2068,38 @@ export default function QcOutboundCenter() {
 
   return (
     <div className="app-workspace-shell">
-      <PageHeader
-        compact
-        className="qc-outbound-page-header"
-        eyebrow="系统"
-        title="出库中心"
-        actions={[
-          <div key="refresh" className="qc-outbound-header-actions">
-            <div className="qc-outbound-refresh-meta">
-              <span>最后同步</span>
-              <strong>{formatDateTime(unifiedLoadedAt || outboundData.generatedAt)}</strong>
-            </div>
+      {deductionGuard.total > 0 ? (
+        <Alert
+          style={{ marginBottom: 0 }}
+          type={deductionGuard.overdueCount > 0 ? "error" : "warning"}
+          showIcon
+          banner
+          message={
+            deductionGuard.overdueCount > 0
+              ? `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存（其中 ${deductionGuard.overdueCount} 笔已超 3 天），请尽快逐单确认发货或忽略`
+              : `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存，请逐单确认发货或忽略`
+          }
+        />
+      ) : null}
+
+      {unifiedError ? (
+        <Alert
+          style={{ marginBottom: 0 }}
+          type="warning"
+          showIcon
+          message={unifiedError}
+        />
+      ) : null}
+
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        tabBarExtraContent={
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "#999" }}>最后同步</span>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>{formatDateTime(unifiedLoadedAt || outboundData.generatedAt)}</span>
             <Button
+              size="small"
               icon={<ReloadOutlined />}
               loading={loading || unifiedLoading}
               onClick={async () => {
@@ -2106,36 +2125,8 @@ export default function QcOutboundCenter() {
             >
               刷新
             </Button>
-          </div>,
-        ]}
-      />
-
-      {deductionGuard.total > 0 ? (
-        <Alert
-          className="qc-outbound-sync-alert"
-          type={deductionGuard.overdueCount > 0 ? "error" : "warning"}
-          showIcon
-          banner
-          message={
-            deductionGuard.overdueCount > 0
-              ? `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存（其中 ${deductionGuard.overdueCount} 笔已超 3 天），请尽快逐单确认发货或忽略`
-              : `${deductionGuard.total} 笔备货单线上已收货但未扣本地库存，请逐单确认发货或忽略`
-          }
-        />
-      ) : null}
-
-      {unifiedError ? (
-        <Alert
-          className="qc-outbound-sync-alert"
-          type="warning"
-          showIcon
-          message={unifiedError}
-        />
-      ) : null}
-
-      <Tabs
-        activeKey={activeTab}
-        onChange={setActiveTab}
+          </div>
+        }
         items={[
           {
             key: "cloud",
@@ -2205,14 +2196,16 @@ export default function QcOutboundCenter() {
                     }}
                   />
                   <Select
+                    mode="multiple"
                     allowClear
                     placeholder="erp状态"
-                    style={{ width: 170 }}
-                    value={stockStatus || undefined}
+                    style={{ minWidth: 170, maxWidth: 300 }}
+                    value={stockStatus}
                     options={erpStatusFilterOptions}
+                    maxTagCount="responsive"
                     getPopupContainer={(trigger) => trigger.parentElement || document.body}
                     onChange={(value) => {
-                      setStockStatus(value || "");
+                      setStockStatus(value || []);
                       setUnifiedPage(1);
                     }}
                   />
