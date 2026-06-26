@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from "react";
 import { Modal, Button, Table, Tag, Space } from "antd";
 import { ExclamationCircleOutlined } from "@ant-design/icons";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 
 const erp = window.electronAPI?.erp;
@@ -92,7 +92,6 @@ export function InventoryDeductionGuard({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<UndeductedItem[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const navigate = useNavigate();
-  const location = useLocation();
 
   const fetchUndeducted = useCallback(async () => {
     if (!erp?.inventory?.action) return;
