@@ -252,6 +252,11 @@ function translateSqlSyntax(sql) {
         ? `COALESCE(excluded.${col1}, ${tbl}.${col2})`
         : m
     );
+    // COALESCE(@param, bareCol) — @param 绑定参数 + 裸列名同样歧义
+    s = s.replace(
+      /COALESCE\((@\w+),\s*(?!excluded\.|[\w]+\.)([a-zA-Z_]\w*)\)/gi,
+      (_m, param, col) => `COALESCE(${param}, ${tbl}.${col})`
+    );
   }
 
   return s;
