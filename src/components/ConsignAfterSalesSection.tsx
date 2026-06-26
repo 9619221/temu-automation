@@ -616,9 +616,10 @@ export default function ConsignAfterSalesSection() {
             size="middle"
             loading={{ spinning: loading && (!loadedOnce || !!query.trim()), indicator: thinkingIndicator }}
             columns={columns}
-            dataSource={rows}
+            dataSource={filteredRows}
             scroll={{ x: 1710 }}
-            onChange={(_pagination, _filters, sorter) => {
+            onChange={(_pagination, _filters, sorter, extra) => {
+              if (extra?.action !== "sort") return;
               const s = (Array.isArray(sorter) ? sorter[0] : sorter) as SorterResult<UnifiedAfterSaleRow>;
               if (s && s.columnKey === "asDate") {
                 setSortOrder(s.order === "ascend" ? "ascend" : "descend");

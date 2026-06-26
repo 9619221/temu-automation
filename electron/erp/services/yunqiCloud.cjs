@@ -23,8 +23,6 @@ async function db() {
       status TEXT DEFAULT 'want', note TEXT, source_keyword TEXT, added_at TEXT, updated_at TEXT,
       PRIMARY KEY (account_id, goods_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_sel_status ON selection_pool(status);
-    CREATE INDEX IF NOT EXISTS idx_sel_account ON selection_pool(account_id);
   `);
   try {
     const cols = (await getTableColumns(_db, "selection_pool")).map(name => ({ name }));
@@ -54,6 +52,10 @@ async function db() {
       `);
     }
   } catch {}
+  _db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sel_status ON selection_pool(status);
+    CREATE INDEX IF NOT EXISTS idx_sel_account ON selection_pool(account_id);
+  `);
   return _db;
 }
 

@@ -834,7 +834,7 @@ export default function QcOutboundCenter() {
   ), [stockOrderLinkIndex]);
   const hasServerOnlineFilter = !!unifiedSnapshot.onlineStatusBreakdown && Object.keys(unifiedSnapshot.onlineStatusBreakdown).length > 0;
   const unifiedRows = useMemo(() => {
-    const rows = unifiedSnapshot.rows;
+    const rows = unifiedSnapshot.rows ?? [];
     if (!onlineStatus || hasServerOnlineFilter) return rows;
     return rows.filter((r) => r.rawCloud?.temu_status === onlineStatus);
   }, [unifiedSnapshot.rows, onlineStatus, hasServerOnlineFilter]);
@@ -1817,16 +1817,14 @@ export default function QcOutboundCenter() {
         const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核";
         const mallId = String(row.rawCloud?.mall_id || "");
         const needsDeduction = mallId && row.soId && undeductedKeys.has(`${mallId}:${row.soId}`);
-        return (
-          <Space direction="vertical" size={2}>
+        return needsDeduction ? (
+          <Space direction="vertical" size={2} style={{ display: "inline-flex" }}>
             <span className="status-cell-text">{s}</span>
-            {needsDeduction ? (
-              <Button type="link" size="small" danger style={{ padding: 0, height: "auto", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); handleIgnoreDeduction(row); }}>
-                忽略扣减
-              </Button>
-            ) : null}
+            <Button type="link" size="small" danger style={{ padding: 0, height: "auto", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); handleIgnoreDeduction(row); }}>
+              忽略扣减
+            </Button>
           </Space>
-        );
+        ) : <span className="status-cell-text">{s}</span>;
       },
     },
     {

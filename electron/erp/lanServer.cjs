@@ -1,5 +1,5 @@
 const http = require("http");
-const { queryAll, queryOne, execSql, tableExists: dbTableExists } = require("../db/connection.cjs");
+const { queryAll, queryOne, execSql, tableExists: dbTableExists, tableHasColumn, withTransaction } = require("../db/connection.cjs");
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -430,8 +430,9 @@ function getTemuCloudDbPath() {
   return process.env.TEMU_CLOUD_DB_PATH || DEFAULT_TEMU_CLOUD_DB_PATH;
 }
 
-async function attachTemuCloudDbIfPossible(db) {
+function attachTemuCloudDbIfPossible(db) {
   if (!db) return false;
+  if (db.__isPg) return false;
   if (db.__cloudAttachState === "attached") return true;
   if (db.__cloudAttachState === "failed") return false;
   const cloudPath = getTemuCloudDbPath();
@@ -440,7 +441,7 @@ async function attachTemuCloudDbIfPossible(db) {
       db.__cloudAttachState = "failed";
       return false;
     }
-    await execSql(db, `ATTACH DATABASE '${cloudPath.replace(/'/g, "''")}' AS cloud`);
+    db.exec(`ATTACH DATABASE '${cloudPath.replace(/'/g, "''")}' AS cloud`);
     db.__cloudAttachState = "attached";
     return true;
   } catch (error) {
@@ -786,8 +787,8 @@ let _snapColCache = null;
 const _sbBreakdownCache = new Map();
 async function _getSnapColInfo(db) {
   if (_snapColCache) return _snapColCache;
-  const hasDisplayStatus = !!(await queryOne(db, "SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'display_status'"));
-  let hasOnlineStatus = !!(await queryOne(db, "SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'online_status'"));
+  const hasDisplayStatus = await tableHasColumn(db, "temu_consign_unified_snapshot", "display_status");
+  let hasOnlineStatus = await tableHasColumn(db, "temu_consign_unified_snapshot", "online_status");
   if (!hasOnlineStatus) {
     try {
       await execSql(db, "ALTER TABLE temu_consign_unified_snapshot ADD COLUMN online_status TEXT");
@@ -796,7 +797,7 @@ async function _getSnapColInfo(db) {
       hasOnlineStatus = true;
     } catch {/* 补列失败不影响主逻辑 */}
   }
-  let hasShopName = !!(await queryOne(db, "SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'shop_name'"));
+  let hasShopName = await tableHasColumn(db, "temu_consign_unified_snapshot", "shop_name");
   if (!hasShopName) {
     try {
       await execSql(db, "ALTER TABLE temu_consign_unified_snapshot ADD COLUMN shop_name TEXT");
@@ -1506,14 +1507,14 @@ function createSession(user) {
   return token;
 }
 
-function getSessionFromRequest(req) {
+async function getSessionFromRequest(req) {
   cleanupExpiredSessions();
   const token = parseCookies(req)[SESSION_COOKIE_NAME];
   if (!token) return null;
   let session = lanState.sessions.get(token);
   if (!session) {
     try {
-      session = lanState.sessionStore?.load?.(token) || null;
+      session = (await lanState.sessionStore?.load?.(token)) || null;
     } catch {
       session = null;
     }
@@ -1656,7 +1657,7 @@ function handleWebSocketData(client, chunk) {
   }
 }
 
-function handleWebSocketUpgrade(req, socket) {
+async function handleWebSocketUpgrade(req, socket) {
   let pathname = "/";
   try {
     const parsed = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1668,7 +1669,7 @@ function handleWebSocketUpgrade(req, socket) {
     return;
   }
 
-  const session = getSessionFromRequest(req);
+  const session = await getSessionFromRequest(req);
   if (!session) {
     writeUpgradeError(socket, 401, "Unauthorized");
     return;
@@ -3799,7 +3800,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Account delete handler is not available");
   });
   const listSuppliers = options.listSuppliers || (() => []);
-  const listSupplierOptions = options.listSupplierOptions || ((params) => compactSupplierRows(listSuppliers(params)));
+  const listSupplierOptions = options.listSupplierOptions || (async (params) => compactSupplierRows(await listSuppliers(params)));
   const createSupplier = options.createSupplier || (() => {
     throw new Error("Supplier action handler is not available");
   });
@@ -3824,11 +3825,11 @@ function createRequestHandler(options = {}) {
   });
   const listConsignAfterSaleReceipts = options.listConsignAfterSaleReceipts || (() => []);
   const listJstConsignDeliveries = options.listJstConsignDeliveries || (() => []);
-  const countJstConsignDeliveries = options.countJstConsignDeliveries || ((params) => listJstConsignDeliveries({ ...params, limit: 500000, offset: 0 }).length);
+  const countJstConsignDeliveries = options.countJstConsignDeliveries || (async (params) => (await listJstConsignDeliveries({ ...params, limit: 500000, offset: 0 })).length);
   const listJstConsignDeliverItems = options.listJstConsignDeliverItems || (() => []);
   const getJstConsignDeliveryCacheStatus = options.getJstConsignDeliveryCacheStatus || (() => ({ count: 0, lastImportedAt: null, lastUpdatedAt: null }));
   const listJstOtherInout = options.listJstOtherInout || (() => []);
-  const countJstOtherInout = options.countJstOtherInout || ((params) => listJstOtherInout({ ...params, limit: 500000, offset: 0 }).length);
+  const countJstOtherInout = options.countJstOtherInout || (async (params) => (await listJstOtherInout({ ...params, limit: 500000, offset: 0 })).length);
   const listJstOtherInoutItems = options.listJstOtherInoutItems || (() => []);
   const getJstOtherInoutCacheStatus = options.getJstOtherInoutCacheStatus || (() => ({ count: 0, lastImportedAt: null, lastUpdatedAt: null }));
   const createSku = options.createSku || (() => {
@@ -4495,7 +4496,7 @@ async function handle1688OAuthCallback({ req, res, complete1688OAuth }) {
       }],
 
       currentPath: "/1688",
-      user: getSessionFromRequest(req)?.user || null
+      user: (await getSessionFromRequest(req))?.user || null
     }));
   } catch (callbackError) {
     render1688Error(res, null, callbackError, 400);
@@ -4566,7 +4567,7 @@ async function handleTemuSalesSyncRequest({ req, res, db }) {
   try {
     const payload = await readLoginPayload(req, 64 * 1024);
     const { TemuCloudSalesSync } = require("./services/temuCloudSalesSync.cjs");
-    const result = new TemuCloudSalesSync({
+    const result = await new TemuCloudSalesSync({
       db,
       attachCloudDb: attachTemuCloudDbIfPossible
     }).sync(payload || {});
@@ -4592,7 +4593,7 @@ async function handleTemuReviewsCloudSyncRequest({ req, res, db }) {
       db,
       attachCloudDb: attachTemuCloudDbIfPossible
     });
-    const result = sync.sync(payload || {});
+    const result = await sync.sync(payload || {});
     writeJson(res, 200, { ok: true, result });
   } catch (error) {
     writeJson(res, error?.statusCode || 400, {
@@ -4615,7 +4616,7 @@ async function handleTemuJitVmiCloudSyncRequest({ req, res, db }) {
       db,
       attachCloudDb: attachTemuCloudDbIfPossible
     });
-    const result = sync.sync(payload || {});
+    const result = await sync.sync(payload || {});
     writeJson(res, 200, { ok: true, result });
   } catch (error) {
     writeJson(res, error?.statusCode || 400, {
@@ -4638,7 +4639,7 @@ async function handleTemuImagesCloudSyncRequest({ req, res, db }) {
       db,
       attachCloudDb: attachTemuCloudDbIfPossible
     });
-    const result = sync.sync(payload || {});
+    const result = await sync.sync(payload || {});
     writeJson(res, 200, { ok: true, result });
   } catch (error) {
     writeJson(res, error?.statusCode || 400, {
@@ -4669,38 +4670,38 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
       syncViolationFromCapture,
       clearMultiStoreReportCache
     } = require("./services/multiStoreReport.cjs");
-    const income = syncSettlementIncomeFromCapture(db, {
+    const income = await syncSettlementIncomeFromCapture(db, {
       attachCloudDb: attachTemuCloudDbIfPossible
     });
     const detail = income.attached ?
-    syncSettlementDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncSettlementDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     // 对账中心账务明细（fund_detail）：售后赔付/仓储费/EPR/广告等费用（与 ipc.cjs 主控端对齐，原先漏同步）
     const fund = income.attached ?
-    syncFundDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncFundDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const order = income.attached ?
-    syncSettlementOrderDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncSettlementOrderDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const fundSummary = income.attached ?
-    syncFundSummaryFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncFundSummaryFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     // EPR 费用 / 资金限制 / 违规处罚（聚协云 P1+P2 对标）
     const epr = income.attached ?
-    syncEprFeeFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncEprFeeFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const frozen = income.attached ?
-    syncFundFrozenFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncFundFrozenFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     // 账户概览 / 履约费用流出（聚协云第①、⑧类对标）
     const accountOverview = income.attached ?
-    syncAccountOverviewFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncAccountOverviewFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const fulfillment = income.attached ?
-    syncFulfillmentBillFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncFulfillmentBillFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const violation = income.attached ?
-    syncViolationFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
+    await syncViolationFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible }) :
     { ok: false, attached: false, malls: 0, rows: 0 };
     const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(accountOverview.rows) || 0) + (Number(fulfillment.rows) || 0) + (Number(violation.rows) || 0);
     if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
@@ -4768,7 +4769,7 @@ async function handleMallDictRequest({ req, res, db }) {
   }
   try {
     const { _internal } = require("./services/multiStoreReport.cjs");
-    const malls = _internal.readMallDictionary(db);
+    const malls = await _internal.readMallDictionary(db);
     writeJson(res, 200, { ok: true, data: { malls } });
   } catch (error) {
     writeJson(res, error?.statusCode || 500, {
@@ -5138,7 +5139,7 @@ async function handleRequest({
   }
 
   if (pathname === "/api/status") {
-    const session = getSessionFromRequest(req);
+    const session = await getSessionFromRequest(req);
     writeJson(res, 200, {
       ok: true,
       lan: getLanStatus(),
@@ -5151,7 +5152,7 @@ async function handleRequest({
   // /api/me：用 sessionCookie 反查当前登录用户（供多 agent 生图服务做 uid 隔离）。
   // 无有效 session 返 401。身份由服务端 session 确认，客户端无法伪造。
   if (pathname === "/api/me") {
-    const session = getSessionFromRequest(req);
+    const session = await getSessionFromRequest(req);
     if (!session || !session.user) {
       writeJson(res, 401, { ok: false, error: "unauthorized" });
       return;
@@ -5193,7 +5194,7 @@ async function handleRequest({
   }
 
   const protectedPath = ROLE_PERMISSIONS[pathname] ? pathname : null;
-  let session = protectedPath ? getSessionFromRequest(req) : null;
+  let session = protectedPath ? await getSessionFromRequest(req) : null;
   let shouldClearSessionCookie = false;
   if (session && typeof validateSessionUser === "function") {
     const freshUser = await validateSessionUser(session.user?.id);
@@ -5423,7 +5424,7 @@ async function handleRequest({
     // 复用 listSku1688Sources（与 purchase workbench 同口径，返回 camelCase）。
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const mappings = listSku1688Sources({
+    const mappings = await listSku1688Sources({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 1000,
@@ -5454,7 +5455,7 @@ async function handleRequest({
     // 1062 单头数据量小，单次 limit 默认 1000 一次拉完；保留分页是为对齐 cache 框架。
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listPurchaseReturns({
+    const rows = await listPurchaseReturns({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 1000,
@@ -5474,7 +5475,7 @@ async function handleRequest({
   if (pathname === "/api/master-data/purchase-return-ids") {
     // 单头对账：客户端 diff 出硬删的清缓存（当前历史导入不会硬删，保留兜底）。
     const companyId = session.user?.companyId;
-    const ids = getPurchaseReturnIds({ companyId });
+    const ids = await getPurchaseReturnIds({ companyId });
     writeJson(res, 200, { ok: true, ids });
     return;
   }
@@ -5483,7 +5484,7 @@ async function handleRequest({
     // 明细增量：可按 since 全量增量，也可传 ioId / ioIds 按单头精确拉明细。
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listPurchaseReturnItems({
+    const rows = await listPurchaseReturnItems({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 2000,
@@ -5498,7 +5499,7 @@ async function handleRequest({
 
   if (pathname === "/api/master-data/purchase-return-item-ids") {
     const companyId = session.user?.companyId;
-    const ids = getPurchaseReturnItemIds({ companyId });
+    const ids = await getPurchaseReturnItemIds({ companyId });
     writeJson(res, 200, { ok: true, ids });
     return;
   }
@@ -5506,7 +5507,7 @@ async function handleRequest({
   if (pathname === "/api/master-data/purchase-return/action") {
     // 手动采购退货单 action：create_draft / update_draft / effective / cancel / delete_draft。
     const payload = await readOptionalPayload(req);
-    const result = performPurchaseReturnAction(
+    const result = await performPurchaseReturnAction(
       { ...payload, companyId: payload?.companyId || session.user?.companyId },
       session.user
     );
@@ -5518,7 +5519,7 @@ async function handleRequest({
     // 送仓售后历史增量：since 游标 + includeDeleted + 分页。5483 单 head 量比采购退货大。
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listConsignAfterSales({
+    const rows = await listConsignAfterSales({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 1000,
@@ -5537,7 +5538,7 @@ async function handleRequest({
 
   if (pathname === "/api/master-data/consign-after-sale-ids") {
     const companyId = session.user?.companyId;
-    const ids = getConsignAfterSaleIds({ companyId });
+    const ids = await getConsignAfterSaleIds({ companyId });
     writeJson(res, 200, { ok: true, ids });
     return;
   }
@@ -5546,7 +5547,7 @@ async function handleRequest({
     // 送仓售后明细：可按 since 全量增量、也可按 asId / asIds 精确拉。
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listConsignAfterSaleItems({
+    const rows = await listConsignAfterSaleItems({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 2000,
@@ -5561,7 +5562,7 @@ async function handleRequest({
 
   if (pathname === "/api/master-data/consign-after-sale-item-ids") {
     const companyId = session.user?.companyId;
-    const ids = getConsignAfterSaleItemIds({ companyId });
+    const ids = await getConsignAfterSaleItemIds({ companyId });
     writeJson(res, 200, { ok: true, ids });
     return;
   }
@@ -5581,8 +5582,8 @@ async function handleRequest({
       oIds: Array.isArray(payload?.oIds) ? payload.oIds : null,
       companyId
     };
-    const rows = listJstConsignDeliveries(params);
-    const total = countJstConsignDeliveries(params);
+    const rows = await listJstConsignDeliveries(params);
+    const total = await countJstConsignDeliveries(params);
     writeJson(res, 200, { ok: true, rows, total });
     return;
   }
@@ -5590,7 +5591,7 @@ async function handleRequest({
   if (pathname === "/api/master-data/consign-deliver-items") {
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listJstConsignDeliverItems({
+    const rows = await listJstConsignDeliverItems({
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 2000,
       offset: Number(payload?.offset) || 0,
@@ -5627,7 +5628,7 @@ async function handleRequest({
     const companyId = session.user?.companyId;
     writeJson(res, 200, {
       ok: true,
-      ...getJstConsignDeliveryCacheStatus({ companyId })
+      ...(await getJstConsignDeliveryCacheStatus({ companyId }))
     });
     return;
   }
@@ -5635,7 +5636,7 @@ async function handleRequest({
   if (pathname === "/api/master-data/consign-deliveries-unified") {
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId || payload?.companyId || "company_default";
-    const result = runConsignDeliveriesUnified(db, {
+    const result = await runConsignDeliveriesUnified(db, {
       page: Number(payload?.page) || 1,
       pageSize: Number(payload?.pageSize) || 100,
       search: payload?.search || payload?.q || "",
@@ -5668,8 +5669,8 @@ async function handleRequest({
       ioIds: Array.isArray(payload?.ioIds) ? payload.ioIds : null,
       companyId
     };
-    const rows = listJstOtherInout(params);
-    const total = countJstOtherInout(params);
+    const rows = await listJstOtherInout(params);
+    const total = await countJstOtherInout(params);
     writeJson(res, 200, { ok: true, rows, total });
     return;
   }
@@ -5677,7 +5678,7 @@ async function handleRequest({
   if (pathname === "/api/master-data/other-inout-items") {
     const payload = await readOptionalPayload(req);
     const companyId = session.user?.companyId;
-    const rows = listJstOtherInoutItems({
+    const rows = await listJstOtherInoutItems({
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 2000,
       offset: Number(payload?.offset) || 0,
@@ -5692,7 +5693,7 @@ async function handleRequest({
     const companyId = session.user?.companyId;
     writeJson(res, 200, {
       ok: true,
-      ...getJstOtherInoutCacheStatus({ companyId })
+      ...(await getJstOtherInoutCacheStatus({ companyId }))
     });
     return;
   }
@@ -5791,7 +5792,7 @@ async function handleRequest({
 
   if (pathname === "/api/temu/openapi/products/skc") {
     try {
-      const result = listAllTemuOpenApiProductsAsSkc({}, session.user);
+      const result = await listAllTemuOpenApiProductsAsSkc({}, session.user);
       writeJson(res, 200, { ok: true, ...result });
     } catch (error) {
       writeJson(res, 400, { ok: false, error: error?.message || String(error) });
@@ -5801,7 +5802,7 @@ async function handleRequest({
 
   if (pathname === "/api/temu/openapi/sales") {
     try {
-      const result = listAllTemuOpenApiSales({}, session.user);
+      const result = await listAllTemuOpenApiSales({}, session.user);
       writeJson(res, 200, { ok: true, ...result });
     } catch (error) {
       writeJson(res, 400, { ok: false, error: error?.message || String(error) });
@@ -5812,7 +5813,7 @@ async function handleRequest({
   if (pathname === "/api/temu/openapi/records") {
     try {
       const source = new URL(req.url, "http://localhost").searchParams.get("source") || "";
-      const result = listTemuOpenApiRecordsBySource({ source }, session.user);
+      const result = await listTemuOpenApiRecordsBySource({ source }, session.user);
       writeJson(res, 200, { ok: true, ...result });
     } catch (error) {
       writeJson(res, 400, { ok: false, error: error?.message || String(error) });
@@ -5823,7 +5824,7 @@ async function handleRequest({
   if (pathname === "/api/temu/openapi/products") {
     try {
       const mallId = new URL(req.url, "http://localhost").searchParams.get("mallId") || "";
-      const result = listTemuOpenApiProducts({ mallId }, session.user);
+      const result = await listTemuOpenApiProducts({ mallId }, session.user);
       writeJson(res, 200, { ok: true, ...result });
     } catch (error) {
       writeJson(res, 400, { ok: false, error: error?.message || String(error) });
@@ -5865,7 +5866,7 @@ async function handleRequest({
     // 找品单增量同步：since 游标 + 分页（client 模式 purchaseRequestCache 的数据源）。
     // 富行与 /api/purchase/workbench 的 purchaseRequests 同口径，按 company 过滤。
     const payload = await readOptionalPayload(req);
-    const requests = listPurchaseRequestsForSync({
+    const requests = await listPurchaseRequestsForSync({
       since: payload?.since,
       includeDeleted: Boolean(payload?.includeDeleted),
       limit: Number(payload?.limit) || 1000,
@@ -5878,7 +5879,7 @@ async function handleRequest({
 
   if (pathname === "/api/purchase/request-ids") {
     // 找品单删除对账端点：返回当前存在的找品单 id 全集，客户端 diff 出硬删的清缓存。
-    const ids = getPurchaseRequestIds({ companyId: session.user?.companyId });
+    const ids = await getPurchaseRequestIds({ companyId: session.user?.companyId });
     writeJson(res, 200, { ok: true, ids });
     return;
   }
@@ -6075,7 +6076,7 @@ async function handleRequest({
       const parsed = new URL(req.url || "/", "http://127.0.0.1");
       const includeTest = parsed.searchParams.get("include_test") === "1";
       const { buildSkuSales } = require("./services/multiStoreReport.cjs");
-      const data = buildSkuSales(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+      const data = await buildSkuSales(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
       writeJson(res, 200, { ok: true, data });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
@@ -6093,7 +6094,7 @@ async function handleRequest({
       const startDate = parsed.searchParams.get("start_date") || null;
       const endDate = parsed.searchParams.get("end_date") || null;
       const { querySettlementData } = require("./services/multiStoreReport.cjs");
-      const data = querySettlementData(db, { startDate, endDate, attachCloudDb: attachTemuCloudDbIfPossible });
+      const data = await querySettlementData(db, { startDate, endDate, attachCloudDb: attachTemuCloudDbIfPossible });
       writeJson(res, 200, { ok: true, data });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
@@ -6103,29 +6104,28 @@ async function handleRequest({
 
   if (pathname === "/api/erp/reports/pipeline-overview") {
     if (req.method !== "GET") {writeJson(res, 405, { ok: false, error: "Method not allowed" });return;}
-    try {
-      const parsed = new URL(req.url || "/", "http://127.0.0.1");
-      const force = parsed.searchParams.get("force") === "1";
-      const svc = require("./services/multiStoreReport.cjs");
-      const data = svc.buildPipelineOverview(db, { force, attachCloudDb: attachTemuCloudDbIfPossible });
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const force = parsed.searchParams.get("force") === "1";
+    const svc = require("./services/multiStoreReport.cjs");
+    Promise.resolve(svc.buildPipelineOverview(db, { force, attachCloudDb: attachTemuCloudDbIfPossible })).then((data) => {
       writeJson(res, 200, { ok: true, data });
-    } catch (error) {
+    }).catch((error) => {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
-    }
+    });
     return;
   }
 
   if (pathname === "/api/erp/reports/product-risk-tags") {
     if (req.method !== "POST") {writeJson(res, 405, { ok: false, error: "Method not allowed" });return;}
-    try {
-      const p = await readOptionalPayload(req);
+    readOptionalPayload(req).then((p) => {
       const codes = p?.skuCodes || [];
       const svc = require("./services/multiStoreReport.cjs");
-      const data = svc.buildProductRiskTags(db, { skuCodes: codes });
+      return Promise.resolve(svc.buildProductRiskTags(db, { skuCodes: codes }));
+    }).then((data) => {
       writeJson(res, 200, { ok: true, data });
-    } catch (error) {
+    }).catch((error) => {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
-    }
+    });
     return;
   }
 
@@ -6134,52 +6134,50 @@ async function handleRequest({
       writeJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
-    try {
-      const parsed = new URL(req.url || "/", "http://127.0.0.1");
-      const includeTest = parsed.searchParams.get("include_test") === "1";
-      const productId = parsed.searchParams.get("product_id") || "";
-      const svc = require("./services/multiStoreReport.cjs");
-      const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.getOpenapiQcFast : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.getQualityPanelFast : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : pathname.endsWith("flow-analysis") ? svc.buildFlowAnalysis : pathname.endsWith("flow-trend") ? svc.buildFlowTrend : svc.buildActivityList;
-      const statDate = parsed.searchParams.get("stat_date") || "";
-      const mallId = parsed.searchParams.get("mall_id") || "";
-      const goodsId = parsed.searchParams.get("goods_id") || "";
-      const site = parsed.searchParams.get("site") || "";
-      const data = fn(db, { includeTest, productId, statDate, mallId, goodsId, site, attachCloudDb: attachTemuCloudDbIfPossible });
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const includeTest = parsed.searchParams.get("include_test") === "1";
+    const productId = parsed.searchParams.get("product_id") || "";
+    const svc = require("./services/multiStoreReport.cjs");
+    const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.getOpenapiQcFast : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.getQualityPanelFast : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : pathname.endsWith("flow-analysis") ? svc.buildFlowAnalysis : pathname.endsWith("flow-trend") ? svc.buildFlowTrend : svc.buildActivityList;
+    const statDate = parsed.searchParams.get("stat_date") || "";
+    const mallId = parsed.searchParams.get("mall_id") || "";
+    const goodsId = parsed.searchParams.get("goods_id") || "";
+    const site = parsed.searchParams.get("site") || "";
+    Promise.resolve(fn(db, { includeTest, productId, statDate, mallId, goodsId, site, attachCloudDb: attachTemuCloudDbIfPossible })).then((data) => {
       writeJson(res, 200, { ok: true, data });
-    } catch (error) {
+    }).catch((error) => {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
-    }
+    });
     return;
   }
 
   if (pathname === "/api/erp/reports/site-exceptions") {
     if (req.method !== "GET") {writeJson(res, 405, { ok: false, error: "Method not allowed" });return;}
-    try {
-      const parsed = new URL(req.url || "/", "http://127.0.0.1");
-      const includeTest = parsed.searchParams.get("include_test") === "1";
-      const svc = require("./services/multiStoreReport.cjs");
-      svc.syncSiteExceptionsFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible });
-      const data = svc.buildSiteExceptionList(db, { includeTest });
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const includeTest = parsed.searchParams.get("include_test") === "1";
+    const svc = require("./services/multiStoreReport.cjs");
+    Promise.resolve(svc.syncSiteExceptionsFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })).then(() => {
+      return svc.buildSiteExceptionList(db, { includeTest });
+    }).then((data) => {
       writeJson(res, 200, { ok: true, data });
-    } catch (error) {
+    }).catch((error) => {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
-    }
+    });
     return;
   }
 
   if (pathname === "/api/erp/reports/high-price-flow-detail") {
     if (req.method !== "GET") {writeJson(res, 405, { ok: false, error: "Method not allowed" });return;}
-    try {
-      const parsed = new URL(req.url || "/", "http://127.0.0.1");
-      const mallId = parsed.searchParams.get("mall_id") || "";
-      const productId = parsed.searchParams.get("product_id") || "";
-      if (!mallId || !productId) {writeJson(res, 400, { ok: false, error: "mall_id and product_id required" });return;}
-      const svc = require("./services/multiStoreReport.cjs");
-      const data = svc.getHighPriceFlowDetail(db, { mallId, productId, attachCloudDb: attachTemuCloudDbIfPossible });
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const mallId = parsed.searchParams.get("mall_id") || "";
+    const productId = parsed.searchParams.get("product_id") || "";
+    if (!mallId || !productId) {writeJson(res, 400, { ok: false, error: "mall_id and product_id required" });return;}
+    const svc = require("./services/multiStoreReport.cjs");
+    Promise.resolve(svc.getHighPriceFlowDetail(db, { mallId, productId, attachCloudDb: attachTemuCloudDbIfPossible })).then((data) => {
       writeJson(res, 200, { ok: true, data });
-    } catch (error) {
+    }).catch((error) => {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
-    }
+    });
     return;
   }
 
@@ -6206,7 +6204,7 @@ async function handleRequest({
     try {
       const payload = await readOptionalPayload(req);
       const { setMallOwner } = require("./services/multiStoreReport.cjs");
-      const changes = setMallOwner(db, payload?.mall_id, payload?.owner);
+      const changes = await setMallOwner(db, payload?.mall_id, payload?.owner);
       writeJson(res, 200, { ok: true, data: { changes } });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
@@ -6222,7 +6220,7 @@ async function handleRequest({
     }
     try {
       const { listOpTaskState } = require("./services/multiStoreReport.cjs");
-      writeJson(res, 200, { ok: true, data: listOpTaskState(db) });
+      writeJson(res, 200, { ok: true, data: await listOpTaskState(db) });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
     }
@@ -6236,7 +6234,7 @@ async function handleRequest({
     try {
       const payload = await readOptionalPayload(req);
       const { setOpTaskState } = require("./services/multiStoreReport.cjs");
-      const changes = setOpTaskState(db, payload?.task_key, payload?.status ?? null, payload?.owner ?? null);
+      const changes = await setOpTaskState(db, payload?.task_key, payload?.status ?? null, payload?.owner ?? null);
       writeJson(res, 200, { ok: true, data: { changes } });
     } catch (error) {
       writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
@@ -6254,19 +6252,19 @@ async function handleRequest({
         const raceTimer = new Promise((_, rej) => setTimeout(() => rej(new Error("_live_timeout")), 30000));
         data = await Promise.race([require("./services/yunqiLiveProxy.cjs").liveSearch(p || {}), raceTimer]);
       } catch {
-        data = require("./services/yunqiCloud.cjs").searchProducts(p || {});
+        data = await require("./services/yunqiCloud.cjs").searchProducts(p || {});
       }
       writeJson(res, 200, { ok: true, data });
     } catch (error) {writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });}
     return;
   }
   if (pathname === "/api/erp/reports/yunqi-token-status") {
-    try {writeJson(res, 200, { ok: true, data: require("./services/yunqiLiveProxy.cjs").tokenStatus() });}
+    try {writeJson(res, 200, { ok: true, data: await require("./services/yunqiLiveProxy.cjs").tokenStatus() });}
     catch (error) {writeJson(res, 500, { ok: false, error: error?.message || String(error) });}
     return;
   }
   if (pathname === "/api/erp/reports/yunqi-selection-list") {
-    try {const u = new URL(req.url || "/", "http://127.0.0.1");const status = u.searchParams.get("status") || "";const accountId = u.searchParams.get("accountId") || "";writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelection({ status, accountId }) });}
+    try {const u = new URL(req.url || "/", "http://127.0.0.1");const status = u.searchParams.get("status") || "";const accountId = u.searchParams.get("accountId") || "";writeJson(res, 200, { ok: true, data: await require("./services/yunqiCloud.cjs").listSelection({ status, accountId }) });}
     catch (error) {writeJson(res, 500, { ok: false, error: error?.message || String(error) });}
     return;
   }
@@ -6277,7 +6275,7 @@ async function handleRequest({
   }
   if (pathname === "/api/erp/reports/yunqi-selection-add") {
     if (req.method !== "POST") {writeJson(res, 405, { ok: false, error: "Method not allowed" });return;}
-    try {const p = await readOptionalPayload(req);writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").addSelection(p?.item || p || {}) });}
+    try {const p = await readOptionalPayload(req);writeJson(res, 200, { ok: true, data: await require("./services/yunqiCloud.cjs").addSelection(p?.item || p || {}) });}
     catch (error) {writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });}
     return;
   }
@@ -6495,7 +6493,7 @@ async function handleRequest({
     const status = await get1688AuthStatus(session.user);
     let purchaseAccounts = [];
     try {
-      const result = list1688PurchaseAccounts(session.user?.companyId);
+      const result = await list1688PurchaseAccounts(session.user?.companyId);
       purchaseAccounts = Array.isArray(result?.accounts) ? result.accounts : [];
     } catch {
       purchaseAccounts = [];
@@ -6577,7 +6575,7 @@ function startMultiStoreReportPrewarm(db) {
   let svc;
   try {svc = require("./services/multiStoreReport.cjs");} catch {return;}
   if (typeof svc.prewarmMultiStoreReport !== "function") return;
-  const run = () => {try {svc.prewarmMultiStoreReport(db, attachTemuCloudDbIfPossible);} catch {}};
+  const run = async () => {try {await svc.prewarmMultiStoreReport(db, attachTemuCloudDbIfPossible);} catch {}};
   setTimeout(run, 8000); // 启动 8s 后预热一次（错开启动期 IO）
   _msrPrewarmTimer = setInterval(run, 4 * 60 * 1000); // 每 4 分钟保持暖（< 5min 缓存 TTL）
   if (_msrPrewarmTimer && typeof _msrPrewarmTimer.unref === "function") _msrPrewarmTimer.unref();

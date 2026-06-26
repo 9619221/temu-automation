@@ -52,7 +52,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -60,7 +60,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS consign_after_sale_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -116,14 +116,14 @@ function closeCacheDb() {
   }
 }
 
-async function getMeta(companyId, source) {
+function getMeta(companyId, source) {
   const db = openCacheDb();
-  return (await queryOne(db, "SELECT * FROM consign_after_sale_sync_meta WHERE company_id = ? AND source = ?", [companyId, source])) || null;
+  return db.prepare("SELECT * FROM consign_after_sale_sync_meta WHERE company_id = ? AND source = ?").get(companyId, source) || null;
 }
 
-async function setMeta(companyId, source, fields = {}) {
+function setMeta(companyId, source, fields = {}) {
   const db = openCacheDb();
-  await execute(db, `
+  db.prepare(`
     INSERT INTO consign_after_sale_sync_meta (company_id, source, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @source, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id, source) DO UPDATE SET
@@ -131,7 +131,7 @@ async function setMeta(companyId, source, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `, {
+  `).run({
     company_id: companyId,
     source,
     cursor: fields.cursor != null ? fields.cursor : null,
@@ -141,11 +141,11 @@ async function setMeta(companyId, source, fields = {}) {
   });
 }
 
-async function isCachePopulated(companyId) {
+function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
     const db = openCacheDb();
-    const row = await queryOne(db, "SELECT 1 FROM consign_after_sale_cache WHERE company_id = ? LIMIT 1", [companyId]);
+    const row = db.prepare("SELECT 1 FROM consign_after_sale_cache WHERE company_id = ? LIMIT 1").get(companyId);
     return Boolean(row);
   } catch {
     return false;
@@ -182,7 +182,7 @@ function buildHeadConditions(params, args) {
   return conditions;
 }
 
-async function getCachedConsignAfterSales(params = {}) {
+function getCachedConsignAfterSales(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -192,16 +192,16 @@ async function getCachedConsignAfterSales(params = {}) {
   const conditions = buildHeadConditions(params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 500000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT payload_json FROM consign_after_sale_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY as_date DESC, as_id DESC
     LIMIT @limit OFFSET @offset
-  `, { ...args, limit, offset });
+  `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-async function getCachedConsignAfterSalesCount(params = {}) {
+function getCachedConsignAfterSalesCount(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -209,11 +209,11 @@ async function getCachedConsignAfterSalesCount(params = {}) {
   if (!isCachePopulated(companyId)) return null;
   const args = { company_id: companyId };
   const conditions = buildHeadConditions(params, args);
-  const row = await queryOne(db, `SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE ${conditions.join(" AND ")}`, [args]);
+  const row = db.prepare(`SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE ${conditions.join(" AND ")}`).get(args);
   return row ? row.c : 0;
 }
 
-async function getCachedConsignAfterSaleItems(params = {}) {
+function getCachedConsignAfterSaleItems(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -230,11 +230,11 @@ async function getCachedConsignAfterSaleItems(params = {}) {
     asIdsRaw.forEach((v, idx) => {args[`as_${idx}`] = v;});
     conditions.push(`as_id IN (${placeholders.join(", ")})`);
   }
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT payload_json FROM consign_after_sale_item_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY as_id DESC, asi_id ASC
-  `, [args]);
+  `).all(args);
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
@@ -485,7 +485,7 @@ async function reconcileHeadDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true };
   const db = openCacheDb();
-  const localIds = (await queryAll(db, "SELECT id FROM consign_after_sale_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
+  const localIds = db.prepare("SELECT id FROM consign_after_sale_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteHeads(companyId, stale);
   setMeta(companyId, "head", { lastReconcileAt: nowIso() });
@@ -503,7 +503,7 @@ async function reconcileItemDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true };
   const db = openCacheDb();
-  const localIds = (await queryAll(db, "SELECT id FROM consign_after_sale_item_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
+  const localIds = db.prepare("SELECT id FROM consign_after_sale_item_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteItems(companyId, stale);
   setMeta(companyId, "item", { lastReconcileAt: nowIso() });
@@ -545,15 +545,15 @@ async function triggerReconcile(options = {}) {
   return { head, item };
 }
 
-async function getCacheStatus(options = {}) {
+function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, headCount: 0, itemCount: 0, populated: false };
   let headCount = 0;
   let itemCount = 0;
   try {
     const db = openCacheDb();
-    headCount = (await queryOne(db, "SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE company_id = ? AND status_internal != 'deleted'", [companyId])).c;
-    itemCount = (await queryOne(db, "SELECT COUNT(*) AS c FROM consign_after_sale_item_cache WHERE company_id = ? AND status_internal != 'deleted'", [companyId])).c;
+    headCount = db.prepare("SELECT COUNT(*) AS c FROM consign_after_sale_cache WHERE company_id = ? AND status_internal != 'deleted'").get(companyId).c;
+    itemCount = db.prepare("SELECT COUNT(*) AS c FROM consign_after_sale_item_cache WHERE company_id = ? AND status_internal != 'deleted'").get(companyId).c;
   } catch {
     return { companyId, headCount: 0, itemCount: 0, populated: false };
   }

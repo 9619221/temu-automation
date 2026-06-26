@@ -60,7 +60,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -68,7 +68,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS sku_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -106,14 +106,14 @@ function closeCacheDb() {
   }
 }
 
-async function getMeta(companyId) {
-  const db = await openCacheDb();
-  return (await queryOne(db, "SELECT * FROM sku_sync_meta WHERE company_id = ?", [companyId])) || null;
+function getMeta(companyId) {
+  const db = openCacheDb();
+  return db.prepare("SELECT * FROM sku_sync_meta WHERE company_id = ?").get(companyId) || null;
 }
 
-async function setMeta(companyId, fields = {}) {
-  const db = await openCacheDb();
-  await execute(db, `
+function setMeta(companyId, fields = {}) {
+  const db = openCacheDb();
+  db.prepare(`
     INSERT INTO sku_sync_meta (company_id, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id) DO UPDATE SET
@@ -121,7 +121,7 @@ async function setMeta(companyId, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `, {
+  `).run({
     company_id: companyId,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
@@ -130,11 +130,11 @@ async function setMeta(companyId, fields = {}) {
   });
 }
 
-async function isCachePopulated(companyId) {
+function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
-    const db = await openCacheDb();
-    const row = await queryOne(db, "SELECT 1 FROM sku_cache WHERE company_id = ? LIMIT 1", [companyId]);
+    const db = openCacheDb();
+    const row = db.prepare("SELECT 1 FROM sku_cache WHERE company_id = ? LIMIT 1").get(companyId);
     return Boolean(row);
   } catch {
     return false;
@@ -142,16 +142,16 @@ async function isCachePopulated(companyId) {
 }
 
 // 读缓存。返回 null 表示无法用缓存（无 companyId / 缓存空 / 打开失败），调用方据此降级回跨海。
-async function getCachedSkus(params = {}) {
+function getCachedSkus(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = await openCacheDb();
+    db = openCacheDb();
   } catch {
     return null;
   }
-  if (!await isCachePopulated(companyId)) return null;
+  if (!isCachePopulated(companyId)) return null;
 
   const conditions = ["company_id = @company_id", "status != 'deleted'"];
   const args = { company_id: companyId };
@@ -162,31 +162,30 @@ async function getCachedSkus(params = {}) {
   }
   const limit = Math.max(1, Math.min(Number(params.limit) || 500, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT payload_json FROM sku_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY updated_at DESC
     LIMIT @limit OFFSET @offset
-  `, { ...args, limit, offset });
+  `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-async function mappingCacheTableExists(db) {
-  return await tableExists(db, "mapping_cache");
+function mappingCacheTableExists(db) {
+  try {
+    db.prepare("SELECT 1 FROM mapping_cache LIMIT 0").get();
+    return true;
+  } catch { return false; }
 }
 
-// 未绑定 SKU 条件构建（list 与 count 共用）。"未绑定" = sku_cache 里没有任何 active 映射的行。
-// sku_cache 与 mapping_cache 同在一个 cache.db 文件，可跨表 NOT EXISTS。
-async function buildUnmappedConditions(db, params, args) {
+function buildUnmappedConditions(db, params, args) {
   const conditions = ["sku.company_id = @company_id", "sku.status != 'deleted'"];
   const search = optionalString(params.search);
   if (search) {
     conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
     args.search = `%${search}%`;
   }
-  // mapping_cache 走 idx_mapping_cache_sku(company_id, sku_id)，NOT EXISTS 命中索引；
-  // 老库还没同步过映射（表不存在）时退化为"全部 SKU 都算未绑定"。
-  if (await mappingCacheTableExists(db)) {
+  if (mappingCacheTableExists(db)) {
     conditions.push(
       "NOT EXISTS (SELECT 1 FROM mapping_cache m WHERE m.company_id = sku.company_id AND m.sku_id = sku.id AND m.status != 'deleted')"
     );
@@ -194,54 +193,53 @@ async function buildUnmappedConditions(db, params, args) {
   return conditions;
 }
 
-// 未绑定 SKU 分页（供应商管理「未绑定」Tab）。返回 null 表示无法用缓存、调用方降级。
-async function getCachedUnmappedSkus(params = {}) {
+function getCachedUnmappedSkus(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = await openCacheDb();
+    db = openCacheDb();
   } catch {
     return null;
   }
-  if (!await isCachePopulated(companyId)) return null;
+  if (!isCachePopulated(companyId)) return null;
 
   const args = { company_id: companyId };
   const conditions = buildUnmappedConditions(db, params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 500, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT sku.payload_json FROM sku_cache sku
     WHERE ${conditions.join(" AND ")}
     ORDER BY sku.updated_at DESC
     LIMIT @limit OFFSET @offset
-  `, { ...args, limit, offset });
+  `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-async function getCachedUnmappedSkusCount(params = {}) {
+function getCachedUnmappedSkusCount(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
   try {
-    db = await openCacheDb();
+    db = openCacheDb();
   } catch {
     return null;
   }
-  if (!await isCachePopulated(companyId)) return null;
+  if (!isCachePopulated(companyId)) return null;
 
   const args = { company_id: companyId };
   const conditions = buildUnmappedConditions(db, params, args);
-  const row = await queryOne(db, `
+  const row = db.prepare(`
     SELECT COUNT(*) AS c FROM sku_cache sku
     WHERE ${conditions.join(" AND ")}
-  `, [args]);
+  `).get(args);
   return row ? row.c : 0;
 }
 
 async function upsertSkus(companyId, rows) {
   if (!rows.length) return;
-  const db = await openCacheDb();
+  const db = openCacheDb();
   const now = nowIso();
 
 
@@ -278,7 +276,7 @@ async function upsertSkus(companyId, rows) {
     ON CONFLICT(company_id, id) DO UPDATE SET
       internal_sku_code = @code, product_name = @name, status = @status,
       updated_at = @updated_at, payload_json = @payload, cached_at = @cached_at
-  `, { company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});}async function deleteSkus(companyId, ids) {if (!ids.length) return;const db = await openCacheDb();await withTransaction(db, async (txDb) => {const list = ids;for (const id of list) await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});}async function fetchSkuPage({ since, includeDeleted, limit, offset }) {
+  `, { company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});}async function deleteSkus(companyId, ids) {if (!ids.length) return;const db = openCacheDb();await withTransaction(db, async (txDb) => {const list = ids;for (const id of list) await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});}async function fetchSkuPage({ since, includeDeleted, limit, offset }) {
   const body = { part: "skus", limit, offset };
   if (since) body.since = since;
   if (includeDeleted) body.includeDeleted = true;
@@ -304,7 +302,7 @@ async function syncFull(companyId) {
   for (const row of all) {
     if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;
   }
-  const db = await openCacheDb();
+  const db = openCacheDb();
   const now = nowIso();await withTransaction(db,
 
 
@@ -370,11 +368,11 @@ async function reconcileDeletes(companyId) {
   }
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true }; // 防御：空集不敢全删
-  const db = await openCacheDb();
-  const localIds = (await queryAll(db, "SELECT id FROM sku_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
+  const db = openCacheDb();
+  const localIds = db.prepare("SELECT id FROM sku_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
-  await deleteSkus(companyId, stale);
-  await setMeta(companyId, { lastReconcileAt: nowIso() });
+  deleteSkus(companyId, stale);
+  setMeta(companyId, { lastReconcileAt: nowIso() });
   return { reconciled: stale.length };
 }
 
@@ -411,17 +409,17 @@ async function triggerReconcile(options = {}) {
   return withLock(companyId, "reconcile", async () => await reconcileDeletes(companyId));
 }
 
-async function getCacheStatus(options = {}) {
+function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, count: 0, populated: false };
   let count = 0;
   try {
-    const db = await openCacheDb();
-    count = (await queryOne(db, "SELECT COUNT(*) AS c FROM sku_cache WHERE company_id = ? AND status != 'deleted'", [companyId])).c;
+    const db = openCacheDb();
+    count = db.prepare("SELECT COUNT(*) AS c FROM sku_cache WHERE company_id = ? AND status != 'deleted'").get(companyId).c;
   } catch {
     return { companyId, count: 0, populated: false };
   }
-  const meta = await getMeta(companyId);
+  const meta = getMeta(companyId);
   return {
     companyId,
     count,

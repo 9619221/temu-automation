@@ -7222,7 +7222,6 @@ body {
   background: var(--status-bg, transparent) !important;
   text-align: center;
   vertical-align: middle;
-  padding: 0 !important;
 }
 .erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > .status-cell-colored,
 .erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > .status-cell-colored,

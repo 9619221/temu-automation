@@ -3796,7 +3796,7 @@ async function _buildSkuSalesOfficialFresh(db, options = {}) {
 }
 
 // SKU 销售明细（带缓存）。官方路径读物化表；抓包路径需 attachCloudDb 接通 cloud 库。
-function buildSkuSales(db, options = {}) {
+async function buildSkuSales(db, options = {}) {
   if (!db) throw new Error("buildSkuSales: db is required (host mode only)");
   const official = useOfficialReports(options);
   const key = (official ? "o:" : "s:") + (options.includeTest ? "1" : "0");
@@ -3806,13 +3806,13 @@ function buildSkuSales(db, options = {}) {
   }
   let data;
   if (official) {
-    data = _buildSkuSalesOfficialFresh(db, options);
+    data = await _buildSkuSalesOfficialFresh(db, options);
   } else {
     const attachCloudDb = options.attachCloudDb;
     if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
       return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
     }
-    data = _buildSkuSalesFresh(db, options);
+    data = await _buildSkuSalesFresh(db, options);
   }
   _skuSalesCache.set(key, { data, ts: Date.now() });
   return data;
@@ -4228,7 +4228,7 @@ async function _buildShopHealthOfficialFresh(db, options = {}) {
   }));
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
-function buildShopHealth(db, options = {}) {
+async function buildShopHealth(db, options = {}) {
   if (!db) throw new Error("buildShopHealth: db is required (host mode only)");
   const official = useOfficialReports(options);
   const key = (official ? "o:" : "s:") + (options.includeTest ? "1" : "0");
@@ -4238,13 +4238,13 @@ function buildShopHealth(db, options = {}) {
   }
   let data;
   if (official) {
-    data = _buildShopHealthOfficialFresh(db, options);
+    data = await _buildShopHealthOfficialFresh(db, options);
   } else {
     const attachCloudDb = options.attachCloudDb;
     if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
       return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
     }
-    data = _buildShopHealthScrapeFresh(db, options);
+    data = await _buildShopHealthScrapeFresh(db, options);
   }
   _shopHealthCache.set(key, { data, ts: Date.now() });
   return data;

@@ -350,7 +350,7 @@ async function triggerReconcile(options = {}) {
   return withLock(companyId, "reconcile", () => reconcileDeletes(companyId));
 }
 
-async function getCacheStatus(options = {}) {
+function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, count: 0, populated: false };
   let count = 0;

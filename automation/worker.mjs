@@ -14172,8 +14172,8 @@ async function generateWorkflowSinglePackImageAttempt({
 }
 
 async function generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceImagePath, plan, taskId }) {
-  const requestTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_REQUEST_TIMEOUT_MS", 10 * 60 * 1000);
-  const idleTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_IDLE_TIMEOUT_MS", 4 * 60 * 1000);
+  const requestTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_REQUEST_TIMEOUT_MS", 15 * 60 * 1000);
+  const idleTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_IDLE_TIMEOUT_MS", 8 * 60 * 1000);
   const maxRetries = Math.max(0, parsePositiveEnvInt("WORKFLOW_PACK_AI_MAX_RETRIES", 2));
   let lastResult = null;
 

@@ -60,7 +60,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -68,7 +68,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS mapping_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -103,14 +103,14 @@ function closeCacheDb() {
   }
 }
 
-async function getMeta(companyId) {
+function getMeta(companyId) {
   const db = openCacheDb();
-  return (await queryOne(db, "SELECT * FROM mapping_sync_meta WHERE company_id = ?", [companyId])) || null;
+  return db.prepare("SELECT * FROM mapping_sync_meta WHERE company_id = ?").get(companyId) || null;
 }
 
-async function setMeta(companyId, fields = {}) {
+function setMeta(companyId, fields = {}) {
   const db = openCacheDb();
-  await execute(db, `
+  db.prepare(`
     INSERT INTO mapping_sync_meta (company_id, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id) DO UPDATE SET
@@ -118,7 +118,7 @@ async function setMeta(companyId, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `, {
+  `).run({
     company_id: companyId,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
@@ -127,11 +127,11 @@ async function setMeta(companyId, fields = {}) {
   });
 }
 
-async function isCachePopulated(companyId) {
+function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
     const db = openCacheDb();
-    const row = await queryOne(db, "SELECT 1 FROM mapping_cache WHERE company_id = ? LIMIT 1", [companyId]);
+    const row = db.prepare("SELECT 1 FROM mapping_cache WHERE company_id = ? LIMIT 1").get(companyId);
     return Boolean(row);
   } catch {
     return false;
@@ -162,7 +162,7 @@ function buildMappingConditions(params, args) {
 }
 
 // 读缓存。返回 null 表示无法用缓存（无 companyId / 缓存空 / 打开失败），调用方据此降级回跨海。
-async function getCachedMappings(params = {}) {
+function getCachedMappings(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -177,17 +177,16 @@ async function getCachedMappings(params = {}) {
   const conditions = buildMappingConditions(params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 500000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT payload_json FROM mapping_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY updated_at DESC
     LIMIT @limit OFFSET @offset
-  `, { ...args, limit, offset });
+  `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
-// 计数（配合分页器，与 getCachedMappings 同口径）。返回 null 同样表示无法用缓存、调用方降级。
-async function getCachedMappingsCount(params = {}) {
+function getCachedMappingsCount(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
   if (!companyId) return null;
   let db;
@@ -200,10 +199,10 @@ async function getCachedMappingsCount(params = {}) {
 
   const args = { company_id: companyId };
   const conditions = buildMappingConditions(params, args);
-  const row = await queryOne(db, `
+  const row = db.prepare(`
     SELECT COUNT(*) AS c FROM mapping_cache
     WHERE ${conditions.join(" AND ")}
-  `, [args]);
+  `).get(args);
   return row ? row.c : 0;
 }
 
@@ -339,7 +338,7 @@ async function reconcileDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true }; // 防御：空集不敢全删
   const db = openCacheDb();
-  const localIds = (await queryAll(db, "SELECT id FROM mapping_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
+  const localIds = db.prepare("SELECT id FROM mapping_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteMappings(companyId, stale);
   setMeta(companyId, { lastReconcileAt: nowIso() });
@@ -379,13 +378,13 @@ async function triggerReconcile(options = {}) {
   return withLock(companyId, "reconcile", () => reconcileDeletes(companyId));
 }
 
-async function getCacheStatus(options = {}) {
+function getCacheStatus(options = {}) {
   const companyId = optionalString(options.companyId) || getCurrentCompanyId();
   if (!companyId) return { companyId: null, count: 0, populated: false };
   let count = 0;
   try {
     const db = openCacheDb();
-    count = (await queryOne(db, "SELECT COUNT(*) AS c FROM mapping_cache WHERE company_id = ? AND status != 'deleted'", [companyId])).c;
+    count = db.prepare("SELECT COUNT(*) AS c FROM mapping_cache WHERE company_id = ? AND status != 'deleted'").get(companyId).c;
   } catch {
     return { companyId, count: 0, populated: false };
   }
