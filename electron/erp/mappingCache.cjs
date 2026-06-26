@@ -17,7 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const { getErpDataDir, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
 // 命名空间引用（非解构）：便于单元测试 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 

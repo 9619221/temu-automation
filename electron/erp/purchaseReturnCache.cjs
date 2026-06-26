@@ -17,7 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const { getErpDataDir, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE_HEAD = 1000;
