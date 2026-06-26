@@ -9,13 +9,7 @@
  */
 "use strict";
 
-const Database = require("better-sqlite3");
-const path = require("path");
-
-const ERP_DB = process.env.ERP_DB
-  || process.env.ERP_DB_PATH
-  || path.join(process.env.ERP_DATA_DIR || "/opt/temu-erp-data", "erp.sqlite");
-
+const { openErpDatabase, closePgPool, USE_PG } = require("../electron/db/connection.cjs");
 const collectors = require("../electron/erp/services/temuOpenApiCollectors.cjs");
 
 function log(...args) {
@@ -24,10 +18,8 @@ function log(...args) {
 
 async function main() {
   const t0 = Date.now();
-  // 商品维度广告参数未定前先跳过，避免每店一次必失败的调用浪费配额
   const skipAdGoods = process.env.TEMU_EXT_AD_GOODS !== "1";
-  const db = new Database(ERP_DB);
-  db.pragma("busy_timeout=60000");
+  const db = openErpDatabase();
   try {
     const r = await collectors.syncExtendedCollectorsAllMalls(db, { skipAdGoods });
     const ok = r.results.filter((x) => x.ok);
@@ -40,7 +32,7 @@ async function main() {
     log(`done: malls=${r.malls} ok=${ok.length} skipAdGoods=${skipAdGoods} agg=${JSON.stringify(agg)} in ${Math.round((Date.now() - t0) / 1000)}s`);
     for (const x of r.results.filter((x) => !x.ok)) log(`  FAIL mall=${x.mallId}: ${x.error}`);
   } finally {
-    db.close();
+    if (USE_PG) await closePgPool(); else db.close();
   }
 }
 

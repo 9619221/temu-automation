@@ -1,0 +1,214 @@
+{
+  "方便套组": [
+    {
+      "synced_at": "2026-06-17T05:01:29.823Z",
+      "payload": {
+        "autoCloseJit": false,
+        "customInfoVO": {
+          "limitNum": null,
+          "isCustomGoods": false,
+          "effectPicture": null
+        },
+        "productName": "车载便携厕所户外露营折叠卡堵车应急/长途旅行/野外垂钓ABS贴心男女通用随带随用",
+        "illegalReason": null,
+        "pictureAuditStatus": 2,
+        "isFirst": null,
+        "skuQuantityDetailList": [
+          {
+            "stockDays": 3,
+            "canPurchase": true,
+            "priceReviewStatus": 2,
+            "availableSaleDaysFromInventory": 10,
+            "skuExtCode": "2603130001",
+            "inCartNumber7d": 3982,
+            "sevenDaysSaleReference": 353.57,
+            "lackQuantity": 0,
+            "lastSevenDaysSaleVolume": 2495,
+            "warehouseGroupId": 828046,
+            "productSkuId": 41768845242,
+            "warehouseGroupName": "广东仓组1",
+            "isReducePricePass": true,
+            "supplierPrice": null,
+            "availableSaleDays": 15.5,
+            "todaySaleVolume": 316,
+            "adviceQuantity": 1552,
+            "warehouseAvailableSaleDays": 1.9,
+            "inCardNumber": 12276,
+            "isVerifyPrice": false,
+            "totalSaleVolume": 13455,
+            "className": "方便套组",
+            "sevenDaysReferenceSaleType": 2,
+            "lastThirtyDaysSaleVolume": 10128,
+            "warehouseInfoList": [
+              {
+                "stockDays": 3,
+                "totalSaleVolume": 13455,
+                "availableSaleDaysFromInventory": 10,
+                "sevenDaysSaleReference": 353.57,
+                "lackQuantity": 0,
+                "sevenDaysReferenceSaleType": 2,
+                "lastSevenDaysSaleVolume": 2495,
+                "warehouseGroupId": 828046,
+                "lastThirtyDaysSaleVolume": 10128,
+                "warehouseGroupName": "广东仓组1",
+                "safeInventoryDays": 16,
+                "availableSaleDays": 15.5,
+                "todaySaleVolume": 316,
+                "adviceQuantity": 1552,
+                "inventoryNumInfo": {
+                  "waitOnShelfNum": 0,
+                  "waitDeliveryInventoryNum": 2658,
+                  "warehouseInventoryNum": 1056,
+                  "expectedOccupiedInventoryNum": 28,
+                  "waitApproveInventoryNum": 0,
+                  "waitQcNum": 0,
+                  "unavailableWarehouseInventoryNum": 0,
+                  "waitInStock": 0,
+                  "waitReceiveNum": 4226
+                },
+                "purchaseConfig": "16 + 3",
+                "warehouseAvailableSaleDays": 1.9
+              }
+            ],
+            "safeInventoryDays": 16,
+            "inventoryNumInfo": {
+              "waitOnShelfNum": 0,
+              "waitDeliveryInventoryNum": 2658,
+              "warehouseInventoryNum": 1056,
+              "expectedOccupiedInventoryNum": 28,
+              "waitApproveInventoryNum": 0,
+              "waitQcNum": 0,
+              "unavailableWarehouseInventoryNum": 0,
+              "waitInStock": 0,
+              "waitReceiveNum": 4226
+            },
+            "purchaseConfig": "16 + 3"
+          }
+        ],
+        "productSkcId": 52341990330,
+        "expectNormalSupplyTime": null,
+        "skcExtCode": "",
+        "productId": 4698092064,
+        "supplyStatus": 0,
+        "inBlackList": false,
+        "supplyStatusRemark": "",
+        "inventoryRegion": 1,
+        "onSalesDurationOffline": 86,
+        "closeJitStatus": 0,
+        "hotTag": true,
+        "isEnoughStock": false,
+        "productSkcPicture": "https://img.cdnfe.com/product/fancy/5243eada-8189-4eb5-af29-f5a863018ccf.jpg",
+        "purchaseStockType": 0,
+        "settlementType": 1,
+        "hasHotSku": true,
+        "category": "卫生用品"
+      }
+    }
+  ],
+  "毛巾": [
+    {
+      "synced_at": "2026-06-17T05:01:29.823Z",
+      "payload": {
+        "customInfoVO": {
+          "limitNum": null,
+          "isCustomGoods": false,
+          "effectPicture": null
+        },
+        "autoCloseJit": false,
+        "productName": "XXL特大号微纤维汽车干燥毛巾，带扭曲环设计 - 超吸水加厚技术适用于轿车、卡车、船只 - 红灰色细节抹布，专业外观 | 高吸水性材料",
+        "illegalReason": null,
+        "isFirst": null,
+        "pictureAuditStatus": 2,
+        "skuQuantityDetailList": [
+          {
+            "stockDays": 3,
+            "canPurchase": true,
+            "priceReviewStatus": 2,
+            "availableSaleDaysFromInventory": 7.7,
+            "skuExtCode": "2601160009",
+            "inCartNumber7d": 2176,
+            "sevenDaysSaleReference": 482.29,
+            "lackQuantity": 0,
+            "lastSevenDaysSaleVolume": 3391,
+            "warehouseGroupId": 828046,
+            "productSkuId": 30849455000,
+            "warehouseGroupName": "广东仓组1",
+            "isReducePricePass": true,
+            "supplierPrice": null,
+            "availableSaleDays": 21.4,
+            "todaySaleVolume": 192,
+            "adviceQuantity": 0,
+            "warehouseAvailableSaleDays": 4.2,
+            "inCardNumber": 10643,
+            "isVerifyPrice": false,
+            "totalSaleVolume": 28202,
+            "className": "高品质XXL",
+            "sevenDaysReferenceSaleType": 2,
+            "lastThirtyDaysSaleVolume": 20281,
+            "warehouseInfoList": [
+              {
+                "stockDays": 3,
+                "availableSaleDaysFromInventory": 7.7,
+                "totalSaleVolume": 28202,
+                "sevenDaysSaleReference": 482.29,
+                "lackQuantity": 0,
+                "sevenDaysReferenceSaleType": 2,
+                "lastSevenDaysSaleVolume": 3391,
+                "warehouseGroupId": 828046,
+                "lastThirtyDaysSaleVolume": 20281,
+                "safeInventoryDays": 16,
+                "warehouseGroupName": "广东仓组1",
+                "availableSaleDays": 21.4,
+                "todaySaleVolume": 192,
+                "adviceQuantity": 0,
+                "inventoryNumInfo": {
+                  "waitOnShelfNum": 0,
+                  "waitDeliveryInventoryNum": 6763,
+                  "expectedOccupiedInventoryNum": 5,
+                  "warehouseInventoryNum": 2220,
+                  "waitApproveInventoryNum": 0,
+                  "waitQcNum": 0,
+                  "unavailableWarehouseInventoryNum": 0,
+                  "waitInStock": 0,
+                  "waitReceiveNum": 1888
+                },
+                "purchaseConfig": "16 + 3",
+                "warehouseAvailableSaleDays": 4.2
+              }
+            ],
+            "safeInventoryDays": 16,
+            "inventoryNumInfo": {
+              "waitOnShelfNum": 0,
+              "waitDeliveryInventoryNum": 6763,
+              "expectedOccupiedInventoryNum": 5,
+              "warehouseInventoryNum": 2220,
+              "waitApproveInventoryNum": 0,
+              "waitQcNum": 0,
+              "unavailableWarehouseInventoryNum": 0,
+              "waitInStock": 0,
+              "waitReceiveNum": 1888
+            },
+            "purchaseConfig": "16 + 3"
+          }
+        ],
+        "productSkcId": 46279978583,
+        "expectNormalSupplyTime": null,
+        "skcExtCode": "",
+        "productId": 4622732217,
+        "supplyStatus": 0,
+        "inBlackList": false,
+        "supplyStatusRemark": "",
+        "inventoryRegion": 1,
+        "onSalesDurationOffline": 149,
+        "closeJitStatus": 7,
+        "hotTag": true,
+        "isEnoughStock": true,
+        "productSkcPicture": "https://img.cdnfe.com/product/fancy/68867264-f728-4874-9290-7f90bbc8dbde.jpg",
+        "purchaseStockType": 0,
+        "settlementType": 1,
+        "hasHotSku": true,
+        "category": "车辆外部保养超细纤维布"
+      }
+    }
+  ]
+}

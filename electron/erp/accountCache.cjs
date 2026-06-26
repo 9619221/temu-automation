@@ -43,7 +43,7 @@ function getCurrentCompanyId() {
   }
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -51,7 +51,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS account_cache (
       company_id TEXT PRIMARY KEY,
       accounts_json TEXT NOT NULL,
@@ -73,7 +73,7 @@ async function getCachedAccounts(companyId) {
   }
   let row;
   try {
-    row = await queryOne(db, "SELECT accounts_json FROM account_cache WHERE company_id = ?", [key]);
+    row = db.prepare("SELECT accounts_json FROM account_cache WHERE company_id = ?").get(key);
   } catch {
     return null;
   }
@@ -89,13 +89,13 @@ async function getCachedAccounts(companyId) {
 async function setCachedAccounts(companyId, accounts) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   const db = openCacheDb();
-  await execute(db, `
+  db.prepare(`
     INSERT INTO account_cache (company_id, accounts_json, cached_at)
     VALUES (@company_id, @accounts_json, @cached_at)
     ON CONFLICT(company_id) DO UPDATE SET
       accounts_json = excluded.accounts_json,
       cached_at = excluded.cached_at
-  `, {
+  `).run({
     company_id: key,
     accounts_json: JSON.stringify(Array.isArray(accounts) ? accounts : []),
     cached_at: nowIso()

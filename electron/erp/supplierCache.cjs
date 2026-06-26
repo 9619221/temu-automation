@@ -29,7 +29,7 @@ function getCurrentCompanyId() {
   }
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -37,7 +37,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS supplier_cache (
       company_id TEXT PRIMARY KEY,
       suppliers_json TEXT NOT NULL,
@@ -54,7 +54,7 @@ async function getCachedSuppliers(companyId) {
   try {db = openCacheDb();} catch {return null;}
   let row;
   try {
-    row = await queryOne(db, "SELECT suppliers_json FROM supplier_cache WHERE company_id = ?", [key]);
+    row = db.prepare("SELECT suppliers_json FROM supplier_cache WHERE company_id = ?").get(key);
   } catch {return null;}
   if (!row) return null;
   try {
@@ -66,13 +66,13 @@ async function getCachedSuppliers(companyId) {
 async function setCachedSuppliers(companyId, suppliers) {
   const key = companyId != null ? companyId : getCurrentCompanyId();
   const db = openCacheDb();
-  await execute(db, `
+  db.prepare(`
     INSERT INTO supplier_cache (company_id, suppliers_json, cached_at)
     VALUES (@company_id, @suppliers_json, @cached_at)
     ON CONFLICT(company_id) DO UPDATE SET
       suppliers_json = excluded.suppliers_json,
       cached_at = excluded.cached_at
-  `, {
+  `).run({
     company_id: key,
     suppliers_json: JSON.stringify(Array.isArray(suppliers) ? suppliers : []),
     cached_at: nowIso()

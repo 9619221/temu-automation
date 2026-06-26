@@ -67,7 +67,7 @@ function getCacheDbPath() {
   return path.join(getErpDataDir({ userDataDir }), "cache.db");
 }
 
-async function openCacheDb() {
+function openCacheDb() {
   if (cacheDb) return cacheDb;
   const dbPath = getCacheDbPath();
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -75,7 +75,7 @@ async function openCacheDb() {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
-  await execSql(db, `
+  db.exec(`
     CREATE TABLE IF NOT EXISTS purchase_request_cache (
       company_id TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -92,7 +92,6 @@ async function openCacheDb() {
       cached_at TEXT NOT NULL,
       PRIMARY KEY (company_id, id)
     );
-    -- 列表固定按 updated_at DESC 排序，索引避免全表 TEMP B-TREE 排序。
     CREATE INDEX IF NOT EXISTS idx_pr_cache_updated ON purchase_request_cache(company_id, updated_at);
     CREATE INDEX IF NOT EXISTS idx_pr_cache_status ON purchase_request_cache(company_id, status);
     CREATE INDEX IF NOT EXISTS idx_pr_cache_code ON purchase_request_cache(company_id, internal_sku_code);
@@ -115,14 +114,14 @@ function closeCacheDb() {
   }
 }
 
-async function getMeta(companyId) {
+function getMeta(companyId) {
   const db = openCacheDb();
-  return (await queryOne(db, "SELECT * FROM purchase_request_sync_meta WHERE company_id = ?", [companyId])) || null;
+  return db.prepare("SELECT * FROM purchase_request_sync_meta WHERE company_id = ?").get(companyId) || null;
 }
 
-async function setMeta(companyId, fields = {}) {
+function setMeta(companyId, fields = {}) {
   const db = openCacheDb();
-  await execute(db, `
+  db.prepare(`
     INSERT INTO purchase_request_sync_meta (company_id, cursor, last_full_at, last_sync_at, last_reconcile_at)
     VALUES (@company_id, @cursor, @last_full_at, @last_sync_at, @last_reconcile_at)
     ON CONFLICT(company_id) DO UPDATE SET
@@ -130,7 +129,7 @@ async function setMeta(companyId, fields = {}) {
       last_full_at = COALESCE(@last_full_at, last_full_at),
       last_sync_at = COALESCE(@last_sync_at, last_sync_at),
       last_reconcile_at = COALESCE(@last_reconcile_at, last_reconcile_at)
-  `, {
+  `).run({
     company_id: companyId,
     cursor: fields.cursor != null ? fields.cursor : null,
     last_full_at: fields.lastFullAt != null ? fields.lastFullAt : null,
@@ -139,11 +138,11 @@ async function setMeta(companyId, fields = {}) {
   });
 }
 
-async function isCachePopulated(companyId) {
+function isCachePopulated(companyId) {
   if (!companyId) return false;
   try {
     const db = openCacheDb();
-    const row = await queryOne(db, "SELECT 1 FROM purchase_request_cache WHERE company_id = ? LIMIT 1", [companyId]);
+    const row = db.prepare("SELECT 1 FROM purchase_request_cache WHERE company_id = ? LIMIT 1").get(companyId);
     return Boolean(row);
   } catch {
     return false;
@@ -175,12 +174,12 @@ async function getCachedPurchaseRequests(params = {}) {
   // 默认不限条数（找品量中等，本地查询毫秒级）；保留 limit/offset 以备将来。
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 100000));
   const offset = Math.max(0, Number(params.offset) || 0);
-  const rows = await queryAll(db, `
+  const rows = db.prepare(`
     SELECT payload_json FROM purchase_request_cache
     WHERE ${conditions.join(" AND ")}
     ORDER BY updated_at DESC
     LIMIT @limit OFFSET @offset
-  `, { ...args, limit, offset });
+  `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
 }
 
@@ -214,28 +213,26 @@ const UPSERT_SQL = `
     updated_at = @updated_at, payload_json = @payload, cached_at = @cached_at
 `;
 
-async function upsertRequests(companyId, rows) {
+function upsertRequests(companyId, rows) {
   if (!rows.length) return;
   const db = openCacheDb();
   const now = nowIso();
+  const stmt = db.prepare(UPSERT_SQL);
+  db.transaction(() => {
+    for (const row of rows) {
+      if (!row || !row.id) continue;
+      stmt.run(rowToCacheColumns(companyId, row, now));
+    }
+  })();
+}
 
-
-
-
-
-
-  await withTransaction(db, async (txDb) => {const items =
-
-
-
-
-
-
-
-    rows;for (const row of items) {if (!row || !row.id) continue;await execute(txDb, UPSERT_SQL, [rowToCacheColumns(companyId, row, now)]);}}
-
-  );}async function deleteRequests(companyId, ids) {if (!ids.length) return;const db = openCacheDb();await withTransaction(db, async (txDb) => {const list =
-    ids;for (const id of list) await execute(txDb, "DELETE FROM purchase_request_cache WHERE company_id = ? AND id = ?", [companyId, String(id)]);});
+function deleteRequests(companyId, ids) {
+  if (!ids.length) return;
+  const db = openCacheDb();
+  const stmt = db.prepare("DELETE FROM purchase_request_cache WHERE company_id = ? AND id = ?");
+  db.transaction(() => {
+    for (const id of ids) stmt.run(companyId, String(id));
+  })();
 }
 
 async function fetchRequestPage({ since, includeDeleted, limit, offset }) {
@@ -265,16 +262,15 @@ async function syncFull(companyId) {
     if (row.updatedAt && row.updatedAt > cursor) cursor = row.updatedAt;
   }
   const db = openCacheDb();
-  const now = nowIso();await withTransaction(db,
-
-  async (txDb) => {const items =
-
-
-
-
-
-
-    all;await execute(txDb, "DELETE FROM purchase_request_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, UPSERT_SQL, [rowToCacheColumns(companyId, row, now)]);}});
+  const now = nowIso();
+  const stmt = db.prepare(UPSERT_SQL);
+  db.transaction(() => {
+    db.prepare("DELETE FROM purchase_request_cache WHERE company_id = ?").run(companyId);
+    for (const row of all) {
+      if (!row || !row.id) continue;
+      stmt.run(rowToCacheColumns(companyId, row, now));
+    }
+  })();
   setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });
   return { mode: "full", total: all.length };
 }
@@ -315,7 +311,7 @@ async function reconcileDeletes(companyId) {
   const serverIds = new Set(Array.isArray(payload?.ids) ? payload.ids : []);
   if (!serverIds.size) return { skipped: true }; // 防御：空集不敢全删
   const db = openCacheDb();
-  const localIds = (await queryAll(db, "SELECT id FROM purchase_request_cache WHERE company_id = ?", [companyId])).map((r) => r.id);
+  const localIds = db.prepare("SELECT id FROM purchase_request_cache WHERE company_id = ?").all(companyId).map((r) => r.id);
   const stale = localIds.filter((id) => !serverIds.has(id));
   deleteRequests(companyId, stale);
   setMeta(companyId, { lastReconcileAt: nowIso() });
@@ -360,7 +356,7 @@ async function getCacheStatus(options = {}) {
   let count = 0;
   try {
     const db = openCacheDb();
-    count = (await queryOne(db, "SELECT COUNT(*) AS c FROM purchase_request_cache WHERE company_id = ?", [companyId])).c;
+    count = db.prepare("SELECT COUNT(*) AS c FROM purchase_request_cache WHERE company_id = ?").get(companyId).c;
   } catch {
     return { companyId, count: 0, populated: false };
   }

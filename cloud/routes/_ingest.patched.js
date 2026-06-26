@@ -1,0 +1,696 @@
+import { Router } from "express";
+import crypto from "crypto";
+import { getDb } from "../db/connection.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { dispatchParsers } from "../parsers.js";
+
+const r = Router();
+
+// ===== 防膨胀兜底配置 =====
+// 单条响应体落库上限（字节）：超过只存元数据，body 仍传给 parser 在内存中使用
+const MAX_STORE_BODY = 200_000;
+// 非业务路径（飞书多维表格等）整条不落库，也不进 parser
+const NON_BUSINESS_PATH_RE = new RegExp('/bitable/|/space/api/|totalUnreadMsgNum|unreadMsgDetail|/rule/unreadNum|/auth/redDot|queryFeedbackNotReadTotal|checkAbleFeedback|/wait/optimize/count|queryInvitationGoodsCouponCount');
+
+function parseRequestBodyText(text) {
+  if (!text || typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try { return JSON.parse(trimmed); } catch { return null; }
+  }
+  try {
+    const params = new URLSearchParams(trimmed);
+    const value = params.get("data") || params.get("param") || params.get("params");
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function attachRequestBody(responseBody, requestBodyText) {
+  const requestBody = parseRequestBodyText(requestBodyText);
+  if (!requestBody) return responseBody;
+  if (responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)) {
+    return { ...responseBody, __request: requestBody };
+  }
+  return { result: responseBody, __request: requestBody };
+}
+
+r.get("/v1/health", authMiddleware, (req, res) => {
+  res.json({ ok: true, ts: Date.now(), tenant_id: req.user.tid });
+});
+
+// Activity library backfill targets. The extension can ask the cloud which SKCs
+// need a fresh marketing/enroll/list snapshot, then fetch those in the browser
+// context where Temu cookies are available.
+r.get("/v1/activity-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(1200, Math.max(1, Number(req.query.limit) || 800));
+  const perGroupLimit = Math.min(200, Math.max(1, Number(req.query.per_group_limit) || 120));
+  try {
+    const rows = db.prepare(`
+      WITH latest_sales AS (
+        SELECT mall_supplier_id AS mall_id, MAX(stat_date) AS stat_date
+        FROM temu_sales_snapshot
+        WHERE tenant_id = ?
+          AND mall_supplier_id <> ''
+          AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY mall_supplier_id
+      ),
+      candidates AS (
+        SELECT
+          s.mall_supplier_id AS mall_id,
+          'agentseller' AS site,
+          s.skc_id,
+          MAX(s.last_updated_at) AS updated_at
+        FROM temu_sales_snapshot s
+        JOIN latest_sales l
+          ON l.mall_id = s.mall_supplier_id
+         AND l.stat_date = s.stat_date
+        WHERE s.tenant_id = ?
+          AND s.mall_supplier_id <> ''
+          AND s.skc_id <> ''
+          AND s.skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY s.mall_supplier_id, s.skc_id
+        UNION ALL
+        SELECT
+          mall_id,
+          COALESCE(NULLIF(site, ''), 'agentseller') AS site,
+          skc_id,
+          MAX(last_updated_at) AS updated_at
+        FROM skc_snapshots
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND skc_id <> ''
+          AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY mall_id, COALESCE(NULLIF(site, ''), 'agentseller'), skc_id
+      ),
+      dedup AS (
+        SELECT mall_id, site, skc_id, MAX(updated_at) AS updated_at
+        FROM candidates
+        GROUP BY mall_id, site, skc_id
+      ),
+      activity AS (
+        SELECT mall_id, skc_id, MAX(last_updated_at) AS last_activity_at
+        FROM temu_activity_snapshot
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND skc_id <> ''
+          AND (
+            signup_price_cents IS NOT NULL
+            OR daily_price_cents IS NOT NULL
+            OR activity_stock IS NOT NULL
+            OR NULLIF(sku_id, '') IS NOT NULL
+            OR NULLIF(sku_ext_code, '') IS NOT NULL
+          )
+        GROUP BY mall_id, skc_id
+      ),
+      ranked AS (
+        SELECT
+          d.mall_id,
+          d.site,
+          d.skc_id,
+          d.updated_at,
+          a.last_activity_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY d.mall_id, d.site
+            ORDER BY
+              CASE WHEN a.last_activity_at IS NULL THEN 0 ELSE 1 END,
+              COALESCE(a.last_activity_at, '') ASC,
+              d.updated_at DESC,
+              d.skc_id ASC
+          ) AS rn
+        FROM dedup d
+        LEFT JOIN activity a
+          ON a.mall_id = d.mall_id
+         AND a.skc_id = d.skc_id
+      )
+      SELECT mall_id, site, skc_id, updated_at, last_activity_at
+      FROM ranked
+      WHERE rn <= ?
+      ORDER BY
+        CASE WHEN last_activity_at IS NULL THEN 0 ELSE 1 END,
+        COALESCE(last_activity_at, '') ASC,
+        updated_at DESC,
+        skc_id ASC
+      LIMIT ?
+    `).all(tenantId, tenantId, tenantId, tenantId, perGroupLimit, limit);
+    const groups = new Map();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      const site = String(row.site || "agentseller").trim() || "agentseller";
+      const skcId = String(row.skc_id || "").trim();
+      if (!mallId || !/^\d{5,}$/.test(skcId)) continue;
+      const key = `${mallId}|${site}`;
+      if (!groups.has(key)) groups.set(key, { mall_id: mallId, site, skc_ids: [] });
+      const group = groups.get(key);
+      if (group.skc_ids.length < perGroupLimit && !group.skc_ids.includes(skcId)) {
+        group.skc_ids.push(skcId);
+      }
+    }
+    const targets = Array.from(groups.values()).filter((group) => group.skc_ids.length);
+    res.json({ ok: true, targets, count: rows.length, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], count: 0, generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
+// Sales trend active backfill targets. The extension asks the cloud which
+// product SKU ids recently sold by mall, then fetches querySkuSalesNumber in
+// the seller browser session where Temu cookies are available.
+r.get("/v1/sales-trend-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(1200, Math.max(1, Number(req.query.limit) || 1200));
+  const perGroupLimit = Math.min(200, Math.max(1, Number(req.query.per_group_limit) || 100));
+  try {
+    const rows = db.prepare(`
+      WITH candidates AS (
+        SELECT
+          mall_id,
+          COALESCE(NULLIF(site, ''), 'agentseller') AS site,
+          product_sku_id,
+          MAX(stat_date) AS latest_stat_date,
+          MAX(last_updated_at) AS updated_at,
+          SUM(CASE WHEN COALESCE(is_predict, 0) = 0 THEN COALESCE(sales_number, 0) ELSE 0 END) AS recent_sales
+        FROM temu_sku_sales_trend
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND product_sku_id <> ''
+          AND stat_date >= date('now', '-7 days')
+          AND stat_date <= date('now')
+        GROUP BY mall_id, COALESCE(NULLIF(site, ''), 'agentseller'), product_sku_id
+        HAVING SUM(CASE WHEN COALESCE(is_predict, 0) = 0 THEN COALESCE(sales_number, 0) ELSE 0 END) > 0
+      ),
+      ranked AS (
+        SELECT
+          mall_id,
+          site,
+          product_sku_id,
+          latest_stat_date,
+          updated_at,
+          recent_sales,
+          ROW_NUMBER() OVER (
+            PARTITION BY mall_id, site
+            ORDER BY recent_sales DESC, latest_stat_date DESC, updated_at DESC, product_sku_id ASC
+          ) AS rn
+        FROM candidates
+      )
+      SELECT mall_id, site, product_sku_id, latest_stat_date, updated_at, recent_sales
+      FROM ranked
+      WHERE rn <= ?
+      ORDER BY updated_at DESC, latest_stat_date DESC, recent_sales DESC, product_sku_id ASC
+      LIMIT ?
+    `).all(tenantId, perGroupLimit, limit);
+    const groups = new Map();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      const site = String(row.site || "agentseller").trim() || "agentseller";
+      const skuId = String(row.product_sku_id || "").trim();
+      if (!mallId || !/^\d{5,}$/.test(skuId)) continue;
+      const key = `${mallId}|${site}`;
+      if (!groups.has(key)) groups.set(key, { mall_id: mallId, site, sku_ids: [] });
+      const group = groups.get(key);
+      if (group.sku_ids.length < perGroupLimit && !group.sku_ids.includes(skuId)) {
+        group.sku_ids.push(skuId);
+      }
+    }
+    const targets = Array.from(groups.values()).filter((group) => group.sku_ids.length);
+    res.json({ ok: true, targets, count: rows.length, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], count: 0, generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
+// JIT/VMI 主动调度目标：返回本租户最近活跃的 mall_id 列表，让扩展 SW 主动调
+// TEMU agentseller 的 querySubOrderList(VMI) + querySuggestCloseJitSkc(JIT) 两个接口。
+// 数据写回 capture_events 后，parseTemuStockOrders / parseTemuJitStatus 自动落表。
+r.get("/v1/jit-vmi-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const recentDays = Math.min(90, Math.max(1, Number(req.query.recent_days) || 30));
+  try {
+    const rows = db.prepare(`
+      SELECT mall_id, site, mall_name, last_seen
+      FROM mall_accounts
+      WHERE tenant_id = ?
+        AND mall_id <> ''
+        AND last_seen IS NOT NULL
+        AND last_seen >= datetime('now', ?)
+      ORDER BY last_seen DESC
+      LIMIT ?
+    `).all(tenantId, `-${recentDays} days`, limit);
+    const targets = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      if (!mallId) continue;
+      const site = String(row.site || "").trim() || "agentseller";
+      const key = `${mallId}|${site}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        mall_id: mallId,
+        site,
+        mall_name: row.mall_name || null,
+        last_seen: row.last_seen || null,
+      });
+    }
+    res.json({ ok: true, targets, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
+// 评价主动采集目标：返回本租户最近活跃的 mall_id 列表，让扩展 SW 主动调
+// TEMU agentseller 的 /bg-luna-agent-seller/review/pageQuery（带 mallid 头 + body {page,pageSize}，无需 anti-content）。
+// 数据写回 capture_events 后，parseTemuReview 自动落 temu_review_snapshot。
+r.get("/v1/review-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  const recentDays = Math.min(90, Math.max(1, Number(req.query.recent_days) || 30));
+  try {
+    const rows = db.prepare(`
+      SELECT mall_id, site, mall_name, last_seen
+      FROM mall_accounts
+      WHERE tenant_id = ?
+        AND mall_id <> ''
+        AND last_seen IS NOT NULL
+        AND last_seen >= datetime('now', ?)
+      ORDER BY last_seen DESC
+      LIMIT ?
+    `).all(tenantId, `-${recentDays} days`, limit);
+    const targets = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      if (!mallId) continue;
+      const site = String(row.site || "").trim() || "agentseller";
+      const key = `${mallId}|${site}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        mall_id: mallId,
+        site,
+        mall_name: row.mall_name || null,
+        last_seen: row.last_seen || null,
+      });
+    }
+    res.json({ ok: true, targets, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
+// 桌面端 ERP 增量拉：把云端 temu_jit_status_snapshot + temu_stock_order_snapshot(querySubOrderList 源)
+// 增量同步到本地 erp_temu_jit_status / erp_temu_vmi_suborder。
+// 客户端记 next_cursor，下次以 since 传回。
+r.get("/v1/sync/temu-jit-vmi", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const since = String(req.query.since || "").trim() || "1970-01-01T00:00:00.000Z";
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 1000));
+
+  let jit = [];
+  try {
+    jit = db.prepare(`
+      SELECT mall_id, site, stat_date, skc_id, sku_id, product_name,
+             jit_status, jit_close_time, suggest_close,
+             raw_json, last_updated_at
+      FROM temu_jit_status_snapshot
+      WHERE tenant_id = ? AND last_updated_at > ?
+      ORDER BY last_updated_at ASC, skc_id ASC
+      LIMIT ?
+    `).all(tenantId, since, limit);
+  } catch (error) {
+    if (!/no such table/i.test(String(error?.message || ""))) throw error;
+  }
+
+  let vmi = [];
+  try {
+    vmi = db.prepare(`
+      SELECT mall_id, site, stock_order_no, parent_order_no, delivery_order_sn, delivery_batch_sn,
+             skc_id, sku_id, sku_ext_code, product_name, spec_name,
+             demand_qty, delivered_qty, temu_status, order_time, latest_ship_at,
+             raw_json, last_updated_at
+      FROM temu_stock_order_snapshot
+      WHERE tenant_id = ? AND last_updated_at > ?
+        AND source_type = 'stock_order'
+      ORDER BY last_updated_at ASC, stock_order_no ASC
+      LIMIT ?
+    `).all(tenantId, since, limit);
+  } catch (error) {
+    if (!/no such table/i.test(String(error?.message || ""))) throw error;
+  }
+
+  const allTimes = [];
+  for (const row of jit) if (row.last_updated_at) allTimes.push(row.last_updated_at);
+  for (const row of vmi) if (row.last_updated_at) allTimes.push(row.last_updated_at);
+  allTimes.sort();
+  const next_cursor = allTimes.length ? allTimes[allTimes.length - 1] : since;
+  const has_more = jit.length >= limit || vmi.length >= limit;
+
+  res.json({
+    ok: true,
+    jit,
+    vmi,
+    next_cursor,
+    has_more,
+    generated_at: Date.now(),
+  });
+});
+
+// 全局 reload flag：通过 /api/_admin/trigger-reload 设为 true，下一次 heartbeat 把它返回给扩展，扩展调 chrome.runtime.reload() 重读 disk 代码
+const RELOAD_FLAG = { ts: 0, version: 0 };
+export function triggerExtensionReload() {
+  RELOAD_FLAG.version++;
+  RELOAD_FLAG.ts = Date.now();
+  return RELOAD_FLAG;
+}
+
+// 全局 reconfig：让扩展 SW 自动改写 storage 切到新 cloud_endpoint / auth_token
+const RECONFIG_FLAG = { version: 0, payload: null };
+export function triggerExtensionReconfig(payload) {
+  RECONFIG_FLAG.version++;
+  RECONFIG_FLAG.payload = payload || null;
+  return RECONFIG_FLAG;
+}
+
+// 扩展端心跳上报（用于无 DevTools 的远程诊断）
+r.post("/v1/heartbeat", authMiddleware, (req, res) => {
+  // 调试：把客户端上送的版本号 + page_url 打到 stdout
+  try {
+    const b = req.body || {};
+    console.log(`[hb] dev=${(req.headers["x-device-id"] || "").slice(0,8)} reload=${b.last_reload_version} reconfig=${b.last_reconfig_version} page=${(b.page_url || "").slice(0,60)} cap=${b.captured_count} sent=${b.total_sent} q=${b.queue_depth}`);
+  } catch {}
+  const db = getDb();
+  const deviceUuid = req.headers["x-device-id"] || null;
+  const tenant_id = req.user.tid;
+  const b = req.body || {};
+  const now = Date.now();
+
+  // 顺便 upsert device，让设备同时显示在 dashboard
+  let device_id = null;
+  if (deviceUuid) {
+    const exist = db.prepare("SELECT id FROM devices WHERE device_uuid = ?").get(deviceUuid);
+    if (exist) {
+      device_id = exist.id;
+      db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE id = ?").run(device_id);
+    } else {
+      device_id = crypto.randomUUID();
+      db.prepare(
+        `INSERT INTO devices (id, tenant_id, device_uuid, user_id, user_agent, last_seen)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))`
+      ).run(device_id, tenant_id, deviceUuid, req.user.uid, req.headers["user-agent"] || "");
+    }
+  }
+
+  db.prepare(`
+    INSERT INTO agent_heartbeats
+    (id, tenant_id, device_id, device_uuid, captured_count, total_sent, queue_depth,
+     last_capture_url, last_capture_at, last_flush_at, last_flush_ok, last_flush_reason,
+     hook_xhr_alive, hook_perf_seen, page_url, collector_enabled, collector_index,
+     collector_last_target_key, collector_last_target_url, collector_last_targets_json,
+     collector_updated_at, ts, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    crypto.randomUUID(), tenant_id, device_id, deviceUuid,
+    b.captured_count ?? null, b.total_sent ?? null, b.queue_depth ?? null,
+    b.last_capture_url || null, Number(b.last_capture_at) || null,
+    Number(b.last_flush_at) || null,
+    b.last_flush_ok == null ? null : (b.last_flush_ok ? 1 : 0),
+    b.last_flush_reason || null,
+    b.hook_xhr_alive == null ? null : (b.hook_xhr_alive ? 1 : 0),
+    Number(b.hook_perf_seen) || null,
+    b.page_url || null,
+    b.collector_enabled == null ? null : (b.collector_enabled ? 1 : 0),
+    Number.isFinite(Number(b.collector_index)) ? Number(b.collector_index) : null,
+    b.collector_last_target_key || null,
+    b.collector_last_target_url || null,
+    Array.isArray(b.collector_last_targets) ? JSON.stringify(b.collector_last_targets).slice(0, 8000) : null,
+    Number(b.collector_updated_at) || null,
+    Number(b.ts) || now,
+    now
+  );
+
+  // 在响应里告诉扩展是否要 reload（让代码改动 hot reload，不用人工点扩展刷新）
+  const clientReloadVersion = Number(req.body?.last_reload_version || 0);
+  const needsReload = RELOAD_FLAG.version > clientReloadVersion;
+  const clientReconfigVersion = Number(req.body?.last_reconfig_version || 0);
+  const needsReconfig = RECONFIG_FLAG.version > clientReconfigVersion && RECONFIG_FLAG.payload;
+
+  res.json({
+    ok: true,
+    needs_reload: needsReload,
+    reload_version: RELOAD_FLAG.version,
+    reconfig: needsReconfig ? RECONFIG_FLAG.payload : null,
+    reconfig_version: RECONFIG_FLAG.version,
+  });
+});
+
+// 管理接口：触发所有扩展下次心跳时 reload
+r.post("/_admin/trigger-reload", (req, res) => {
+  const flag = triggerExtensionReload();
+  res.json({ ok: true, ...flag });
+});
+
+// 管理接口：让所有扩展自动改写 cloud_endpoint / auth_token
+// body: { cloud_endpoint, auth_token }
+r.post("/_admin/trigger-reconfig", (req, res) => {
+  const { cloud_endpoint, auth_token } = req.body || {};
+  if (!cloud_endpoint) return res.status(400).json({ error: "cloud_endpoint 必填" });
+  const flag = triggerExtensionReconfig({ cloud_endpoint, auth_token });
+  res.json({ ok: true, ...flag });
+});
+
+// ===== 活动报名任务通道(指令下行) =====
+// 桌面端建任务
+r.post("/v1/enroll-tasks/create", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { mall_id, site, activity_type, activity_thematic_id, product_list } = req.body || {};
+  if (!mall_id || !activity_thematic_id || !Array.isArray(product_list) || !product_list.length) {
+    return res.status(400).json({ error: "mall_id / activity_thematic_id / product_list 必填" });
+  }
+  const id = crypto.randomUUID();
+  try {
+    db.prepare(`
+      INSERT INTO enroll_task (id, tenant_id, mall_id, site, activity_type, activity_thematic_id, product_list_json, status, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now'))
+    `).run(id, tenant_id, String(mall_id), site || "agentseller", activity_type ?? null, String(activity_thematic_id), JSON.stringify(product_list).slice(0, 200000), req.user.uid || null);
+    res.json({ ok: true, task_id: id });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.status(503).json({ error: "enroll_task 表未迁移(需 migrate)" });
+    throw error;
+  }
+});
+
+// 扩展按 mall_id 拉待报名任务,拉到即标记 dispatched(避免重复发)
+r.get("/v1/enroll-tasks", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const mall_id = String(req.query.mall_id || "").trim();
+  if (!mall_id) return res.json({ ok: true, tasks: [] });
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 10));
+  try {
+    const rows = db.prepare(`
+      SELECT id, mall_id, site, activity_type, activity_thematic_id, product_list_json
+      FROM enroll_task WHERE tenant_id = ? AND mall_id = ? AND status = 'pending'
+      ORDER BY created_at ASC LIMIT ?
+    `).all(tenant_id, mall_id, limit);
+    if (rows.length) {
+      const mark = db.prepare("UPDATE enroll_task SET status='dispatched', dispatched_at=datetime('now') WHERE id=? AND status='pending'");
+      db.transaction(() => { for (const row of rows) mark.run(row.id); })();
+    }
+    const tasks = rows.map((row) => ({
+      task_id: row.id, mall_id: row.mall_id, site: row.site,
+      activity_type: row.activity_type, activity_thematic_id: row.activity_thematic_id,
+      product_list: JSON.parse(row.product_list_json),
+    }));
+    res.json({ ok: true, tasks });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
+// 扩展回传报名结果
+r.post("/v1/enroll-tasks/result", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { task_id, status, result } = req.body || {};
+  if (!task_id) return res.status(400).json({ error: "task_id 必填" });
+  const st = status === "failed" ? "failed" : "done";
+  try {
+    const info = db.prepare(`
+      UPDATE enroll_task SET status=?, result_json=?, done_at=datetime('now')
+      WHERE id=? AND tenant_id=?
+    `).run(st, result != null ? JSON.stringify(result).slice(0, 20000) : null, String(task_id), tenant_id);
+    res.json({ ok: true, updated: info.changes });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, updated: 0 });
+    throw error;
+  }
+});
+
+// 桌面端轮询任务结果(逗号分隔 task_id)
+r.get("/v1/enroll-tasks/status", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const ids = String(req.query.ids || req.query.task_id || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return res.json({ ok: true, tasks: [] });
+  try {
+    const ph = ids.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT id, status, result_json, created_at, done_at FROM enroll_task WHERE tenant_id=? AND id IN (${ph})`).all(tenant_id, ...ids);
+    res.json({ ok: true, tasks: rows.map((row) => ({ task_id: row.id, status: row.status, created_at: row.created_at, done_at: row.done_at, result: row.result_json ? JSON.parse(row.result_json) : null })) });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
+r.post("/v1/batch", authMiddleware, async (req, res) => {
+  const { items } = req.body || {};
+  if (!Array.isArray(items)) return res.status(400).json({ error: "items 必须是数组" });
+
+  const db = getDb();
+  const deviceUuid = req.headers["x-device-id"] || null;
+  const tenant_id = req.user.tid;
+
+  // 1. upsert device
+  let device_id = null;
+  if (deviceUuid) {
+    const exist = db.prepare("SELECT id FROM devices WHERE device_uuid = ?").get(deviceUuid);
+    if (exist) {
+      device_id = exist.id;
+      db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE id = ?").run(device_id);
+    } else {
+      device_id = crypto.randomUUID();
+      db.prepare(
+        `INSERT INTO devices (id, tenant_id, device_uuid, user_id, user_agent, last_seen)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))`
+      ).run(device_id, tenant_id, deviceUuid, req.user.uid, req.headers["user-agent"] || "");
+    }
+  }
+
+  // 2. 批量写入 + 维度统计 + mall upsert
+  const insertEvt = db.prepare(`
+    INSERT INTO capture_events
+    (id, tenant_id, device_id, mall_id, site, page, kind, method, url, url_path, status, body_size, body_json, ts, captured_at, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const upsertStat = db.prepare(`
+    INSERT INTO api_endpoint_stats (tenant_id, site, method, url_path, count_total, last_seen)
+    VALUES (?, ?, ?, ?, 1, ?)
+    ON CONFLICT(tenant_id, site, method, url_path)
+    DO UPDATE SET count_total = count_total + 1, last_seen = excluded.last_seen
+  `);
+  const upsertMall = db.prepare(`
+    INSERT INTO mall_accounts (id, tenant_id, site, mall_id, mall_name, last_seen)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(tenant_id, site, mall_id)
+    DO UPDATE SET
+      mall_name = COALESCE(excluded.mall_name, mall_accounts.mall_name),
+      last_seen = excluded.last_seen
+  `);
+
+  const now = Date.now();
+  let inserted = 0;
+
+  // 单条 enrich：生成 event id + url_path + body 落库/parser 用的 json
+  const enrichOne = (it) => {
+    const url = it.url || "";
+    const url_path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] || url;
+    const method = (it.method || "GET").toUpperCase();
+    const storedBody = attachRequestBody(it.body || null, it.requestBodyText);
+    // 完整 body 仅供 parser 在内存中使用（生成 snapshot），不一定落库
+    const parser_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
+    // 飞书等非业务路径整条不落库；Temu 大响应(>200KB)只存元数据、body_json 置空
+    const skipRow = NON_BUSINESS_PATH_RE.test(url_path);
+    // perf/perf-discovery 是浏览器性能监控事件，无任何 parser 消费（PARSERS 全按业务 url_path 匹配），
+    // 「接口发现」面板只用其元数据、不读 body_json → 落库直接清空响应体，省约 40% capture_events 体积。
+    const isPerfEvent = String(it.kind || "").startsWith("perf");
+    const body_json = (isPerfEvent || !parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
+    return { id: crypto.randomUUID(), url, url_path, method, body_json, parser_json, skipRow, it };
+  };
+
+  // 单块入库事务（小事务，逐块提交）
+  const txChunk = db.transaction((chunk) => {
+    for (const e of chunk) {
+      if (e.skipRow) continue;
+      insertEvt.run(
+        e.id,
+        tenant_id,
+        device_id,
+        e.it.mall_id || null,
+        e.it.site || null,
+        e.it.page || null,
+        e.it.kind || "unknown",
+        e.method,
+        e.url,
+        e.url_path,
+        e.it.status ?? null,
+        e.it.bodySize ?? null,
+        e.body_json,
+        Number(e.it.ts) || now,
+        Number(e.it.captured_at) || now,
+        now
+      );
+      upsertStat.run(tenant_id, e.it.site || "", e.method, e.url_path, now);
+      if (e.it.mall_id) {
+        upsertMall.run(crypto.randomUUID(), tenant_id, e.it.site || "", String(e.it.mall_id), e.it.mall_name || null);
+      }
+      inserted++;
+    }
+  });
+
+  // ★ 分块处理 + 块间 setImmediate 让出事件循环：避免单个大批量请求独占单线程
+  // 数秒、把 login/dashboard 饿死导致 Caddy 502。把一个大事务 + 全量 parser 拆成
+  // 每 CHUNK 条一个小事务 + 该块 parser，块之间让事件循环喘口气。
+  const CHUNK = 150;
+  const yieldLoop = () => new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const enriched = items.slice(i, i + CHUNK).map(enrichOne);
+    txChunk(enriched);
+    // parser 在主事务外跑，失败不影响 ingest 主流程
+    try {
+      const parserItems = enriched.filter((e) => !e.skipRow).map((e) => ({
+        id: e.id,
+        url_path: e.url_path,
+        page: e.it.page || null,
+        body_json: e.parser_json,
+        ts: Number(e.it.ts) || now,
+        mall_id: e.it.mall_id || null,
+        site: e.it.site || null,
+      }));
+      dispatchParsers(db, { tenant_id, device_id }, parserItems);
+    } catch (e) {
+      console.warn("[ingest] dispatchParsers failed:", e?.message);
+    }
+    if (i + CHUNK < items.length) await yieldLoop();
+  }
+
+  res.json({ ok: true, inserted });
+});
+
+export default r;
