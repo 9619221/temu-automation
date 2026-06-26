@@ -1944,4 +1944,48 @@ r.get("/report/by-store", (req, res) => {
   sendJson(req, res, _result);
 });
 
+// 结算抓包事件批量查询（供 ERP PG 模式 HTTP 回退，替代 SQLite ATTACH）
+r.get("/settlement-capture", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const { url_paths, device_uuids, since } = req.query;
+  if (!url_paths) return res.status(400).json({ error: "url_paths required" });
+
+  const paths = url_paths.split(",").filter(Boolean);
+  if (!paths.length) return res.json([]);
+
+  const where = ["ce.tenant_id = ?", "ce.mall_id IS NOT NULL", "ce.mall_id <> ''", "ce.body_json IS NOT NULL", "ce.body_json <> ''"];
+  const params = [tid];
+
+  where.push(`ce.url_path IN (${paths.map(() => "?").join(",")})`);
+  params.push(...paths);
+
+  let fromClause = "capture_events ce";
+  if (device_uuids) {
+    const uuids = device_uuids.split(",").filter(Boolean);
+    if (uuids.length) {
+      fromClause = "capture_events ce LEFT JOIN devices cd ON cd.id = ce.device_id";
+      where.push(`(ce.device_id IN (${uuids.map(() => "?").join(",")}) OR cd.device_uuid IN (${uuids.map(() => "?").join(",")}))`);
+      params.push(...uuids, ...uuids);
+    }
+  }
+
+  if (since) {
+    where.push("ce.received_at >= ?");
+    params.push(Number(since));
+  }
+
+  const sql = `SELECT ce.mall_id, COALESCE(ce.site, '') AS site, ce.url_path, ce.body_json, ce.received_at
+               FROM ${fromClause}
+               WHERE ${where.join(" AND ")}
+               ORDER BY ce.received_at ASC
+               LIMIT 10000`;
+  try {
+    const rows = db.prepare(sql).all(...params);
+    sendJson(req, res, rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default r;
