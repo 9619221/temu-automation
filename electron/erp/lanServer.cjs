@@ -432,7 +432,7 @@ function getTemuCloudDbPath() {
 
 function attachTemuCloudDbIfPossible(db) {
   if (!db) return false;
-  if (db.__isPg) return false;
+  if (db.__isPg) return true;
   if (db.__cloudAttachState === "attached") return true;
   if (db.__cloudAttachState === "failed") return false;
   const cloudPath = getTemuCloudDbPath();
@@ -811,7 +811,7 @@ async function _getSnapColInfo(db) {
 }
 
 async function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
-  const { companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
+  const { companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilters, skuCodeFilter, dateFrom, dateTo, source } = opts;
   const snapshotTableExists = await dbTableExists(db, "temu_consign_unified_snapshot");
 
   if (!snapshotTableExists) return null;
@@ -830,9 +830,13 @@ async function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     if (statusFilters && statusFilters.length === 1) {values.status_filter = statusFilters[0];cond.push(`${statusCol} = @status_filter`);} else
     if (statusFilters && statusFilters.length > 1) {const ph = statusFilters.map((s, i) => {values[`sf${i}`] = s;return `@sf${i}`;});cond.push(`${statusCol} IN (${ph.join(",")})`);}
     if (onlineStatusFilter && hasOnlineStatus) {values.online_status_filter = onlineStatusFilter;cond.push("online_status = @online_status_filter");}
-    if (shopFilter) {
-      if (hasShopName) {values.shop_filter = shopFilter;cond.push("shop_name = @shop_filter");} else
-      {values.shop_filter = shopFilter;values.shop_like = `%${shopFilter}%`;cond.push("(json_extract(payload_json, '$.shopName') = @shop_filter OR (json_extract(payload_json, '$.shopName') IS NULL AND search_blob LIKE @shop_like))");}
+    if (shopFilters && shopFilters.length === 1) {
+      if (hasShopName) {values.shop_filter = shopFilters[0];cond.push("shop_name = @shop_filter");} else
+      {values.shop_filter = shopFilters[0];values.shop_like = `%${shopFilters[0]}%`;cond.push("(json_extract(payload_json, '$.shopName') = @shop_filter OR (json_extract(payload_json, '$.shopName') IS NULL AND search_blob LIKE @shop_like))");}
+    } else if (shopFilters && shopFilters.length > 1) {
+      const shPh = shopFilters.map((s, i) => {values[`shp${i}`] = s;return `@shp${i}`;});
+      if (hasShopName) {cond.push(`shop_name IN (${shPh.join(",")})`);} else
+      {cond.push(`json_extract(payload_json, '$.shopName') IN (${shPh.join(",")})`);}
     }
     if (skuCodeFilter) {values.sku_like = `%${skuCodeFilter}%`;cond.push("search_blob LIKE @sku_like");}
     if (dateFrom) {values.date_from = dateFrom;cond.push("order_key >= @date_from");}
@@ -939,7 +943,8 @@ async function runConsignDeliveriesUnified(db, params = {}) {
   const statusFilterRaw = String(params.status || "").trim();
   const statusFilters = statusFilterRaw ? statusFilterRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const onlineStatusFilter = String(params.onlineStatus || params.online_status || "").trim();
-  const shopFilter = String(params.shop || "").trim();
+  const shopFilterRaw = String(params.shop || "").trim();
+  const shopFilters = shopFilterRaw ? shopFilterRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const skuCodeFilter = String(params.skuCode || params.sku_code || "").trim();
   const dateFrom = String(params.dateFrom || params.date_from || "").trim();
   const dateTo = String(params.dateTo || params.date_to || "").trim();
@@ -948,7 +953,7 @@ async function runConsignDeliveriesUnified(db, params = {}) {
 
   try {
     const snapshot = await readConsignDeliveriesUnifiedFromSnapshot(db, {
-      companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source
+      companyId, page, pageSize, offset, search, statusFilters, onlineStatusFilter, shopFilters, skuCodeFilter, dateFrom, dateTo, source
     });
     if (snapshot) return snapshot;
   } catch (snapErr) {
@@ -970,7 +975,7 @@ async function runConsignDeliveriesUnified(db, params = {}) {
 }
 
 async function runConsignDeliveriesUnifiedJstOnly(db, opts) {
-  const { page, pageSize, offset, search, statusFilters, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId } = opts;
+  const { page, pageSize, offset, search, statusFilters, shopFilters, skuCodeFilter, dateFrom, dateTo, source, companyId } = opts;
   if (source === "cloud" || source === "both") {
     return {
       ok: true,
@@ -994,9 +999,12 @@ async function runConsignDeliveriesUnifiedJstOnly(db, opts) {
     const ph = statusFilters.map((s, i) => {values[`sf${i}`] = s;return `@sf${i}`;});
     conditions.push(`COALESCE(local_status_override, status) IN (${ph.join(",")})`);
   }
-  if (shopFilter) {
-    values.shop_like = `%${shopFilter}%`;
+  if (shopFilters && shopFilters.length === 1) {
+    values.shop_like = `%${shopFilters[0]}%`;
     conditions.push("shop_name LIKE @shop_like");
+  } else if (shopFilters && shopFilters.length > 1) {
+    const shPh = shopFilters.map((s, i) => {values[`shp${i}`] = s;return `@shp${i}`;});
+    conditions.push(`shop_name IN (${shPh.join(",")})`);
   }
   if (skuCodeFilter) {
     values.sku_like = `%${skuCodeFilter}%`;

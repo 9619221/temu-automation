@@ -23,6 +23,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
+  ExclamationCircleOutlined,
   EyeOutlined,
   HolderOutlined,
   ReloadOutlined,
@@ -278,7 +279,7 @@ const UNIFIED_COLUMN_LABELS: Record<string, string> = {
   supplier: "供应商",
   logistics: "物流",
   warehouse: "收货仓",
-  localLink: "本地承接",
+  localLink: "拣货状态",
 };
 
 interface UnifiedColumnConfig {
@@ -588,7 +589,13 @@ export default function QcOutboundCenter() {
   const [activeTab, setActiveTab] = useSessionState(qcViewKey("tab"), "cloud");
   const [stockStatus, setStockStatus] = useSessionState<string[]>(qcViewKey("status"), []);
   const [onlineStatus, setOnlineStatus] = useSessionState(qcViewKey("onlineStatus"), "");
-  const [stockShop, setStockShop] = useSessionState(qcViewKey("shop"), "");
+  const [stockShop, setStockShop] = useSessionState<string[]>(qcViewKey("shop"), [], {
+    deserialize: (raw) => {
+      if (Array.isArray(raw)) return raw as string[];
+      if (typeof raw === "string" && raw) return [raw];
+      return [];
+    },
+  });
   const [mallOptions, setMallOptions] = useState<{ value: string; label: string }[]>([]);
   const [stockSkuCode, setStockSkuCode] = useSessionState(qcViewKey("skuCode"), "");
   const [stockDateRange, setStockDateRange] = useSessionState<any>(qcViewKey("dateRange"), null, {
@@ -619,6 +626,30 @@ export default function QcOutboundCenter() {
   const [stockOrderForm] = Form.useForm();
 
   const canCreateOutbound = canRole(role, ["operations", "manager", "admin"]);
+
+  // --- 运营角色弹窗：线上已收货但 ERP 未发货 ---
+  const [receivedAlertOpen, setReceivedAlertOpen] = useState(false);
+  const [receivedAlertItems, setReceivedAlertItems] = useState<any[]>([]);
+  const [receivedAlertTotal, setReceivedAlertTotal] = useState(0);
+  const [receivedAlertOverdue, setReceivedAlertOverdue] = useState(0);
+  const receivedAlertChecked = useRef(false);
+
+  useEffect(() => {
+    if (receivedAlertChecked.current) return;
+    if (role !== "operations") return;
+    if (!erp?.inventory?.action) return;
+    receivedAlertChecked.current = true;
+    erp.inventory.action({ action: "get_undeducted_consigns" })
+      .then((r: any) => {
+        if (r.total > 0) {
+          setReceivedAlertItems(r.items || []);
+          setReceivedAlertTotal(r.total);
+          setReceivedAlertOverdue(r.overdueCount || 0);
+          setReceivedAlertOpen(true);
+        }
+      })
+      .catch(() => {});
+  }, [role]);
 
   const persistCache = useCallback((
     nextOutbound: OutboundWorkbench,
@@ -728,7 +759,7 @@ export default function QcOutboundCenter() {
       search: stockQuery,
       status: stockStatus,
       onlineStatus,
-      shop: stockShop,
+      shop: stockShop.join(","),
       skuCode: stockSkuCode,
       dateFrom: consignDateBound(stockDateRange?.[0], false),
       dateTo: consignDateBound(stockDateRange?.[1], true),
@@ -797,7 +828,7 @@ export default function QcOutboundCenter() {
         search: stockQuery,
         status: stockStatus,
         onlineStatus,
-        shop: stockShop,
+        shop: stockShop.join(","),
         skuCode: stockSkuCode,
         dateFrom: consignDateBound(stockDateRange?.[0], false),
         dateTo: consignDateBound(stockDateRange?.[1], true),
@@ -1362,7 +1393,7 @@ export default function QcOutboundCenter() {
     if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
     else message.success(`创建发货单完成：成功 ${ok} 单`);
     if (ok > 0) {
-      void loadUnified({ page: unifiedPage, pageSize: unifiedPageSize, search: stockQuery, status: stockStatus, onlineStatus, shop: stockShop, skuCode: stockSkuCode, dateFrom: consignDateBound(stockDateRange?.[0], false), dateTo: consignDateBound(stockDateRange?.[1], true), source: unifiedSource });
+      void loadUnified({ page: unifiedPage, pageSize: unifiedPageSize, search: stockQuery, status: stockStatus, onlineStatus, shop: stockShop.join(","), skuCode: stockSkuCode, dateFrom: consignDateBound(stockDateRange?.[0], false), dateTo: consignDateBound(stockDateRange?.[1], true), source: unifiedSource });
     }
   }, [createShipModal, erp, loadUnified, unifiedPage, unifiedPageSize, stockQuery, stockStatus, onlineStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
 
@@ -1981,7 +2012,7 @@ export default function QcOutboundCenter() {
       },
     },
     {
-      title: "本地承接",
+      title: "拣货状态",
       key: "localLink",
       width: 150,
       render: (_value, row) => {
@@ -2112,7 +2143,7 @@ export default function QcOutboundCenter() {
                   search: stockQuery,
                   status: stockStatus,
                   onlineStatus,
-                  shop: stockShop,
+                  shop: stockShop.join(","),
                   skuCode: stockSkuCode,
                   dateFrom: consignDateBound(stockDateRange?.[0], false),
                   dateTo: consignDateBound(stockDateRange?.[1], true),
@@ -2143,21 +2174,23 @@ export default function QcOutboundCenter() {
                       const trimmed = value.trim();
                       setStockQuery(trimmed);
                       setUnifiedPage(1);
-                      void loadUnified({ page: 1, pageSize: unifiedPageSize, search: trimmed, status: stockStatus, onlineStatus, shop: stockShop, skuCode: stockSkuCode, dateFrom: consignDateBound(stockDateRange?.[0], false), dateTo: consignDateBound(stockDateRange?.[1], true), source: unifiedSource });
+                      void loadUnified({ page: 1, pageSize: unifiedPageSize, search: trimmed, status: stockStatus, onlineStatus, shop: stockShop.join(","), skuCode: stockSkuCode, dateFrom: consignDateBound(stockDateRange?.[0], false), dateTo: consignDateBound(stockDateRange?.[1], true), source: unifiedSource });
                     }}
                     style={{ maxWidth: 520 }}
                   />
                   <Select
+                    mode="multiple"
                     allowClear
                     showSearch
                     placeholder="店铺"
-                    style={{ width: 200 }}
-                    value={stockShop || undefined}
-                    onChange={(val) => {
-                      setStockShop(val || "");
+                    style={{ minWidth: 200, maxWidth: 360 }}
+                    value={stockShop.length ? stockShop : []}
+                    onChange={(val: string[]) => {
+                      setStockShop(val || []);
                       setUnifiedPage(1);
                     }}
                     options={mallOptions}
+                    maxTagCount="responsive"
                     filterOption={(input, option) =>
                       (option?.label ?? "").toLowerCase().includes(input.toLowerCase())
                     }
@@ -2688,6 +2721,105 @@ export default function QcOutboundCenter() {
         rows={barcodeLabelModal.rows}
         onClose={() => setBarcodeLabelModal({ open: false, rows: [] })}
       />
+
+      <Modal
+        open={receivedAlertOpen}
+        onCancel={() => setReceivedAlertOpen(false)}
+        width={1020}
+        title={
+          <Space>
+            <ExclamationCircleOutlined style={{ color: "#ff4d4f", fontSize: 18 }} />
+            <span>
+              {receivedAlertTotal} 笔备货单线上已收货但未发货
+              {receivedAlertOverdue > 0 ? `（${receivedAlertOverdue} 笔超 3 天）` : ""}
+            </span>
+          </Space>
+        }
+        footer={
+          <Space>
+            <Button onClick={() => setReceivedAlertOpen(false)}>知道了</Button>
+            <Button
+              type="primary"
+              onClick={() => {
+                setReceivedAlertOpen(false);
+                setOnlineStatus("已收货");
+                const allStatuses = Object.keys(unifiedSnapshot?.statusBreakdown || {});
+                setStockStatus(allStatuses.filter((s) => s !== "已发货"));
+                setStockQuery("");
+                const storeCodes = [...new Set(receivedAlertItems.map((r: any) => {
+                  const name = String(r.store_name || "");
+                  return name.endsWith("店铺") ? name.slice(0, -2) : name;
+                }).filter(Boolean))];
+                if (storeCodes.length > 0) setStockShop(storeCodes);
+                setUnifiedPage(1);
+              }}
+            >
+              筛选查看
+            </Button>
+          </Space>
+        }
+      >
+        <p style={{ color: "#666", marginBottom: 8 }}>
+          以下备货单 Temu 平台已显示「已收货」，但本地 ERP 尚未确认发货，请及时处理。
+        </p>
+        {(() => {
+          const storeMap: Record<string, number> = {};
+          for (const item of receivedAlertItems) {
+            const name = item.store_name || "未知店铺";
+            storeMap[name] = (storeMap[name] || 0) + 1;
+          }
+          const entries = Object.entries(storeMap).sort((a, b) => b[1] - a[1]);
+          return (
+            <div style={{ marginBottom: 12, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {entries.map(([name, count]) => (
+                <Tag key={name} color={count > 50 ? "red" : count > 10 ? "orange" : "blue"}>
+                  {name}：{count} 笔
+                </Tag>
+              ))}
+            </div>
+          );
+        })()}
+        <div style={{ marginBottom: 8, textAlign: "right" }}>
+          <Button
+            size="small"
+            onClick={() => {
+              const soIds = receivedAlertItems.map((r: any) => r.so_id).filter(Boolean).join("\n");
+              navigator.clipboard.writeText(soIds).then(
+                () => message.success(`已复制 ${receivedAlertItems.length} 个备货单号`),
+                () => message.error("复制失败"),
+              );
+            }}
+          >
+            复制全部备货单号
+          </Button>
+        </div>
+        <Table
+          dataSource={receivedAlertItems}
+          rowKey={(r: any) => `${r.mall_id}_${r.so_id}`}
+          size="small"
+          pagination={receivedAlertItems.length > 20 ? { pageSize: 20, size: "small", showTotal: (t: number) => `共 ${t} 条` } : false}
+          scroll={{ y: 340 }}
+          columns={[
+            { title: "店铺", dataIndex: "store_name", width: 100, render: (v: string) => v || "-" },
+            {
+              title: "备货单号", dataIndex: "so_id", width: 170,
+              render: (v: string) => (
+                <Text copyable={{ text: v }} style={{ fontSize: 12 }}>{v}</Text>
+              ),
+            },
+            { title: "商品", dataIndex: "product_name", width: 200, ellipsis: true },
+            { title: "备货数", dataIndex: "demand_qty", width: 70, align: "right" as const },
+            { title: "发货时间", dataIndex: "deliver_time", width: 150 },
+            {
+              title: "状态", key: "urgency", width: 90,
+              render: (_: unknown, row: any) =>
+                row.overdue
+                  ? <Tag color="red">超 3 天</Tag>
+                  : <Tag color="orange">待处理</Tag>,
+            },
+          ]}
+        />
+      </Modal>
 
     </div>
   );
