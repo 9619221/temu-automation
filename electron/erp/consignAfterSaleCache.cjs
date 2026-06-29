@@ -9,22 +9,18 @@
 //   - 软删 includeDeleted + 硬删 ids 对账两路。
 //   - cache.db 打不开 / 端点 404 静默降级。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const { queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE_HEAD = 1000;
 const FULL_PAGE_ITEM = 2000;
 const INCR_PAGE = 2000;
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map();
 
 function configureConsignAfterSaleCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {return new Date().toISOString();}
@@ -48,18 +44,8 @@ function shiftBack1s(iso) {
   return new Date(t - 1000).toISOString();
 }
 
-function getCacheDbPath() {
-  return path.join(getErpDataDir({ userDataDir }), "cache.db");
-}
-
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = getCacheDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS consign_after_sale_cache (
       company_id TEXT NOT NULL,
@@ -105,15 +91,11 @@ function openCacheDb() {
       PRIMARY KEY (company_id, source)
     );
   `);
-  cacheDb = db;
   return db;
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 function getMeta(companyId, source) {

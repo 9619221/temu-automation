@@ -14,22 +14,18 @@
 //     + 硬删（增量拉不到→靠 ids 端点对账兜底）。
 //   - 降级：cache.db 打不开 / 服务器无端点（404）时静默回退，不阻塞 UI。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const { queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE_HEAD = 1000;
 const FULL_PAGE_ITEM = 2000;
 const INCR_PAGE = 2000;
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map();
 
 function configurePurchaseReturnCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -55,18 +51,8 @@ function shiftBack1s(iso) {
   return new Date(t - 1000).toISOString();
 }
 
-function getCacheDbPath() {
-  return path.join(getErpDataDir({ userDataDir }), "cache.db");
-}
-
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = getCacheDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS purchase_return_cache (
       company_id TEXT NOT NULL,
@@ -102,7 +88,7 @@ function openCacheDb() {
 
     CREATE TABLE IF NOT EXISTS purchase_return_sync_meta (
       company_id TEXT NOT NULL,
-      source TEXT NOT NULL,            -- 'head' | 'item'
+      source TEXT NOT NULL,
       cursor TEXT,
       last_full_at TEXT,
       last_sync_at TEXT,
@@ -110,15 +96,11 @@ function openCacheDb() {
       PRIMARY KEY (company_id, source)
     );
   `);
-  cacheDb = db;
   return db;
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 function getMeta(companyId, source) {

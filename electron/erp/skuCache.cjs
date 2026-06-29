@@ -14,22 +14,18 @@
 //     + 硬删（增量拉不到→靠 sku-ids 全量 id 对账兜底）。
 //   - 降级：cache.db 打不开 / 老服务器无 sku-ids（404）时静默回退，不阻塞 UI。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir, tableExists, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const { tableExists, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 // 命名空间引用（非解构）：便于单元测试 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE = 1000; // 全量分页大小（22576 条 ≈ 23 次跨海）
 const INCR_PAGE = 2000; // 增量分页大小（增量通常很少，大页减少往返）
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map(); // `${companyId}:${key}` -> in-flight Promise
 
 function configureSkuCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -56,18 +52,8 @@ function shiftBack1s(iso) {
   return new Date(t - 1000).toISOString();
 }
 
-function getCacheDbPath() {
-  return path.join(getErpDataDir({ userDataDir }), "cache.db");
-}
-
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = getCacheDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS sku_cache (
       company_id TEXT NOT NULL,
@@ -82,10 +68,6 @@ function openCacheDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_sku_cache_code ON sku_cache(company_id, internal_sku_code);
     CREATE INDEX IF NOT EXISTS idx_sku_cache_name ON sku_cache(company_id, product_name);
-    -- 列表读缓存固定按 updated_at DESC 排序（见 getCachedSkus）。缺此索引时 SQLite
-    -- 每页都对全表做 USE TEMP B-TREE 排序：22598 条三页分页实测 SQL 合计 ~2.8s；
-    -- 加 (company_id, updated_at) 索引后排序走索引、降到 ~0.5s。IF NOT EXISTS 让旧
-    -- cache.db 下次打开自动补建（一次性 ~170ms）。
     CREATE INDEX IF NOT EXISTS idx_sku_cache_updated ON sku_cache(company_id, updated_at);
     CREATE TABLE IF NOT EXISTS sku_sync_meta (
       company_id TEXT PRIMARY KEY,
@@ -95,15 +77,11 @@ function openCacheDb() {
       last_reconcile_at TEXT
     );
   `);
-  cacheDb = db;
   return db;
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 function getMeta(companyId) {

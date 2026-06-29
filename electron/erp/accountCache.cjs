@@ -10,19 +10,14 @@
 //
 // accounts 量很小（数十条），整段以 JSON blob 存储、按 company_id 分区，不做增量游标。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 // 命名空间引用（非解构）：便于单测 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map(); // companyId -> in-flight Promise（同 company 并发单飞）
 
 function configureAccountCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -44,13 +39,7 @@ function getCurrentCompanyId() {
 }
 
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS account_cache (
       company_id TEXT PRIMARY KEY,
@@ -58,7 +47,6 @@ function openCacheDb() {
       cached_at TEXT NOT NULL
     );
   `);
-  cacheDb = db;
   return db;
 }
 
@@ -134,10 +122,7 @@ async function triggerSync(params = {}) {
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 module.exports = {

@@ -2,18 +2,13 @@
 // 与 accountCache.cjs 同架构：stale-while-revalidate，共用 cache.db。
 // 供应商全量 ~3.7MB JSON，变化频率低（天级），不值得每次跨海拉全量。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 const clientRuntime = require("./clientRuntime.cjs");
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map();
 
 function configureSupplierCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -30,13 +25,7 @@ function getCurrentCompanyId() {
 }
 
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = path.join(getErpDataDir({ userDataDir }), "cache.db");
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS supplier_cache (
       company_id TEXT PRIMARY KEY,
@@ -44,7 +33,6 @@ function openCacheDb() {
       cached_at TEXT NOT NULL
     );
   `);
-  cacheDb = db;
   return db;
 }
 
@@ -105,10 +93,7 @@ async function triggerSync(params = {}) {
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 module.exports = {

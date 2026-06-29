@@ -14,22 +14,18 @@
 //     + 硬删（增量拉不到→靠 mapping-ids 全量 id 对账兜底）。
 //   - 降级：cache.db 打不开 / 老服务器无 mapping 接口（404）时静默回退，不阻塞 UI。
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir, queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const { queryAll, queryOne, execute, execSql, withTransaction } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 // 命名空间引用（非解构）：便于单元测试 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE = 1000; // 全量分页大小
 const INCR_PAGE = 2000; // 增量分页大小（增量通常很少，大页减少往返）
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map(); // `${companyId}:${key}` -> in-flight Promise
 
 function configureMappingCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -56,18 +52,8 @@ function shiftBack1s(iso) {
   return new Date(t - 1000).toISOString();
 }
 
-function getCacheDbPath() {
-  return path.join(getErpDataDir({ userDataDir }), "cache.db");
-}
-
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = getCacheDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS mapping_cache (
       company_id TEXT NOT NULL,
@@ -81,8 +67,6 @@ function openCacheDb() {
       PRIMARY KEY (company_id, id)
     );
     CREATE INDEX IF NOT EXISTS idx_mapping_cache_sku ON mapping_cache(company_id, sku_id);
-    -- 同 skuCache：列表按 updated_at DESC 排序，缺索引会 USE TEMP B-TREE 全表排序，
-    -- 加 (company_id, updated_at) 走索引提速。IF NOT EXISTS 让旧 cache.db 自动补建。
     CREATE INDEX IF NOT EXISTS idx_mapping_cache_updated ON mapping_cache(company_id, updated_at);
     CREATE TABLE IF NOT EXISTS mapping_sync_meta (
       company_id TEXT PRIMARY KEY,
@@ -92,15 +76,11 @@ function openCacheDb() {
       last_reconcile_at TEXT
     );
   `);
-  cacheDb = db;
   return db;
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 function getMeta(companyId) {

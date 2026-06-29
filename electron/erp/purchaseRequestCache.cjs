@@ -21,22 +21,17 @@
 //        富行须含 id / updatedAt，按 updated_at 可增量；建议 ORDER BY updated_at。
 //   GET  /api/purchase/request-ids -> { ok, ids: [<当前存在的找品单 id 全集>] }
 
-const fs = require("fs");
-const path = require("path");
-const Database = require("better-sqlite3");
-const { getErpDataDir } = require("../db/connection.cjs");
+const cacheDbShared = require("./cacheDb.cjs");
 // 命名空间引用（非解构）：便于单元测试 monkey-patch remoteRequest / getRuntimeStatus。
 const clientRuntime = require("./clientRuntime.cjs");
 
 const FULL_PAGE = 1000; // 全量分页大小
 const INCR_PAGE = 2000; // 增量分页大小（增量通常很少，大页减少往返）
 
-let cacheDb = null;
-let userDataDir = null;
 const syncLocks = new Map(); // `${companyId}:${key}` -> in-flight Promise
 
 function configurePurchaseRequestCache(options = {}) {
-  userDataDir = options.userDataDir || userDataDir || null;
+  cacheDbShared.configure(options);
 }
 
 function nowIso() {
@@ -63,18 +58,8 @@ function shiftBack1s(iso) {
   return new Date(t - 1000).toISOString();
 }
 
-function getCacheDbPath() {
-  return path.join(getErpDataDir({ userDataDir }), "cache.db");
-}
-
 function openCacheDb() {
-  if (cacheDb) return cacheDb;
-  const dbPath = getCacheDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.pragma("synchronous = NORMAL");
+  const db = cacheDbShared.open();
   db.exec(`
     CREATE TABLE IF NOT EXISTS purchase_request_cache (
       company_id TEXT NOT NULL,
@@ -103,15 +88,11 @@ function openCacheDb() {
       last_reconcile_at TEXT
     );
   `);
-  cacheDb = db;
   return db;
 }
 
 function closeCacheDb() {
-  if (cacheDb) {
-    try {cacheDb.close();} catch {/* ignore */}
-    cacheDb = null;
-  }
+  cacheDbShared.close();
 }
 
 function getMeta(companyId) {
