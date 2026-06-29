@@ -163,6 +163,25 @@ function translateSqlSyntax(sql) {
     const chain = segs.map(seg => /^\d+$/.test(seg) ? ` -> ${seg}` : ` -> '${seg}'`).join("");
     return `(${col})::jsonb${chain} ->> '${last}'`;
   });
+  s = _replaceBalanced(s, "json_set", inner => {
+    const args = [];
+    let rest = inner;
+    for (;;) {
+      const pair = _splitAtTopComma(rest);
+      args.push(pair[0].trim());
+      if (pair.length === 1) break;
+      rest = pair[1];
+    }
+    if (args.length < 3 || args.length % 2 === 0) return `json_set(${inner})`;
+    let expr = `(${args[0]})::jsonb`;
+    for (let i = 1; i < args.length; i += 2) {
+      const rawPath = args[i].replace(/^'|'$/g, "").replace(/^\$\.?/, "");
+      const pgPath = `'{${rawPath.replace(/\./g, ",")}}'`;
+      const val = args[i + 1];
+      expr = `jsonb_set(${expr}, ${pgPath}, COALESCE(to_jsonb(${val}::text), 'null'::jsonb), true)`;
+    }
+    return `(${expr})::text`;
+  });
   s = s.replace(/\bjson_group_array\s*\(/gi, "jsonb_agg(");
   s = s.replace(/\bjson_object\s*\(/gi, "jsonb_build_object(");
   s = _replaceBalanced(s, "json_each", inner =>
@@ -205,20 +224,30 @@ function translateSqlSyntax(sql) {
 
   s = _replaceBalanced(s, "date", inner => {
     const args = _splitAtTopComma(inner);
-    if (args.length === 1) return `(${args[0]})::date`;
+    if (args.length === 1) {
+      if (/^'now'$/i.test(args[0].trim())) return `CURRENT_DATE::text`;
+      return `(${args[0]})::date`;
+    }
     const [expr, mod] = args;
     if (/^'now'$/i.test(expr) && /^'localtime'$/i.test(mod))
-      return "(NOW() AT TIME ZONE 'Asia/Shanghai')::date";
+      return "(NOW() AT TIME ZONE 'Asia/Shanghai')::date::text";
     const nowDays = mod.match(/^'([+-]?\d+)\s*days?'$/i);
     if (/^'now'$/i.test(expr) && nowDays)
-      return `(CURRENT_DATE + INTERVAL '${nowDays[1]} days')`;
+      return `(CURRENT_DATE + INTERVAL '${nowDays[1]} days')::text`;
     if (/^'localtime'$/i.test(mod))
-      return `((${expr})::timestamp AT TIME ZONE 'Asia/Shanghai')::date`;
+      return `((${expr})::timestamp AT TIME ZONE 'Asia/Shanghai')::date::text`;
     const days = mod.match(/^'([+-]?\d+)\s*days?'$/i);
-    if (days) return `((${expr})::date + INTERVAL '${days[1]} days')`;
+    if (days) return `((${expr})::date + INTERVAL '${days[1]} days')::text`;
     if (/^'now'$/i.test(expr))
-      return `(CURRENT_DATE + (${mod})::interval)`;
+      return `(CURRENT_DATE + (${mod})::interval)::text`;
     return `(${expr})::date`;
+  });
+
+  // --- ROUND(double, int) → ROUND((double)::numeric, int) ---
+  s = _replaceBalanced(s, "ROUND", inner => {
+    const parts = _splitAtTopComma(inner);
+    if (parts.length === 2) return `ROUND((${parts[0].trim()})::numeric, ${parts[1].trim()})`;
+    return `ROUND(${inner})`;
   });
 
   // --- 模式匹配 ---
@@ -294,6 +323,11 @@ function prepareForPg(sql, params) {
 
   // PG 不允许多余参数：如果翻译后的 SQL 没有 $N，清空 params
   if (p.length > 0 && !/\$\d/.test(s)) p = [];
+
+  const maxPlaceholder = (s.match(/\$(\d+)/g) || []).reduce((m, t) => Math.max(m, Number(t.slice(1))), 0);
+  if (maxPlaceholder !== p.length) {
+    console.error(`[prepareForPg MISMATCH] placeholders=$${maxPlaceholder} params=${p.length}\n  SQL: ${s.slice(0, 500)}\n  ORIGINAL: ${sql.slice(0, 500)}`);
+  }
 
   return { sql: s, params: p };
 }

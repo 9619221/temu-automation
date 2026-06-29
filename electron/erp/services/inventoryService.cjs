@@ -264,7 +264,7 @@ class InventoryService {
         });
       }
 
-      return await this.getBatch(batch.id);
+      return batch;
     });
 
 
@@ -806,7 +806,7 @@ class InventoryService {
   // 建一条新批次（available_qty=qty，unit_landed_cost=unitCost）+ 写一条 ledger。
   // affectSkuTotal=true 时按"加权均价"重算 SKU 主表（客户退按当前均价灌→均价不变；
   //   位置切换→ false，因为总量没变）。
-  async applyDirectInbound(input = {}) {const accountId = input.accountId;const skuId = input.skuId;const qty = ensurePositiveInteger(input.qty, "qty");const ledgerType = input.ledgerType;const unitLandedCost = Number(input.unitLandedCost || 0);if (!accountId) throw new Error("applyDirectInbound requires accountId");if (!skuId) throw new Error("applyDirectInbound requires skuId");if (!ledgerType) throw new Error("applyDirectInbound requires ledgerType");const now = nowIso();const batchId = createId("batch");const batchCode = input.batchCode || `DIRECT-${ledgerType}-${Date.now().toString(36).slice(-6).toUpperCase()}`;return await withTransaction(this.db, async (txDb) => {await execute(txDb, `
+  async applyDirectInbound(input = {}) {const accountId = input.accountId;const skuId = input.skuId;const qty = ensurePositiveInteger(input.qty, "qty");const ledgerType = input.ledgerType;const unitLandedCost = Number(input.unitLandedCost || 0);if (!accountId) throw new Error("applyDirectInbound requires accountId");if (!skuId) throw new Error("applyDirectInbound requires skuId");if (!ledgerType) throw new Error("applyDirectInbound requires ledgerType");const now = nowIso();const batchId = createId("batch");const batchCode = input.batchCode || `DIRECT-${ledgerType}-${Date.now().toString(36).slice(-6).toUpperCase()}`;const txDb = this.db;{await execute(txDb, `
         INSERT INTO erp_inventory_batches (
           id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
           received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
@@ -818,4 +818,4 @@ class InventoryService {
           0, @unit_landed_cost, 'passed', NULL,
           @now, @now, @now
         )
-      `, { id: batchId, account_id: accountId, batch_code: batchCode, sku_id: skuId, qty, unit_landed_cost: unitLandedCost, now });await this.writeLedger({ accountId, skuId, batchId, type: ledgerType, qtyDelta: qty, fromBucket: null, toBucket: "available", unitCost: unitLandedCost, sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });if (input.affectSkuTotal) {if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL) {if (!Number.isFinite(unitLandedCost) || unitLandedCost <= 0) {throw new Error("purchase return reversal unitCost must be greater than 0");}await this.adjustSkuInventoryValue(skuId, qty, qty * unitLandedCost, { eventType: "purchase_return_value_reversal", sourceDocType: input.sourceDocType || "purchase_return_cancel", sourceDocId: input.sourceDocId || "" });} else {await this.applySkuCostChange(skuId, qty, unitLandedCost, { sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });}}return await this.getBatch(batchId);});}}module.exports = { InventoryService };
+      `, { id: batchId, account_id: accountId, batch_code: batchCode, sku_id: skuId, qty, unit_landed_cost: unitLandedCost, now });await this.writeLedger({ accountId, skuId, batchId, type: ledgerType, qtyDelta: qty, fromBucket: null, toBucket: "available", unitCost: unitLandedCost, sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });if (input.affectSkuTotal) {if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL) {if (!Number.isFinite(unitLandedCost) || unitLandedCost <= 0) {throw new Error("purchase return reversal unitCost must be greater than 0");}await this.adjustSkuInventoryValue(skuId, qty, qty * unitLandedCost, { eventType: "purchase_return_value_reversal", sourceDocType: input.sourceDocType || "purchase_return_cancel", sourceDocId: input.sourceDocId || "" });} else {await this.applySkuCostChange(skuId, qty, unitLandedCost, { sourceDocType: input.sourceDocType || "manual", sourceDocId: input.sourceDocId || "", actor: input.actor });}}return await this.getBatch(batchId);}}}module.exports = { InventoryService };

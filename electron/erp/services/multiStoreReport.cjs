@@ -97,9 +97,6 @@ async function fetchCaptureEventsViaHttp(urlPaths) {
   const token = await getToken(fetchImpl);
   const params = new URLSearchParams();
   params.set("url_paths", urlPaths.join(","));
-  if (SETTLEMENT_ROBOT_DEVICE_UUIDS.length) {
-    params.set("device_uuids", SETTLEMENT_ROBOT_DEVICE_UUIDS.join(","));
-  }
   const url = `${CLOUD_BASE}/api/dashboard/settlement-capture?${params}`;
   let resp = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
   if (resp.status === 401) {
@@ -2730,12 +2727,12 @@ const SETTLEMENT_INCOME_PATH = "/api/merchant/front/finance/income-summary";cons
 // 后写覆盖=最新一条），逐店复用 upsertSettlementIncomeFromDashboard 落 erp_temu_settlement_income。
 // 需要 db 已具备挂载 cloud 的能力（opts.attachCloudDb）。供独立同步脚本/定时器调用，不进报表热路径。
 async function syncSettlementIncomeFromCapture(db, opts = {}) {await ensureSettlementIncomeSchema(db);let events;try {events = await getSettlementCaptureEvents(db, [SETTLEMENT_INCOME_PATH], opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 }; // 按 mall 聚合：stat_date → 原始 income item（received_at 升序遍历，后写覆盖=最新抓包）
-  const byMall = new Map();for (const ev of events) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const list = extractSettlementIncomeListFromCaptureBody(body);if (!Array.isArray(list)) continue;const mallId = String(ev.mall_id);if (!byMall.has(mallId)) byMall.set(mallId, new Map());const dayMap = byMall.get(mallId);for (const item of list) {const statDate = normalizeSettlementDate(item);if (item && statDate) dayMap.set(statDate, item);}}let totalRows = 0;for (const [mallId, dayMap] of byMall) {if (!dayMap.size) continue;const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];totalRows += await upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId, source: SETTLEMENT_ROBOT_SOURCE }).rows;}return { ok: true, attached: true, malls: byMall.size, rows: totalRows };}function emptySettlement() {return { latest_date: null, today: { income: 0 }, last7d: { income: 0, income_prev: 0, income_wow: null }, last30d: { income: 0, income_prev: 0, income_mom: null }, trend_daily: [] };}async function buildSettlementIncomeByMall(db) {let latest;try {const sourceSql = sourceWhere(db, "erp_temu_settlement_income");latest = (await queryOne(db, `
+  const byMall = new Map();for (const ev of events) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const list = extractSettlementIncomeListFromCaptureBody(body);if (!Array.isArray(list)) continue;const mallId = String(ev.mall_id);if (!byMall.has(mallId)) byMall.set(mallId, new Map());const dayMap = byMall.get(mallId);for (const item of list) {const statDate = normalizeSettlementDate(item);if (item && statDate) dayMap.set(statDate, item);}}let totalRows = 0;for (const [mallId, dayMap] of byMall) {if (!dayMap.size) continue;const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];totalRows += await upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId, source: SETTLEMENT_ROBOT_SOURCE }).rows;}return { ok: true, attached: true, malls: byMall.size, rows: totalRows };}function emptySettlement() {return { latest_date: null, today: { income: 0 }, last7d: { income: 0, income_prev: 0, income_wow: null }, last30d: { income: 0, income_prev: 0, income_mom: null }, trend_daily: [] };}async function buildSettlementIncomeByMall(db) {let latest;try {const sourceSql = await sourceWhere(db, "erp_temu_settlement_income");latest = (await queryOne(db, `
       SELECT MAX(stat_date) AS d
       FROM erp_temu_settlement_income
       WHERE mall_id IS NOT NULL AND mall_id <> ''
         ${sourceSql}
-    `))?.d;} catch (error) {if (/no such table/i.test(String(error?.message || ""))) return null;throw error;}if (!latest) return new Map();const since = shiftDate(latest, -59);const sourceSql = sourceWhere(db, "erp_temu_settlement_income");const rows = await queryAll(db, `
+    `))?.d;} catch (error) {if (/no such table/i.test(String(error?.message || ""))) return null;throw error;}if (!latest) return new Map();const since = shiftDate(latest, -59);const sourceSql = await sourceWhere(db, "erp_temu_settlement_income");const rows = await queryAll(db, `
     SELECT mall_id, stat_date AS d, SUM(income_amount) AS income
     FROM erp_temu_settlement_income
     WHERE mall_id IS NOT NULL AND mall_id <> ''
@@ -2747,7 +2744,7 @@ async function syncSettlementIncomeFromCapture(db, opts = {}) {await ensureSettl
 function emptySettlementDetailBucket() {return { count: 0, estimated: 0, sales_receipt: 0, chargeback: 0, subsidy: 0, total: 0 };}function emptySettlementDetail() {return { currency: "CNY", wait_settlement: emptySettlementDetailBucket(), in_settlement: emptySettlementDetailBucket(), settled: emptySettlementDetailBucket() };}async function buildSettlementDetailByMall(db, opts = {}) {// 注意：不按 stat_date 过滤。汇总卡片的统计窗口由采集时的请求参数决定（面板「结算时间范围」），
   // 物化行的 stat_date 只是采集日，按它过滤会把最新快照误伤掉（如 6/12 凌晨采的 6/1-11 窗口数据）。
   // 因此三态列展示的是「最近一次采集时所选窗口」的快照。
-  const { startDate, endDate } = opts;const params = [];let dateWhere = "";if (startDate && endDate) {dateWhere = "AND stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let rows;try {const sourceSql = sourceWhere(db, "erp_temu_settlement_detail"); // settle/detail/full/* 接口返回的是「汇总卡片」（一段时间范围一个总数），每次采集落一行快照。
+  const { startDate, endDate } = opts;const params = [];let dateWhere = "";if (startDate && endDate) {dateWhere = "AND stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_settlement_detail"); // settle/detail/full/* 接口返回的是「汇总卡片」（一段时间范围一个总数），每次采集落一行快照。
     // 同店同状态同区域多行快照是同一笔钱的重复观测，必须取最新一条（按 source_received_at），绝不能 SUM。
     // 多区店（全球/美区/欧区是独立站点账户）按区各取最新后跨区加总，单区店行为不变。
     rows = await queryAll(db, `
@@ -2984,7 +2981,7 @@ const FUND_SUMMARY_PATH_SCOPE = new Map([["/api/merchant/fund/detail/daySummary"
       source_received_at = excluded.source_received_at,
       source = excluded.source,
       updated_at = excluded.updated_at
-  `, { ...row, now });});return { rows: rows.length };}async function syncFundSummaryFromCapture(db, opts = {}) {await ensureFundSummarySchema(db);let events;try {events = await getSettlementCaptureEvents(db, FUND_SUMMARY_PATHS, opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 };const rows = [];const malls = new Set();for (const ev of events) {const eventRows = buildFundSummaryRowsFromCaptureEvent(ev);for (const row of eventRows) {rows.push(row);if (row.mall_id) malls.add(row.mall_id);}}if (!rows.length) return { ok: true, attached: true, malls: 0, rows: 0 };const result = await upsertFundSummaryRows(db, rows);return { ok: true, attached: true, malls: malls.size, rows: result.rows };}async function buildFundDetailByMall(db, opts = {}) {const { startDate, endDate } = opts;let dateFilter, params;if (startDate && endDate) {dateFilter = "transaction_time >= ? AND transaction_time < date(?, '+1 day')";params = [startDate, endDate];} else {dateFilter = "transaction_time >= date('now', '-30 days')";params = [];}let rows;try {const sourceSql = sourceWhere(db, "erp_temu_fund_detail");rows = await queryAll(db, `
+  `, { ...row, now });});return { rows: rows.length };}async function syncFundSummaryFromCapture(db, opts = {}) {await ensureFundSummarySchema(db);let events;try {events = await getSettlementCaptureEvents(db, FUND_SUMMARY_PATHS, opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 };const rows = [];const malls = new Set();for (const ev of events) {const eventRows = buildFundSummaryRowsFromCaptureEvent(ev);for (const row of eventRows) {rows.push(row);if (row.mall_id) malls.add(row.mall_id);}}if (!rows.length) return { ok: true, attached: true, malls: 0, rows: 0 };const result = await upsertFundSummaryRows(db, rows);return { ok: true, attached: true, malls: malls.size, rows: result.rows };}async function buildFundDetailByMall(db, opts = {}) {const { startDate, endDate } = opts;let dateFilter, params;if (startDate && endDate) {dateFilter = "transaction_time >= ? AND transaction_time < date(?, '+1 day')";params = [startDate, endDate];} else {dateFilter = "transaction_time >= date('now', '-30 days')";params = [];}let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_fund_detail");rows = await queryAll(db, `
       SELECT mall_id,
              money_change_type,
              COALESCE(NULLIF(remark,''), fund_type_desc) AS category,
@@ -3000,7 +2997,7 @@ async function buildFundSummaryByMall(db, opts = {}) {const { startDate, endDate
         (summary_scope = 'day' AND summary_date >= ? AND summary_date <= ?)
         OR (summary_scope = 'month' AND summary_date >= substr(?, 1, 7) AND summary_date <= substr(?, 1, 7))
       )
-    `;params = [startDate, endDate, startDate, endDate];}let rows;try {const sourceSql = sourceWhere(db, "erp_temu_fund_summary");rows = await queryAll(db, `
+    `;params = [startDate, endDate, startDate, endDate];}let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_fund_summary");rows = await queryAll(db, `
       SELECT id, mall_id, site, summary_scope, summary_date, currency,
              income_amount, expense_amount, balance_amount, frozen_amount, available_amount, total_amount,
              source_received_at
@@ -3064,7 +3061,7 @@ const EPR_GOODS_LIST_STATUS = [["waitDeductionEprFeeInfoList", "wait"], ["deduct
       source_received_at = excluded.source_received_at,
       source = excluded.source,
       synced_at = excluded.synced_at
-  `, { ...row, now });});return { rows: rows.length };}async function syncEprFeeFromCapture(db, opts = {}) {await ensureEprFeeSchema(db);let events;try {events = await getSettlementCaptureEvents(db, EPR_FEE_PATHS, opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 };const rows = [];const malls = new Set();for (const ev of events) {for (const row of buildEprFeeRowsFromCaptureEvent(ev)) {rows.push(row);malls.add(row.mall_id);}}if (!rows.length) return { ok: true, attached: true, malls: 0, rows: 0 };const result = await upsertEprFeeRows(db, rows);return { ok: true, attached: true, malls: malls.size, rows: result.rows };}async function buildEprFeeByMall(db) {let rows;try {const sourceSql = sourceWhere(db, "erp_temu_epr_fee");rows = await queryAll(db, `
+  `, { ...row, now });});return { rows: rows.length };}async function syncEprFeeFromCapture(db, opts = {}) {await ensureEprFeeSchema(db);let events;try {events = await getSettlementCaptureEvents(db, EPR_FEE_PATHS, opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 };const rows = [];const malls = new Set();for (const ev of events) {for (const row of buildEprFeeRowsFromCaptureEvent(ev)) {rows.push(row);malls.add(row.mall_id);}}if (!rows.length) return { ok: true, attached: true, malls: 0, rows: 0 };const result = await upsertEprFeeRows(db, rows);return { ok: true, attached: true, malls: malls.size, rows: result.rows };}async function buildEprFeeByMall(db) {let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_epr_fee");rows = await queryAll(db, `
       SELECT mall_id, deduct_status, SUM(amount) AS total_amount, COUNT(*) AS cnt
         FROM erp_temu_epr_fee
        WHERE 1=1
@@ -3086,7 +3083,7 @@ const FUND_FROZEN_PATH = "/api/merchant/fund-frozen/rules";const FUND_FROZEN_MIG
 
 
 
-  await withTransaction(db, async (txDb) => {for (const [mallId, ev] of latestByMall) {const rows = buildFundFrozenRowsFromCaptureEvent(ev);await execute(txDb, `DELETE FROM erp_temu_fund_frozen WHERE mall_id = ?${sourceWhere(db, "erp_temu_fund_frozen")}`, [mallId]);for (const row of rows) {await execute(txDb, `
+  await withTransaction(db, async (txDb) => {const _frozenSw = await sourceWhere(db, "erp_temu_fund_frozen");for (const [mallId, ev] of latestByMall) {const rows = buildFundFrozenRowsFromCaptureEvent(ev);await execute(txDb, `DELETE FROM erp_temu_fund_frozen WHERE mall_id = ?${_frozenSw}`, [mallId]);for (const row of rows) {await execute(txDb, `
     INSERT INTO erp_temu_fund_frozen
       (mall_id, frozen_type, reason, amount, currency, unfreeze_condition, description,
        raw_json, source_received_at, source, synced_at)
@@ -3107,7 +3104,7 @@ const FUND_FROZEN_PATH = "/api/merchant/fund-frozen/rules";const FUND_FROZEN_MIG
 
 
 
-  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildFundFrozenByMall(db) {let rows;try {const sourceSql = sourceWhere(db, "erp_temu_fund_frozen");rows = await queryAll(db, `
+  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildFundFrozenByMall(db) {let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_fund_frozen");rows = await queryAll(db, `
       SELECT mall_id, frozen_type, reason, amount, currency, unfreeze_condition
         FROM erp_temu_fund_frozen
        WHERE 1=1
@@ -3156,7 +3153,7 @@ function extractMoneyYuan(obj, keys) {const raw = firstDefined(obj, keys);if (ra
       synced_at = excluded.synced_at
   `, { ...row, now });total++;malls.add(mallId);}}
 
-  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildAccountOverviewByMall(db) {let rows;try {const sourceSql = sourceWhere(db, "erp_temu_account_overview");rows = await queryAll(db, `
+  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildAccountOverviewByMall(db) {let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_account_overview");rows = await queryAll(db, `
       SELECT mall_id, available_amount, in_transit_amount, pending_settle_amount, frozen_amount,
              withdrawable_amount, total_amount, currency
         FROM erp_temu_account_overview
@@ -3191,7 +3188,7 @@ const FULFILLMENT_OVERVIEW_PATH = "/api/merchant/warehouse/express/bill/global/o
       bill_type = excluded.bill_type, amount = excluded.amount, currency = excluded.currency,
       waybill_no = excluded.waybill_no, stat_date = excluded.stat_date, raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at, source = excluded.source, synced_at = excluded.synced_at
-  `, { ...buildFulfillmentOverviewRow(r, { mallId, receivedAt: ev.received_at }), now });total++;malls.add(mallId);}for (const [mallId, evs] of detailEventsByMall) {await execute(txDb, `DELETE FROM erp_temu_fulfillment_bill WHERE mall_id = ? AND record_type = 'detail'${sourceWhere(db, "erp_temu_fulfillment_bill")}`, [mallId]);for (const ev of evs) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const r = body?.result || {};const list = [r.list, r.resultList, r.dataList, r.pageItems, r.records].find((v) => Array.isArray(v)) || [];for (const item of list) {if (!item || typeof item !== "object") continue;await execute(txDb, `
+  `, { ...buildFulfillmentOverviewRow(r, { mallId, receivedAt: ev.received_at }), now });total++;malls.add(mallId);}const _fbSw = await sourceWhere(db, "erp_temu_fulfillment_bill");for (const [mallId, evs] of detailEventsByMall) {await execute(txDb, `DELETE FROM erp_temu_fulfillment_bill WHERE mall_id = ? AND record_type = 'detail'${_fbSw}`, [mallId]);for (const ev of evs) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const r = body?.result || {};const list = [r.list, r.resultList, r.dataList, r.pageItems, r.records].find((v) => Array.isArray(v)) || [];for (const item of list) {if (!item || typeof item !== "object") continue;await execute(txDb, `
     INSERT INTO erp_temu_fulfillment_bill
       (mall_id, record_type, item_key, bill_type, amount, currency, waybill_no, stat_date, raw_json, source_received_at, source, synced_at)
     VALUES
@@ -3203,7 +3200,7 @@ const FULFILLMENT_OVERVIEW_PATH = "/api/merchant/warehouse/express/bill/global/o
   `, { ...buildFulfillmentDetailRow(item, { mallId, receivedAt: ev.received_at }), now });total++;malls.add(mallId);}}}}
 
 
-  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildFulfillmentBillByMall(db, opts = {}) {const { startDate, endDate } = opts;const params = [];let where = "";if (startDate && endDate) {where = "WHERE record_type = 'detail' AND stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let rows;try {const sourceSql = sourceWhere(db, "erp_temu_fulfillment_bill");rows = await queryAll(db, `
+  );return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildFulfillmentBillByMall(db, opts = {}) {const { startDate, endDate } = opts;const params = [];let where = "";if (startDate && endDate) {where = "WHERE record_type = 'detail' AND stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let rows;try {const sourceSql = await sourceWhere(db, "erp_temu_fulfillment_bill");rows = await queryAll(db, `
       SELECT mall_id, record_type, bill_type, amount, currency, waybill_no, stat_date
         FROM erp_temu_fulfillment_bill
        ${where || "WHERE 1=1"}
@@ -3302,7 +3299,7 @@ const VIOLATION_LIST_PATH = "/mms/tmod_punish/agent/merchant_appeal/entrance/lis
       source_received_at = excluded.source_received_at,
       source = excluded.source,
       synced_at = excluded.synced_at
-  `, { mall_id: mallId, violation_count: parseIntegerLoose(result.violationCount) ?? 0, add_site_limit_status: parseIntegerLoose(result.addSiteLimitStatus), release_limit_time: toNullableText(result.releaseLimitTime), raw_json: JSON.stringify(result), source_received_at: Number(ev.received_at) || null, source: SETTLEMENT_ROBOT_SOURCE, now });total++;malls.add(mallId);}}});return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildViolationByMall(db, opts = {}) {const detailLimit = Number(opts.detailLimit) || 50;const { startDate, endDate } = opts;const params = [];let detailWhere = "";const hasDateRange = !!(startDate && endDate);if (hasDateRange) {detailWhere = "WHERE stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let detailRows, summaryRows;try {const detailSourceSql = sourceWhere(db, "erp_temu_violation");const summarySourceSql = sourceWhere(db, "erp_temu_violation_summary");detailRows = await queryAll(db, `
+  `, { mall_id: mallId, violation_count: parseIntegerLoose(result.violationCount) ?? 0, add_site_limit_status: parseIntegerLoose(result.addSiteLimitStatus), release_limit_time: toNullableText(result.releaseLimitTime), raw_json: JSON.stringify(result), source_received_at: Number(ev.received_at) || null, source: SETTLEMENT_ROBOT_SOURCE, now });total++;malls.add(mallId);}}});return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildViolationByMall(db, opts = {}) {const detailLimit = Number(opts.detailLimit) || 50;const { startDate, endDate } = opts;const params = [];let detailWhere = "";const hasDateRange = !!(startDate && endDate);if (hasDateRange) {detailWhere = "WHERE stat_date >= ? AND stat_date <= ?";params.push(startDate, endDate);}let detailRows, summaryRows;try {const detailSourceSql = await sourceWhere(db, "erp_temu_violation");const summarySourceSql = await sourceWhere(db, "erp_temu_violation_summary");detailRows = await queryAll(db, `
       SELECT mall_id, target_id, goods_id, goods_name, source_punish_name, leaf_reason_name,
              violation_desc, punish_status_desc, appeal_status, can_appeal, can_rectify,
              site_num, punish_num, stat_date
@@ -3342,7 +3339,7 @@ const SITE_EXC_API_PATH = "/api/kiana/mms/robin/queryFullyOtherMessage";const SI
       source = excluded.source,
       source_received_at = excluded.source_received_at,
       synced_at = excluded.synced_at
-  `, { mall_id: mallId, sku_id: skuId, site_name: siteName, goods_id: skuGoodsMap[skuId] || null, skc_id: null, check_code: codes || null, exception_reason: uniqueDescs || null, exception_time: exceptionTime, sku_spec: skuInfoMap[skuId]?.spec || null, raw_json: JSON.stringify(sku), source: SETTLEMENT_ROBOT_SOURCE, source_received_at: Number(ev.received_at) || null, now });total++;malls.add(mallId);}}}}});return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildSiteExceptionList(db, opts = {}) {await ensureSiteExceptionSchema(db);let rows;try {const src = sourceWhere(db, "erp_sku_site_exceptions");rows = await queryAll(db, `
+  `, { mall_id: mallId, sku_id: skuId, site_name: siteName, goods_id: skuGoodsMap[skuId] || null, skc_id: null, check_code: codes || null, exception_reason: uniqueDescs || null, exception_time: exceptionTime, sku_spec: skuInfoMap[skuId]?.spec || null, raw_json: JSON.stringify(sku), source: SETTLEMENT_ROBOT_SOURCE, source_received_at: Number(ev.received_at) || null, now });total++;malls.add(mallId);}}}}});return { ok: true, attached: true, malls: malls.size, rows: total };}async function buildSiteExceptionList(db, opts = {}) {await ensureSiteExceptionSchema(db);let rows;try {const src = await sourceWhere(db, "erp_sku_site_exceptions");rows = await queryAll(db, `
       SELECT e.mall_id, e.sku_id, e.site_name, e.goods_id, e.skc_id,
              e.check_code, e.exception_reason, e.exception_time, e.sku_spec,
              m.store_code, m.mall_name,
@@ -3391,7 +3388,7 @@ const SITE_EXC_API_PATH = "/api/kiana/mms/robin/queryFullyOtherMessage";const SI
   //     与「收入金额」同一批货（已结算订单），消除"收入算老订单、成本算新销量"的时间错配；
   //     sku_ext_code 即货号，与 erp_skus.internal_sku_code 直接关联（关联率 100%）。
   //     amount 用于前端算覆盖率（订单明细金额 ÷ 已结算货款，判断批次是否采全）。
-  const orderByMall = new Map();try {let odWhere, odParams;const odSourceSql = sourceWhere(db, "erp_temu_settlement_order_detail", "d");if (startDate && endDate) {odWhere = `WHERE d.create_time >= ? AND d.create_time < date(?, '+1 day') ${odSourceSql}`;odParams = [startDate, endDate];} else {odWhere = `WHERE d.create_time >= date('now', '-30 days') ${odSourceSql}`;odParams = [];}const odRows = await queryAll(db, `
+  const orderByMall = new Map();try {let odWhere, odParams;const odSourceSql = await sourceWhere(db, "erp_temu_settlement_order_detail", "d");if (startDate && endDate) {odWhere = `WHERE d.create_time >= ? AND d.create_time < date(?, '+1 day') ${odSourceSql}`;odParams = [startDate, endDate];} else {odWhere = `WHERE d.create_time >= date('now', '-30 days') ${odSourceSql}`;odParams = [];}const odRows = await queryAll(db, `
       WITH sku_wac AS (
         SELECT internal_sku_code, MAX(id) AS sku_id, MAX(weighted_avg_cost) AS wac
           FROM erp_skus
@@ -3462,7 +3459,7 @@ const SITE_EXC_API_PATH = "/api/kiana/mms/robin/queryFullyOtherMessage";const SI
         FROM detail_cost
        GROUP BY mall_id
     `, [...odParams]);for (const r of odRows) {orderByMall.set(r.mall_id, { qty: Number(r.qty) || 0, qty_costed: Number(r.qty_costed) || 0, qty_time_costed: Number(r.qty_time_costed) || 0, qty_history_costed: Number(r.qty_history_costed) || 0, qty_current_fallback: Number(r.qty_current_fallback) || 0, qty_missing_cost: Number(r.qty_missing_cost) || 0, cost: Number(r.cost) || 0, amount: Number(r.amount) || 0, sales_revenue: Number(r.sales_revenue) || 0, reversal_total: Number(r.reversal_total) || 0, subsidy_total: Number(r.subsidy_total) || 0 });}} catch {/* settlement_order_detail 表不存在时保持空 */} // 3. settlement_income（真实结算收入，income-summary 主动采集）
-  const stlIncByMall = new Map();try {let siDateWhere, siParams;const siSourceSql = sourceWhere(db, "erp_temu_settlement_income");if (startDate && endDate) {siDateWhere = "AND stat_date >= ? AND stat_date <= ?";siParams = [startDate, endDate];} else {siDateWhere = "AND stat_date >= date('now', '-30 days')";siParams = [];}const siRows = await queryAll(db, `
+  const stlIncByMall = new Map();try {let siDateWhere, siParams;const siSourceSql = await sourceWhere(db, "erp_temu_settlement_income");if (startDate && endDate) {siDateWhere = "AND stat_date >= ? AND stat_date <= ?";siParams = [startDate, endDate];} else {siDateWhere = "AND stat_date >= date('now', '-30 days')";siParams = [];}const siRows = await queryAll(db, `
       SELECT mall_id, SUM(income_amount) AS total_income, COUNT(*) AS days
         FROM erp_temu_settlement_income
        WHERE income_amount IS NOT NULL ${siDateWhere}
