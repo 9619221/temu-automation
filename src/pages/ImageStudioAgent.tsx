@@ -17,6 +17,7 @@ import {
   IMAGE_TYPE_LABELS,
   DEFAULT_IMAGE_TYPES,
   getDefaultImageLanguageForRegion,
+  normalizeDimensionTextDualUnit,
 } from "../utils/imageStudio";
 import "../styles/imageStudioAgent.css";
 
@@ -401,6 +402,12 @@ export default function ImageStudioAgent() {
       });
       if (!analysis || analysis.error) {
         throw new Error(analysis?.error ? String(analysis.error) : "商品分析失败");
+      }
+      if (typeof analysis.estimatedDimensions === "string") {
+        analysis.estimatedDimensions = normalizeDimensionTextDualUnit(analysis.estimatedDimensions);
+      }
+      if (analysis.productFacts && typeof analysis.productFacts.estimatedDimensions === "string") {
+        analysis.productFacts.estimatedDimensions = normalizeDimensionTextDualUnit(analysis.productFacts.estimatedDimensions);
       }
 
       // 2) 启动 9-agent Supervisor，跑到「方案就绪」停（stopAtPhase=review_passed）

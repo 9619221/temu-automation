@@ -45,6 +45,7 @@ import {
   PRODUCT_MODE_OPTIONS,
   formatTimestamp,
   getDefaultImageLanguageForRegion,
+  ensureDualUnitMeasurement,
   normalizeImageStudioAnalysis,
   type ImageStudioAnalysis,
   type ImageStudioGeneratedImage,
@@ -216,7 +217,7 @@ const GPT_OLD_AI_IMAGE_TYPE_DEFINITIONS: Record<string, string> = {
   main: "White-background hero shot. Show one complete sellable product on a pure white background. The product should fill about 85% of the frame when safe. No text, no icons, no props, no dimension lines, no duplicate product.",
   features: "Dramatic single-claim product reveal. This is not a generic feature stack. Build one buyer concern into one clear visual answer, with one core short headline and only a few compact visual cues so the buyer feels this product is needed.",
   closeup: "Material macro proof. Use macro visual evidence of material, structure, workmanship, texture, seams, reinforcement, or functional detail so the buyer believes this is worth more than a cheap alternative.",
-  dimensions: "Technical measurement guide. Show the complete product with dimension lines and true numeric values. The goal is to reduce returns. Keep proportions and labels consistent, use at most four dimension labels, and optionally include one hand, phone, or everyday object only when it helps truthful scale.",
+  dimensions: "Technical measurement guide. Show the complete product with dimension lines and true numeric values. The goal is to reduce returns. Keep proportions and labels consistent, use at most four dimension labels, and optionally include one hand, phone, or everyday object only when it helps truthful scale. CRITICAL: render ONLY the exact measurement values provided in the allowed text — never invent, round, or change any number. Every label must show dual units in the format Xcm/Yin (e.g. 13cm/5.12in). Do not mix units across labels.",
   lifestyle: "Real-world usage moment. Show one real use scenario with the product at correct scale. Answer where and when the buyer uses it. Emphasize the result and buyer empathy; do not make a collage.",
   packaging: "Contents / value layout. If real packaging is verified, show it. If no real packaging is verified, do not invent a box. Instead show what the buyer receives and why the product feels worth buying, using truthful contents or value evidence.",
   comparison: "Single-product cross-section / exploded-view diagram. Render ONE product (not two) with a cutaway, layered cross-section, exploded internal structure, fiber-density macro inset, or material layer callout. NEVER render two products side by side. NEVER render a 'gray inferior copy' alongside.",
@@ -252,7 +253,7 @@ const GPT_NEGATIVE_PROMPTS: Record<string, string> = {
   main: `no text, no logos, no badges, no stickers, no decorative props, no lifestyle background, no reflection floor, no painterly/cartoon/illustration style, no oversaturation, no AI texture artifacts, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
   features: `no cheap-template look, no floating stickers, no comic effects, no blurry icons, no plastic overlay, no misaligned text, no duplicate headline, no crowded icon wall, no red/green gimmicks, no blank white panel, no second saturated accent color, no flat e-commerce render, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
   closeup: `no motion blur, no haze, no excessive bokeh, no smeared texture, no AI artifact patterns, no shallow focus hiding the material proof, no generic macro filler, no second saturated accent color, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
-  dimensions: `no invented measurements, no overlapping labels, no duplicate measurement text, no ambiguous scale, no fake ruler objects, no unrelated props, no second product, no color variant, no duplicated product, no stage light shaft, no mega-keyword typography, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
+  dimensions: `no invented measurements, no altered numbers, no single-unit labels (every label must be dual-unit Xcm/Yin), no overlapping labels, no duplicate measurement text, no ambiguous scale, no fake ruler objects, no unrelated props, no second product, no color variant, no duplicated product, no stage light shaft, no mega-keyword typography, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
   lifestyle: `no AI hand artifacts, no studio backdrop bleed, no unsafe use, no unrealistic scale, no blurry hands, no tiny product placement, no stock-photo clutter, no mega-keyword typography, no stage light shaft (use natural environmental light), ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
   packaging: `no invented logos, no fake package, no manual, no insert card, no barcode, no certificate, no fake claims, no cropped contents, no plastic-fake textures, no wet-surface glamour macro, no active-use cleaning scene, no full stage light shaft, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
   comparison: `ABSOLUTELY NEVER render two products in this image — comparison slot renders ONLY ONE product (the user's brand product) in cross-section / exploded-view / macro inset diagram form. NO second product, NO 'vs' split screen, NO competitor, NO gray/brown/sepia/desaturated 'inferior copy', NO red X, NO green check, NO check/cross gimmick, NO 'before/after' layout, NO 'ours/theirs' labels, NO fake percentages, ${GPT_PREMIUM_ANTI_AI_NEGATIVE}`,
@@ -856,6 +857,7 @@ function getGptImageTypeExecutionLock(imageType: string) {
       "Mandatory role: size guide.",
       "Scene family: complete product with thin measurement lines and exact verified numeric labels; optional scale reference only when truthful and secondary.",
       "Camera: flat, orthographic, or clean three-quarter technical view; product edges must be measurable.",
+      "MEASUREMENT ACCURACY: copy the exact numbers from the allowed text verbatim. Every label must use dual-unit format (Xcm/Yin). Never round, estimate, halve, or invent any measurement value.",
       "Forbidden role leak: no active use, no lifestyle background, no cluttered context surface, no fake reference props, no invented measurements, no more than four size labels.",
     ],
     lifestyle: [
@@ -950,6 +952,7 @@ function getGptImageTypeVisualExecutionSummary(imageType: string) {
     dimensions: [
       "Size-guide role.",
       "Show one exact sellable product with thin guide lines and verified numeric labels only.",
+      "Every measurement label must use the exact dual-unit format Xcm/Yin from the allowed text. Copy numbers verbatim — never invent, round, halve, or split units across labels.",
       "No active-use scene, no lifestyle background, no duplicate product, no color-variant second product, no invented measurements, no more than four labels.",
     ],
     lifestyle: [
@@ -1000,7 +1003,7 @@ function getGptTextSafeWinnerCraftBenchmark(imageType: string) {
     main: "Clean Amazon packshot craft: exact SKU, large crisp silhouette, pure white background, truthful count, natural grounding shadow, no advertising text.",
     features: "Premium A+ craft: dark glossy full-bleed product/action scene, diagonal hero subject, rich material contrast, compact photographic proof windows, no blank poster panel.",
     closeup: "Premium macro craft: tactile detail fills most of the frame, sharp rim light, deep micro-texture, two small photographic detail windows when useful.",
-    dimensions: "Technical size-guide craft: one complete product, clean orthographic readability, thin guide lines, exact approved measurement labels, no duplicate or variant product.",
+    dimensions: "Technical size-guide craft: one complete product, clean orthographic readability, thin guide lines, exact approved dual-unit measurement labels (Xcm/Yin format), no duplicate or variant product.",
     lifestyle: "Editorial real-use craft: one believable environment, visible hand or contact point, correct scale, product and use result sharp, background recognizable but secondary.",
     packaging: "Truthful contents/value craft: exact received item or included items visible and countable on a clean premium surface; real packaging only when verified by uploaded images; no wet glamour hero still life.",
     comparison: "Decision-proof craft: fair same-scale evidence, controlled contrast, truthful material or usage difference, product-positive visual proof instead of fake table drama or gray inferior duplicates.",
@@ -1105,7 +1108,7 @@ function buildGptPremiumCreativeBriefs(analysis: ImageStudioAnalysis) {
     ),
     dimensions: setBrief(
       "dimensions",
-      "GPT premium Amazon A+ style size module in 800x800 square format: communicate truthful scale only from verified or cautious dimensions; use product-only measurement hierarchy, thin guide lines, and no unrelated reference object or invented numbers.",
+      "GPT premium Amazon A+ style size module in 800x800 square format: communicate truthful scale only from verified or cautious dimensions; use product-only measurement hierarchy, thin guide lines, and no unrelated reference object or invented numbers. CRITICAL: every measurement label must use the exact dual-unit format from the allowed text (e.g. 13cm/5.12in). Copy the numbers verbatim — do not round, estimate, or change any value.",
     ),
     lifestyle: setBrief(
       "lifestyle",
@@ -3805,7 +3808,7 @@ function extractVerifiedDimensionTexts(shotBrief: ImageStudioShotBrief) {
   if (!raw) return [];
 
   const measurements = raw.match(/\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b)?/gi) || [];
-  return dedupeTextList(measurements).slice(0, 4);
+  return dedupeTextList(measurements).slice(0, 4).map(ensureDualUnitMeasurement);
 }
 
 function buildImage2VisibleTextSpec(packPolicy: PackCountPolicy, shotBrief: ImageStudioShotBrief): ImageStudioVisibleTextSpec {
@@ -5674,9 +5677,10 @@ function isCheapImage2TemplateCopy(rawValue: string) {
 
 function extractImage2Measurements(rawValue: unknown) {
   const text = typeof rawValue === "string" ? rawValue : "";
-  return dedupeTextList(
+  const matches = dedupeTextList(
     text.match(/\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b)?/gi) || [],
   ).slice(0, 4);
+  return matches.map(ensureDualUnitMeasurement);
 }
 
 function extractSuggestedBadgeText(input: unknown) {
@@ -6133,16 +6137,18 @@ function enforceGptImage2PromptEnglishOnly(prompt: string) {
 }
 
 function normalizeGptDimensionVisibleText(line: string) {
-  return extractImage2EnglishSafeLine(line)
+  const cleaned = extractImage2EnglishSafeLine(line)
     .replace(/\bcentimeters?\b/gi, "cm")
     .replace(/\binches?\b/gi, "in")
     .replace(/\bCM\b/g, "cm")
     .replace(/\bCm\b/g, "cm")
     .replace(/\bIN\b/g, "in")
     .replace(/\bIn\b/g, "in")
-    .replace(/\s*\/\s*/g, " / ")
     .replace(/\s+/g, " ")
     .trim();
+  const measureMatch = cleaned.match(/\d+(?:\.\d+)?\s*(?:cm|mm|in)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|in)\b)?/i);
+  if (measureMatch) return ensureDualUnitMeasurement(measureMatch[0]);
+  return cleaned;
 }
 
 function splitGptLegacyPromptIntent(prompt: string) {

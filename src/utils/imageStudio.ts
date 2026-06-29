@@ -430,6 +430,47 @@ export function multilineToArray(value: string): string[] {
     .filter(Boolean);
 }
 
+export function ensureDualUnitMeasurement(raw: string): string {
+  const cleaned = raw.trim()
+    .replace(/\bcentimeters?\b/gi, "cm")
+    .replace(/\binches?\b/gi, "in")
+    .replace(/\b厘米\b/g, "cm")
+    .replace(/\b英寸\b/g, "in")
+    .replace(/\b毫米\b/g, "mm");
+  const dualMatch = cleaned.match(/^(\d+(?:\.\d+)?)\s*cm\s*\/\s*(\d+(?:\.\d+)?)\s*in$/i);
+  if (dualMatch) return `${dualMatch[1]}cm/${dualMatch[2]}in`;
+  const dualMatchReverse = cleaned.match(/^(\d+(?:\.\d+)?)\s*in\s*\/\s*(\d+(?:\.\d+)?)\s*cm$/i);
+  if (dualMatchReverse) return `${dualMatchReverse[2]}cm/${dualMatchReverse[1]}in`;
+  const cmOnly = cleaned.match(/^(\d+(?:\.\d+)?)\s*cm$/i);
+  if (cmOnly) {
+    const cmVal = parseFloat(cmOnly[1]);
+    const inVal = (cmVal / 2.54).toFixed(2).replace(/\.?0+$/, "");
+    return `${cmOnly[1]}cm/${inVal}in`;
+  }
+  const inOnly = cleaned.match(/^(\d+(?:\.\d+)?)\s*in$/i);
+  if (inOnly) {
+    const inVal = parseFloat(inOnly[1]);
+    const cmVal = (inVal * 2.54).toFixed(1).replace(/\.?0+$/, "");
+    return `${cmVal}cm/${inOnly[1]}in`;
+  }
+  const mmOnly = cleaned.match(/^(\d+(?:\.\d+)?)\s*mm$/i);
+  if (mmOnly) {
+    const mmVal = parseFloat(mmOnly[1]);
+    const cmVal = (mmVal / 10).toFixed(1).replace(/\.?0+$/, "");
+    const inVal = (mmVal / 25.4).toFixed(2).replace(/\.?0+$/, "");
+    return `${cmVal}cm/${inVal}in`;
+  }
+  return cleaned;
+}
+
+export function normalizeDimensionTextDualUnit(text: string): string {
+  if (!text) return text;
+  return text.replace(
+    /\d+(?:\.\d+)?\s*(?:cm|mm|in|inch|inches|厘米|毫米|英寸)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|in|inch|inches|厘米|毫米|英寸)\b)?/gi,
+    (match) => ensureDualUnitMeasurement(match),
+  );
+}
+
 export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis> | null): ImageStudioAnalysis {
   const topSellingPoints = Array.isArray(input?.sellingPoints)
     ? input.sellingPoints.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -484,11 +525,13 @@ export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis
         : "",
     targetAudience: topTargetAudience.length > 0 ? topTargetAudience : nestedTargetAudience,
     usageScenes: topUsageScenes.length > 0 ? topUsageScenes : nestedUsageScenes,
-    estimatedDimensions: typeof input?.estimatedDimensions === "string"
-      ? input.estimatedDimensions
-      : typeof input?.productFacts?.estimatedDimensions === "string"
-        ? input.productFacts.estimatedDimensions
-        : "",
+    estimatedDimensions: normalizeDimensionTextDualUnit(
+      typeof input?.estimatedDimensions === "string"
+        ? input.estimatedDimensions
+        : typeof input?.productFacts?.estimatedDimensions === "string"
+          ? input.productFacts.estimatedDimensions
+          : "",
+    ),
     productForm: input?.productForm || input?.productFacts?.productForm,
     creativeBriefs: Object.keys(topCreativeBriefs).length > 0 ? topCreativeBriefs : nestedCreativeBriefs,
     suggestedBadges: topSuggestedBadges.length > 0 ? topSuggestedBadges : nestedSuggestedBadges,
@@ -514,11 +557,13 @@ export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis
         : typeof input?.colors === "string"
           ? input.colors
           : "",
-      estimatedDimensions: typeof input?.productFacts?.estimatedDimensions === "string"
-        ? input.productFacts.estimatedDimensions
-        : typeof input?.estimatedDimensions === "string"
-          ? input.estimatedDimensions
-          : "",
+      estimatedDimensions: normalizeDimensionTextDualUnit(
+        typeof input?.productFacts?.estimatedDimensions === "string"
+          ? input.productFacts.estimatedDimensions
+          : typeof input?.estimatedDimensions === "string"
+            ? input.estimatedDimensions
+            : "",
+      ),
       productForm: input?.productFacts?.productForm || input?.productForm,
       countAndConfiguration: typeof input?.productFacts?.countAndConfiguration === "string" ? input.productFacts.countAndConfiguration : "",
       packagingEvidence: typeof input?.productFacts?.packagingEvidence === "string" ? input.productFacts.packagingEvidence : "",
