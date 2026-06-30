@@ -87,9 +87,17 @@ async function resolveConsignDeliveryLines(db, { oId, companyId }) {
 
   const shopName = optionalString(head.shop_name);
   if (!shopName) throw new Error(`送仓托管单缺少店铺名，无法定位账号：o_id=${oId}`);
-  const account = await queryOne(db,
+  let account = await queryOne(db,
   "SELECT id, name FROM erp_accounts WHERE company_id = ? AND name = ?", [
   companyId, shopName]);
+  if (!account) {
+    const m = shopName.match(/^temu-(\d+)店铺?$/i);
+    if (m) {
+      account = await queryOne(db,
+      "SELECT id, name FROM erp_accounts WHERE company_id = ? AND name = ?", [
+      companyId, `${m[1]}店`]);
+    }
+  }
   if (!account) throw new Error(`未找到与店铺「${shopName}」对应的 ERP 账号，无法扣库存`);
 
   const items = await queryAll(db,

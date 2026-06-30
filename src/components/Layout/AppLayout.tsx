@@ -19,6 +19,7 @@ import {
   LogoutOutlined,
   PictureOutlined,
   PlusCircleOutlined,
+  RobotOutlined,
   RocketOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -35,6 +36,7 @@ import { useErpPermissions } from "../../contexts/ErpPermissionContext";
 import BrandMark from "../BrandMark";
 import ExtensionInstallGuide from "../ExtensionInstallGuide";
 import { useDeductionGuard } from "../InventoryDeductionGuard";
+import AgentFloatingBot from "../AgentFloatingBot";
 
 const { Content, Header, Sider } = Layout;
 
@@ -71,6 +73,7 @@ const menuItems = [
     key: "group-operations",
     label: "运营",
     children: [
+      { key: "/agent", icon: <RobotOutlined />, label: "Agent 监控台" },
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
       { key: "/auto-purchase", icon: <PlusCircleOutlined />, label: "采购备货" },
@@ -435,6 +438,7 @@ export default function AppLayout() {
           </div>
         </Content>
       </Layout>
+      <AgentFloatingBot />
     </Layout>
   );
 }

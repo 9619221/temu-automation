@@ -1377,6 +1377,14 @@ export default function MultiStoreReport() {
             scroll={{ x: 880 }}
             loading={loading}
           />
+        </div>
+      ),
+    },
+    {
+      key: "sku-sales",
+      label: "SKU 销售",
+      children: (
+        <div>
           <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <Select size="small" style={{ width: 130 }} value={skuStoreFilter} onChange={setSkuStoreFilter}
               options={[{ value: "all", label: "全部店铺" }, ...skuStoreOptions.map((c) => ({ value: c, label: c }))]} />

@@ -35,5 +35,12 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: false,
+    proxy: {
+      "/api/agent": {
+        target: "https://erp.temu.chat",
+        changeOrigin: true,
+        secure: false,
+      },
+    },
   },
 }));

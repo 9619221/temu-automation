@@ -350,6 +350,11 @@ async function queryAll(db, sql, params = []) {
   if (!Array.isArray(params) && typeof params === "object") {
     return db.prepare(sql).all(params);
   }
+  if (Array.isArray(params) && params.length > 0 && /\$\d+/.test(sql)) {
+    const obj = {};
+    params.forEach((v, i) => { obj[String(i + 1)] = v === undefined ? null : v; });
+    return db.prepare(sql).all(obj);
+  }
   return db.prepare(sql).all(...params);
 }
 
@@ -366,6 +371,11 @@ async function execute(db, sql, params = []) {
   }
   if (!Array.isArray(params) && typeof params === "object") {
     return db.prepare(sql).run(params);
+  }
+  if (Array.isArray(params) && params.length > 0 && /\$\d+/.test(sql)) {
+    const obj = {};
+    params.forEach((v, i) => { obj[String(i + 1)] = v === undefined ? null : v; });
+    return db.prepare(sql).run(obj);
   }
   return db.prepare(sql).run(...params);
 }

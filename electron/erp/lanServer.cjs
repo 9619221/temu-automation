@@ -3890,6 +3890,41 @@ function createRequestHandler(options = {}) {
   const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
+  let agentInstance = options.agentInstance || null;
+  let agentInitAttempted = false;
+  function getOrInitAgent() {
+    if (agentInstance || agentInitAttempted) return agentInstance;
+    agentInitAttempted = true;
+    if (!process.env.OPENAI_API_KEY) {
+      console.log("[Agent] skipped: OPENAI_API_KEY not set");
+      return null;
+    }
+    try {
+      const { createAgent } = require("./agent/index.cjs");
+      const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+      agentInstance = createAgent({
+        db,
+        services: {
+          purchase: {
+            listOrders: (opts) => getPurchaseWorkbench({ status: opts?.status, page_size: opts?.limit || 50 }),
+            createOrder: (opts) => performPurchaseAction("create", opts),
+            confirmOrder: (opts) => performPurchaseAction("confirm", opts),
+          },
+          inventory: {
+            listSkuStockDetails: (opts) => listSkuStockDetails({ sku_code: opts?.skuCode, limit: opts?.limit }),
+          },
+          outbound: {
+            listPending: (opts) => getOutboundWorkbench({ status: "pending", page_size: opts?.limit || 100 }),
+          },
+        },
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      console.log("[Agent] initialized");
+    } catch (e) {
+      console.warn("[Agent] init failed:", e?.message || e);
+    }
+    return agentInstance;
+  }
 
   return async (req, res) => {
     // 阶段0 测速仪：响应发完后记一次耗时，零侵入内部分支。仅 finish（成功完成）触发，客户端中断不计。
@@ -3979,7 +4014,8 @@ function createRequestHandler(options = {}) {
       validateSessionUser,
       verifyLogin,
       queryPool,
-      purchaseStringTransport
+      purchaseStringTransport,
+      agentInstance: getOrInitAgent()
     }).catch((error) => {
       writeJson(res, 500, {
         ok: false,
@@ -5082,7 +5118,8 @@ async function handleRequest({
   validateSessionUser,
   verifyLogin,
   queryPool,
-  purchaseStringTransport
+  purchaseStringTransport,
+  agentInstance
 }) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -5199,6 +5236,40 @@ async function handleRequest({
       receive1688Message
     });
     return;
+  }
+
+  // Agent API 路由（不走 ROLE_PERMISSIONS 鉴权，自带初始化检查）
+  if (pathname.startsWith("/api/agent/")) {
+    // CORS：允许 Electron 桌面端跨域访问
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    const agent = agentInstance;
+    const { handleAgentRoute } = require("./agent/apiRoutes.cjs");
+    let body = {};
+    if (req.method === "POST") {
+      try { body = JSON.parse(await readRequestBody(req, 512 * 1024)); } catch { body = {}; }
+    }
+    // 解析 query string 给 agent 路由用（SSE runId 等）
+    const _qs = {};
+    try {
+      const _u = new URL(req.url, "http://localhost");
+      _u.searchParams.forEach((v, k) => { _qs[k] = v; });
+    } catch { /* ignore */ }
+    const handled = await handleAgentRoute(pathname.split("?")[0], req.method, body, {
+      db,
+      agentInstance: agent,
+      res,
+      query: _qs,
+      sendJson: (data) => { writeJson(res, 200, { ok: true, ...data }); return true; },
+      sendError: (code, msg) => { writeJson(res, code, { ok: false, error: msg }); return true; },
+    });
+    if (handled) return;
   }
 
   const protectedPath = ROLE_PERMISSIONS[pathname] ? pathname : null;

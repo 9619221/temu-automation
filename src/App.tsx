@@ -59,6 +59,7 @@ const OperationStoreDetail = lazyWithPreload(() => import("./pages/OperationStor
 const TemuAuthManager = lazyWithPreload(() => import("./pages/TemuAuthManager"));
 const AutoPurchase = lazyWithPreload(() => import("./pages/AutoPurchase"));
 const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
+const AgentDashboard = lazyWithPreload(() => import("./pages/AgentDashboard"));
 // Settlement 页面已合并到多店报表的结算 Tab
 
 const LIGHT_ROUTE_PRELOADERS = [
@@ -374,6 +375,7 @@ function App() {
               <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
               <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
               <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
+              <Route path="agent" element={<RoleRoute path="/agent"><AgentDashboard /></RoleRoute>} />
               {/* Legacy routes */}
               <Route path="dashboard" element={<Navigate to="/ops-workbench" replace />} />
               <Route path="sales" element={<Navigate to="/products" replace />} />
