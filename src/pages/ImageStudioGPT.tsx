@@ -3800,11 +3800,29 @@ function getShotBriefManualEditNote(plan: ImageStudioPlan) {
   return `Operator edited the prompt preview. Preserve this edit intent inside the structured ShotBrief: ${limitShotBriefText(currentPrompt, 2400)}`;
 }
 
+// 连写尺寸展开：把 "30x10x8cm" / "30×10×6 厘米" 这类只有末尾带单位的写法，
+// 展开成 "30cm 10cm 8cm"，让后续按「数字+单位」提取时不丢前面的数字。
+// 中文单位统一转成英文缩写（提取正则的 \b 边界对中文单位不生效，中文写法原本永远匹配不上）
+const CN_UNIT_MAP: Record<string, string> = { 厘米: "cm", 毫米: "mm", 米: "m", 英寸: "in" };
+function expandChainedMeasurements(text: string) {
+  const normalized = text.replace(
+    /(\d+(?:\.\d+)?)\s*(厘米|毫米|英寸|米)/g,
+    (_match, num: string, unit: string) => `${num}${CN_UNIT_MAP[unit] || unit}`,
+  );
+  return normalized.replace(
+    /((?:\d+(?:\.\d+)?\s*[x×*]\s*)+)(\d+(?:\.\d+)?)\s*(cm|mm|m|in|inch|inches)\b/gi,
+    (_match, chain: string, last: string, unit: string) => {
+      const nums = chain.split(/[x×*]/).map((s) => s.trim()).filter(Boolean);
+      return [...nums, last].map((n) => `${n}${unit}`).join(" ");
+    },
+  );
+}
+
 function extractVerifiedDimensionTexts(shotBrief: ImageStudioShotBrief) {
   if (shotBrief.imageType !== "dimensions") return [];
   const dimensionFact = shotBrief.productFacts.find((fact) => /^Estimated dimensions:/i.test(fact));
   if (!dimensionFact) return [];
-  const raw = dimensionFact.replace(/^Estimated dimensions:\s*/i, "").trim();
+  const raw = expandChainedMeasurements(dimensionFact.replace(/^Estimated dimensions:\s*/i, "").trim());
   if (!raw) return [];
 
   const measurements = raw.match(/\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b)?/gi) || [];
@@ -5676,7 +5694,7 @@ function isCheapImage2TemplateCopy(rawValue: string) {
 }
 
 function extractImage2Measurements(rawValue: unknown) {
-  const text = typeof rawValue === "string" ? rawValue : "";
+  const text = typeof rawValue === "string" ? expandChainedMeasurements(rawValue) : "";
   const matches = dedupeTextList(
     text.match(/\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b(?:\s*\/\s*\d+(?:\.\d+)?\s*(?:cm|mm|m|in|inch|inches|厘米|毫米|米|英寸)\b)?/gi) || [],
   ).slice(0, 4);

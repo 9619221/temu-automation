@@ -644,30 +644,46 @@ function buildUnifiedConsignCte() {
   return UNIFIED_CONSIGN_CTE;
 }
 
+// 搜索串按空白/逗号/分号/顿号拆成多个关键词，任一命中即匹配（支持一次粘贴多个备货单号）
+function splitSearchTokens(search) {
+  return String(search || "").split(/[\s,，、;；]+/).filter(Boolean).slice(0, 50);
+}
+
+// 生成多关键词 OR 条件：每个关键词在 cols 任一列 LIKE 命中即算命中
+function buildMultiTokenSearchCond(values, search, cols, prefix = "q") {
+  const tokens = splitSearchTokens(search);
+  if (!tokens.length) return "";
+  const groups = tokens.map((t, i) => {
+    values[`${prefix}${i}`] = `%${t}%`;
+    return `(${cols.map((c) => `${c} LIKE @${prefix}${i}`).join(" OR ")})`;
+  });
+  return `(${groups.join(" OR ")})`;
+}
+
+const UNIFIED_SEARCH_COLS = [
+  "so_id",
+  "jst_shop_name",
+  "jst_outer_deliver_no",
+  "jst_supplier_name",
+  "jst_sku_info",
+  "jst_skus",
+  "jst_logistics_company",
+  "jst_l_id",
+  "cloud_mall_id",
+  "cloud_site",
+  "cloud_parent_order_no",
+  "cloud_delivery_batch_sn",
+  "cloud_product_id",
+  "cloud_skc_id",
+  "cloud_sku_id",
+  "cloud_sku_ext_code",
+  "cloud_product_name",
+  "cloud_spec_name",
+  "cloud_delivery_order_sn"
+];
+
 function buildUnifiedSearchClause(values, search) {
-  if (!search) return "";
-  values.search = `%${search}%`;
-  return `(
-    so_id LIKE @search
-    OR jst_shop_name LIKE @search
-    OR jst_outer_deliver_no LIKE @search
-    OR jst_supplier_name LIKE @search
-    OR jst_sku_info LIKE @search
-    OR jst_skus LIKE @search
-    OR jst_logistics_company LIKE @search
-    OR jst_l_id LIKE @search
-    OR cloud_mall_id LIKE @search
-    OR cloud_site LIKE @search
-    OR cloud_parent_order_no LIKE @search
-    OR cloud_delivery_batch_sn LIKE @search
-    OR cloud_product_id LIKE @search
-    OR cloud_skc_id LIKE @search
-    OR cloud_sku_id LIKE @search
-    OR cloud_sku_ext_code LIKE @search
-    OR cloud_product_name LIKE @search
-    OR cloud_spec_name LIKE @search
-    OR cloud_delivery_order_sn LIKE @search
-  )`;
+  return buildMultiTokenSearchCond(values, search, UNIFIED_SEARCH_COLS);
 }
 
 function unifiedRowToPayload(row) {
@@ -826,7 +842,7 @@ async function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
   const buildWhere = (includeSource) => {
     const values = { company_id: companyId };
     const cond = ["company_id = @company_id"];
-    if (search) {values.search = `%${search}%`;cond.push("search_blob LIKE @search");}
+    if (search) {const sc = buildMultiTokenSearchCond(values, search, ["search_blob"]);if (sc) cond.push(sc);}
     if (statusFilters && statusFilters.length === 1) {values.status_filter = statusFilters[0];cond.push(`${statusCol} = @status_filter`);} else
     if (statusFilters && statusFilters.length > 1) {const ph = statusFilters.map((s, i) => {values[`sf${i}`] = s;return `@sf${i}`;});cond.push(`${statusCol} IN (${ph.join(",")})`);}
     if (onlineStatusFilter && hasOnlineStatus) {values.online_status_filter = onlineStatusFilter;cond.push("online_status = @online_status_filter");}
@@ -917,7 +933,7 @@ async function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
         SUM(CASE WHEN source = 'jst' THEN 1 ELSE 0 END) AS src_jst,
         SUM(CASE WHEN source = 'both' THEN 1 ELSE 0 END) AS src_both
       FROM temu_consign_unified_snapshot ${bdQ.where}
-    `, [bdQ.values]);const totalCount = hasSourceFilter ? Number(aggRow?.[`src_${source}`] || 0) : Number(aggRow?.total || 0);const sbKey = `${companyId}\0${search || ""}`;const sbCached = _sbBreakdownCache.get(sbKey);let statusBreakdown, onlineStatusBreakdown;if (sbCached && Date.now() - sbCached.t < 300000) {statusBreakdown = sbCached.s;onlineStatusBreakdown = sbCached.o;} else {const sbValues = { company_id: companyId };const sbCond = ["company_id = @company_id"];if (search) {sbValues.search = `%${search}%`;sbCond.push("search_blob LIKE @search");}const combined = await queryAll(txDb, `
+    `, [bdQ.values]);const totalCount = hasSourceFilter ? Number(aggRow?.[`src_${source}`] || 0) : Number(aggRow?.total || 0);const sbKey = `${companyId}\0${search || ""}`;const sbCached = _sbBreakdownCache.get(sbKey);let statusBreakdown, onlineStatusBreakdown;if (sbCached && Date.now() - sbCached.t < 300000) {statusBreakdown = sbCached.s;onlineStatusBreakdown = sbCached.o;} else {const sbValues = { company_id: companyId };const sbCond = ["company_id = @company_id"];if (search) {const sbSc = buildMultiTokenSearchCond(sbValues, search, ["search_blob"]);if (sbSc) sbCond.push(sbSc);}const combined = await queryAll(txDb, `
         SELECT ${statusCol} AS status, ${hasOnlineStatus ? "online_status" : "NULL AS online_status"}, COUNT(*) AS n
         FROM temu_consign_unified_snapshot
         WHERE ${sbCond.join(" AND ")}
@@ -988,9 +1004,10 @@ async function runConsignDeliveriesUnifiedJstOnly(db, opts) {
   }
   const conditions = ["company_id = @company_id", "status_internal != 'deleted'"];
   const values = { company_id: companyId };
-  if (search) {
-    values.search = `%${search}%`;
-    conditions.push(`(so_id LIKE @search OR shop_name LIKE @search OR outer_deliver_no LIKE @search OR supplier_name LIKE @search OR sku_info LIKE @search OR skus LIKE @search OR logistics_company LIKE @search OR l_id LIKE @search)`);
+  const jstSearchCols = ["so_id", "shop_name", "outer_deliver_no", "supplier_name", "sku_info", "skus", "logistics_company", "l_id"];
+  const jstSearchCond = buildMultiTokenSearchCond(values, search, jstSearchCols);
+  if (jstSearchCond) {
+    conditions.push(jstSearchCond);
   }
   if (statusFilters && statusFilters.length === 1) {
     values.status_filter = statusFilters[0];
@@ -1030,8 +1047,8 @@ async function runConsignDeliveriesUnifiedJstOnly(db, opts) {
 
   // 状态分布：只受搜索约束，不受状态过滤约束，保证下拉列出全部真实状态值。
   const statusBdConditions = ["company_id = @company_id", "status_internal != 'deleted'"];
-  if (search) {
-    statusBdConditions.push(`(so_id LIKE @search OR shop_name LIKE @search OR outer_deliver_no LIKE @search OR supplier_name LIKE @search OR sku_info LIKE @search OR skus LIKE @search OR logistics_company LIKE @search OR l_id LIKE @search)`);
+  if (jstSearchCond) {
+    statusBdConditions.push(jstSearchCond);
   }
   const statusBreakdown = {};
   for (const r of await queryAll(db, `
