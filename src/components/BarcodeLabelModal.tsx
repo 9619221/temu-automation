@@ -607,14 +607,13 @@ export default function BarcodeLabelModal({ open, rows, onClose }: BarcodeLabelM
   useEffect(() => {
     if (!open) return;
     const s = loadJson(SETTINGS_KEY, {} as Record<string, unknown>);
-    const savedCompliance = loadJson(complianceCacheKey, DEFAULT_COMPLIANCE);
     setSelectedId((s.templateId as string) || "tm");
     setOriginText((s.originText as string) || "Made In China");
     setCopies((s.copies as number) || 1);
     setPrinterName((s.printerName as string) || "");
     setExtraTemplateIds((s.extraTemplateIds as string[]) || []);
     setFavorites(loadJson(FAVORITES_KEY, [] as string[]));
-    setCompliance(savedCompliance);
+    setCompliance(DEFAULT_COMPLIANCE);
     setCloudSyncStatus("idle");
     setSizeFilter(null);
     setTypeFilter(null);
@@ -630,16 +629,25 @@ export default function BarcodeLabelModal({ open, rows, onClose }: BarcodeLabelM
       }
     });
 
-    if (savedCompliance.manufacturer) setMfrOptions((prev) => dedupeOptions([...prev, { name: savedCompliance.manufacturer, address: savedCompliance.manufacturerAddress || "", email: savedCompliance.manufacturerEmail || "" }]));
-    if (savedCompliance.ecRepName) setEcRepOptions((prev) => dedupeOptions([...prev, { name: savedCompliance.ecRepName, address: savedCompliance.ecRepAddress || "", email: savedCompliance.ecRepEmail || "" }]));
-    if (savedCompliance.turRepName) setTurRepOptions((prev) => dedupeOptions([...prev, { name: savedCompliance.turRepName, address: savedCompliance.turRepAddress || "" }]));
-
+    // 只显示发货单商品所属店铺的合规信息：有就显示，没有就留空，不借其他店铺的数据
+    const clearCompliance = () => {
+      setMfrOptions([]);
+      setEcRepOptions([]);
+      setTurRepOptions([]);
+      setCompliance(DEFAULT_COMPLIANCE);
+      saveJson(complianceCacheKey, DEFAULT_COMPLIANCE);
+      setCloudSyncStatus("empty");
+    };
+    if (!mallId) {
+      clearCompliance();
+      return;
+    }
     setCloudSyncStatus("loading");
     const applyRows = (cloudRows: Awaited<ReturnType<typeof fetchComplianceProperties>>) => {
       extractOptionsFromRows(cloudRows);
       const withData = cloudRows.filter((r) => r.manufacturer_name || r.ec_rep_name || r.tur_rep_name);
       const match = skcId ? withData.find((r) => r.product_skc_id === skcId) : undefined;
-      const r = match || withData[0] || cloudRows[0];
+      const r = match || withData[0];
       const fromCloud: ComplianceData = {
         manufacturer: r.manufacturer_name || "",
         manufacturerAddress: r.manufacturer_address || "",
@@ -656,24 +664,16 @@ export default function BarcodeLabelModal({ open, rows, onClose }: BarcodeLabelM
       saveJson(complianceCacheKey, fromCloud);
       setCloudSyncStatus("success");
     };
-    fetchComplianceProperties({ mall_id: mallId || undefined, limit: 500 })
-      .then(async (cloudRows) => {
+    fetchComplianceProperties({ mall_id: mallId, limit: 500 })
+      .then((cloudRows) => {
         const withData = cloudRows.filter((r) => r.manufacturer_name || r.ec_rep_name || r.tur_rep_name);
         if (withData.length) { applyRows(cloudRows); return; }
-        if (mallId) {
-          const fallback = await fetchComplianceProperties({ limit: 500 });
-          const fbWithData = fallback.filter((r) => r.manufacturer_name || r.ec_rep_name || r.tur_rep_name);
-          if (fbWithData.length) { applyRows(fallback); return; }
-        }
-        if (!cloudRows.length) {
-          setCloudSyncStatus(savedCompliance.manufacturer || savedCompliance.ecRepName ? "idle" : "empty");
-        } else {
-          applyRows(cloudRows);
-        }
+        clearCompliance();
       })
       .catch((err) => {
         console.error("[合规同步] 自动拉取失败:", err);
-        setCloudSyncStatus(savedCompliance.manufacturer || savedCompliance.ecRepName ? "idle" : "error");
+        clearCompliance();
+        setCloudSyncStatus("error");
       });
   }, [open, mallId, skcId, complianceCacheKey, extractOptionsFromRows]);
 
