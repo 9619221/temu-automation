@@ -10,7 +10,7 @@
 "use strict";
 
 const { callOpenApi } = require("../temuOpenApiClient.cjs");
-const { queryAll, withTransaction} = require("../../db/connection.cjs");
+const { queryAll, execute, withTransaction } = require("../../db/connection.cjs");
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 100; // 今天创建的量小,分页上限防 runaway
