@@ -18,8 +18,16 @@ const r = Router();
 // 注意：在“请求时”读取 env，而不是模块顶层常量。
 // 因为 ESM import 会先于 server.js 的 dotenv.config() 执行，
 // 顶层读 process.env 会拿不到 .env 里的值。
-function getUpstream(kind) {
+function getUpstream(kind, subPath = "") {
   if (kind === "generate") {
+    // 旧版客户端走 grsai 特有的 /v1/draw/* 接口，与 OpenAI 风格接口分流：
+    // draw 请求转到 AI_DRAW_BASE_URL/AI_DRAW_KEY（grsai），其余走 AI_GENERATE_*。
+    if (/^\/v1\/draw\//.test(subPath) && process.env.AI_DRAW_KEY) {
+      return {
+        base: process.env.AI_DRAW_BASE_URL || "https://grsaiapi.com",
+        key: process.env.AI_DRAW_KEY,
+      };
+    }
     return {
       base: process.env.AI_GENERATE_BASE_URL || "https://grsaiapi.com",
       key: process.env.AI_GENERATE_KEY || "",
@@ -69,8 +77,22 @@ function rateLimited(uid) {
   return e.n > RL_MAX;
 }
 
+// 模型名改写：上游供应商调整模型分组时（如 gpt-image-2 → gpt-image-2-c），
+// 在代理层统一映射，各桌面端无需发版。格式：AI_MODEL_REWRITE=old:new[,old2:new2]
+function rewriteModel(body) {
+  const raw = process.env.AI_MODEL_REWRITE || "";
+  if (!raw || !body || typeof body !== "object" || !body.model) return body;
+  for (const pair of raw.split(",")) {
+    const [from, to] = pair.split(":").map((s) => s && s.trim());
+    if (from && to && body.model === from) { body.model = to; break; }
+  }
+  return body;
+}
+
 async function proxy(kind, req, res) {
-  const up = getUpstream(kind);
+  const subPath = req.params[0] ? `/${req.params[0]}` : "";
+  const up = getUpstream(kind, subPath);
+  console.log(`[ai-proxy] ${req.method} ${kind}${subPath} -> ${up.base} model=${req.body?.model || "-"} uid=${req.user?.uid || "-"}`);
   if (!up.key) {
     res.status(503).json({ error: `ai_${kind}_key_not_configured` });
     return;
@@ -80,7 +102,6 @@ async function proxy(kind, req, res) {
     return;
   }
 
-  const subPath = req.params[0] ? `/${req.params[0]}` : "";
   const qsIndex = req.originalUrl.indexOf("?");
   const qs = qsIndex >= 0 ? req.originalUrl.slice(qsIndex) : "";
   const url = up.base.replace(/\/+$/, "") + subPath + qs;
@@ -111,7 +132,7 @@ async function proxy(kind, req, res) {
     const upstream = await fetch(url, {
       method: req.method,
       headers,
-      body: hasBody ? JSON.stringify(req.body ?? {}) : undefined,
+      body: hasBody ? JSON.stringify(rewriteModel(req.body ?? {})) : undefined,
       signal: controller.signal,
     });
     const ct = upstream.headers.get("content-type") || "application/json";

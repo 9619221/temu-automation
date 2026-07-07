@@ -3055,8 +3055,22 @@ function updateImageStudioRuntimeConfigOverrides(patch = {}) {
   return readImageStudioRuntimeConfig();
 }
 
+// 自愈迁移：历史上有些机器的覆盖配置把生图/分析直连到上游供应商（vectorengine/grsai），
+// 上游模型与接口调整后这些直连配置全部失效（Draw API 404）。启动时发现直连覆盖即整体清除，
+// 回落到软件自带默认配置（走 erp.temu.chat 云端代理，key 只存服务器）。
+function purgeLegacyDirectUpstreamOverrides(persisted) {
+  const DIRECT_UPSTREAM = /vectorengine\.(cn|ai)|grsaiapi\.com/i;
+  const hasDirect = Object.entries(persisted || {}).some(
+    ([key, value]) => /baseurl/i.test(key) && typeof value === "string" && DIRECT_UPSTREAM.test(value)
+  );
+  if (!hasDirect) return persisted;
+  console.log("[Main] purged legacy direct-upstream AI overrides (fallback to cloud proxy defaults)");
+  savePersistedAiOverrides({});
+  return {};
+}
+
 function hydrateImageStudioRuntimeConfigFromDisk() {
-  const persisted = loadPersistedAiOverrides();
+  const persisted = purgeLegacyDirectUpstreamOverrides(loadPersistedAiOverrides());
   const normalized = normalizeImageStudioRuntimeConfigPatch(persisted);
   if (Object.keys(normalized).length > 0) {
     imageStudioRuntimeConfigOverrides = { ...imageStudioRuntimeConfigOverrides, ...normalized };
