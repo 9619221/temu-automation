@@ -3059,12 +3059,17 @@ function updateImageStudioRuntimeConfigOverrides(patch = {}) {
 // 上游模型与接口调整后这些直连配置全部失效（Draw API 404）。启动时发现直连覆盖即整体清除，
 // 回落到软件自带默认配置（走 erp.temu.chat 云端代理，key 只存服务器）。
 function purgeLegacyDirectUpstreamOverrides(persisted) {
-  const DIRECT_UPSTREAM = /vectorengine\.(cn|ai)|grsaiapi\.com/i;
-  const hasDirect = Object.entries(persisted || {}).some(
-    ([key, value]) => /baseurl/i.test(key) && typeof value === "string" && DIRECT_UPSTREAM.test(value)
+  // 白名单：只有指向我方云端代理（或本机回环）的覆盖才保留；任何直连第三方上游的
+  // 覆盖一律整体清除。上游供应商的域名/接口随时会变（vectorengine/grsai/其他聚合网关
+  // 都发生过），直连配置一失效就是全员 Draw API 404。
+  const PROXY_ALLOWED = /erp\.temu\.chat|127\.0\.0\.1|localhost/i;
+  const directEntries = Object.entries(persisted || {}).filter(
+    ([key, value]) => /baseurl/i.test(key) && typeof value === "string" && value.trim() && !PROXY_ALLOWED.test(value)
   );
-  if (!hasDirect) return persisted;
-  console.log("[Main] purged legacy direct-upstream AI overrides (fallback to cloud proxy defaults)");
+  if (!directEntries.length) return persisted;
+  console.log(
+    `[Main] purged legacy direct-upstream AI overrides (${directEntries.map(([k, v]) => `${k}=${v}`).join(", ")}) -> cloud proxy defaults`
+  );
   savePersistedAiOverrides({});
   return {};
 }
