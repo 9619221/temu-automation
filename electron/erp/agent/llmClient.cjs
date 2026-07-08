@@ -1,20 +1,54 @@
 "use strict";
 
 // LLM 客户端：OpenAI 兼容格式（支持向量引擎等代理）
+// 默认走自家 ai-proxy（真实 Key 只在服务器 .env），env 可覆盖为直连上游
 
-const DEFAULT_API_URL = "https://api.vectorengine.cn/v1/chat/completions";
 const DEFAULT_MODEL = "gpt-5.5";
+
+function getProxyDefaults() {
+  try {
+    const { getDefaultCredentials } = require("../../default-credentials.cjs");
+    const creds = getDefaultCredentials();
+    return {
+      baseUrl: creds.analyzeBaseUrl.replace(/\/$/, "") + "/chat/completions",
+      apiKey: creds.analyzeApiKey,
+    };
+  } catch {
+    return { baseUrl: "https://erp.temu.chat/api/ai/analyze/chat/completions", apiKey: "" };
+  }
+}
 
 class LlmClient {
   constructor(options = {}) {
-    this._apiKey = options.apiKey || process.env.OPENAI_API_KEY || "";
-    this._baseUrl = options.baseUrl || process.env.OPENAI_BASE_URL || DEFAULT_API_URL;
+    const proxy = getProxyDefaults();
+    this._apiKey = options.apiKey || process.env.OPENAI_API_KEY || proxy.apiKey;
+    this._baseUrl = options.baseUrl || process.env.OPENAI_BASE_URL || proxy.baseUrl;
     this._defaultModel = options.model || process.env.AGENT_MODEL || DEFAULT_MODEL;
     this._fetchImpl = options.fetch || globalThis.fetch;
     this._maxRetries = options.maxRetries || 2;
+    // token 日上限护栏：跨天自动清零，超限直接抛错终止 run
+    this._dailyTokenLimit = Number(process.env.AGENT_DAILY_TOKEN_LIMIT || 2_000_000);
+    this._dayKey = "";
+    this._dayTokens = 0;
+  }
+
+  get dailyUsage() {
+    return { day: this._dayKey, tokens: this._dayTokens, limit: this._dailyTokenLimit };
+  }
+
+  _checkDailyBudget() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this._dayKey !== today) {
+      this._dayKey = today;
+      this._dayTokens = 0;
+    }
+    if (this._dailyTokenLimit > 0 && this._dayTokens >= this._dailyTokenLimit) {
+      throw new Error(`Agent 今日 token 用量已达上限 ${this._dailyTokenLimit}，明天自动恢复（可用 AGENT_DAILY_TOKEN_LIMIT 调整）`);
+    }
   }
 
   async chat({ model, system, messages, tools, max_tokens = 2048 }) {
+    this._checkDailyBudget();
     // 构建 OpenAI 格式 messages（system 放在 messages[0]）
     const oaiMessages = [];
     if (system) {
@@ -68,6 +102,8 @@ class LlmClient {
         }
 
         const data = await response.json();
+        const used = Number(data.usage?.total_tokens || 0);
+        if (used > 0) this._dayTokens += used;
         return this._parseResponse(data);
       } catch (error) {
         lastError = error;

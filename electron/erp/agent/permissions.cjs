@@ -63,6 +63,8 @@ const DEFAULT_RULES = {
     "erp.review.reply",
     "erp.supplier.change",
     "erp.outbound.cancel_shipment",
+    "erp.outbound.process_normal", // 真实扣减本地库存，需人工确认
+    "erp.inventory.create_inbound", // 真实确认采购单入库（写批次成本），需人工确认
     "agent.memory.save_experience",
   ],
 
@@ -84,8 +86,6 @@ const DEFAULT_RULES = {
 
     // 低风险写操作
     "erp.purchase.create_draft",
-    "erp.outbound.process_normal",
-    "erp.inventory.create_inbound",
     "erp.image.generate_*",
     "erp.title.optimize",
     "erp.data.sync_*",

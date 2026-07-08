@@ -124,6 +124,29 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "erp.outbound.process_normal",
+    description: "本地发货确认：按送仓单号扣减本地库存（可撤销）。需审批。",
+    input_schema: {
+      type: "object",
+      properties: {
+        order_ids: { type: "array", items: { type: "string" }, description: "送仓单/发货单 oId 列表" },
+      },
+      required: ["order_ids"],
+    },
+  },
+  {
+    name: "erp.inventory.create_inbound",
+    description: "确认采购单入库：按采购单创建入库（成本自动带出）。需审批。",
+    input_schema: {
+      type: "object",
+      properties: {
+        purchase_order_id: { type: "string" },
+        reason: { type: "string", description: "入库理由，如已到货核数无误" },
+      },
+      required: ["purchase_order_id"],
+    },
+  },
+  {
     name: "erp.review.reply",
     description: "回复商品评论。需审批。",
     input_schema: {

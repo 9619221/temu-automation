@@ -3912,10 +3912,7 @@ function createRequestHandler(options = {}) {
   function getOrInitAgent() {
     if (agentInstance || agentInitAttempted) return agentInstance;
     agentInitAttempted = true;
-    if (!process.env.OPENAI_API_KEY) {
-      console.log("[Agent] skipped: OPENAI_API_KEY not set");
-      return null;
-    }
+    // 无 OPENAI_API_KEY 时 llmClient 会回落到内置 ai-proxy 桌面 token，不再跳过初始化
     try {
       const { createAgent } = require("./agent/index.cjs");
       const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
@@ -3926,12 +3923,17 @@ function createRequestHandler(options = {}) {
             listOrders: (opts) => getPurchaseWorkbench({ status: opts?.status, page_size: opts?.limit || 50 }),
             createOrder: (opts) => performPurchaseAction("create", opts),
             confirmOrder: (opts) => performPurchaseAction("confirm", opts),
+            confirmPoInbound: (opts) => performPurchaseAction("confirm_po_inbound", opts),
           },
           inventory: {
             listSkuStockDetails: (opts) => listSkuStockDetails({ sku_code: opts?.skuCode, limit: opts?.limit }),
           },
           outbound: {
             listPending: (opts) => getOutboundWorkbench({ status: "pending", page_size: opts?.limit || 100 }),
+            shipConsignDelivery: (opts) => performInventoryAction(
+              { action: "consign_deliver_ship", oId: opts?.oId },
+              { name: "agent" }
+            ),
           },
         },
         attachCloudDb: attachTemuCloudDbIfPossible,

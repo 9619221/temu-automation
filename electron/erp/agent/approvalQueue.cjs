@@ -53,26 +53,26 @@ class ApprovalQueue extends EventEmitter {
     });
   }
 
-  async approve(approvalId) {
+  async approve(approvalId, operator = "user") {
     const pending = this._pendingResolvers.get(approvalId);
     if (pending) {
       clearTimeout(pending.timer);
       this._pendingResolvers.delete(approvalId);
       pending.resolve(true);
     }
-    await this._updateStatus(approvalId, "approved");
-    this.emit("approval:approved", { id: approvalId });
+    await this._updateStatus(approvalId, "approved", "", operator);
+    this.emit("approval:approved", { id: approvalId, operator });
   }
 
-  async reject(approvalId, reason = "") {
+  async reject(approvalId, reason = "", operator = "user") {
     const pending = this._pendingResolvers.get(approvalId);
     if (pending) {
       clearTimeout(pending.timer);
       this._pendingResolvers.delete(approvalId);
       pending.resolve(false);
     }
-    await this._updateStatus(approvalId, "rejected", reason);
-    this.emit("approval:rejected", { id: approvalId, reason });
+    await this._updateStatus(approvalId, "rejected", reason, operator);
+    this.emit("approval:rejected", { id: approvalId, reason, operator });
   }
 
   async listPending() {
@@ -107,14 +107,14 @@ class ApprovalQueue extends EventEmitter {
     return this._pendingResolvers.size;
   }
 
-  async _updateStatus(id, status, reason = "") {
+  async _updateStatus(id, status, reason = "", operator = "") {
     if (!this._db) return;
     try {
       await execute(this._db, `
         UPDATE erp_agent_approvals
-        SET status = $1, reject_reason = $2, resolved_at = NOW()
-        WHERE id = $3
-      `, [status, reason, id]);
+        SET status = $1, reject_reason = $2, resolved_by = $3, resolved_at = NOW()
+        WHERE id = $4
+      `, [status, reason, operator, id]);
     } catch (error) {
       console.warn("[ApprovalQueue] status update failed:", error?.message);
     }

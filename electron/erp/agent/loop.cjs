@@ -20,18 +20,29 @@ class AgentLoop extends EventEmitter {
     this._memory = options.memory;
     this._model = options.model || DEFAULT_MODEL;
     this._systemPrompt = options.systemPrompt || "";
-    this._running = false;
-    this._abortController = null;
+    // 并发 run 支持：runId → { controller, triggerType }。人工消息可与巡逻并行
+    this._activeRuns = new Map();
+    this._maxConcurrent = options.maxConcurrent || 3;
   }
 
-  get running() { return this._running; }
+  get running() { return this._activeRuns.size > 0; }
+  get activeCount() { return this._activeRuns.size; }
+
+  hasRunOfType(type) {
+    for (const info of this._activeRuns.values()) {
+      if (info.triggerType === type) return true;
+    }
+    return false;
+  }
 
   async run(trigger) {
-    if (this._running) throw new Error("Agent loop already running");
-    this._running = true;
-    this._abortController = new AbortController();
+    if (this._activeRuns.size >= this._maxConcurrent) {
+      throw new Error(`Agent 并发任务已达上限 ${this._maxConcurrent}，请稍后再试`);
+    }
 
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const abortController = new AbortController();
+    this._activeRuns.set(runId, { controller: abortController, triggerType: trigger.type });
     this.emit("run:start", { runId, trigger });
 
     try {
@@ -40,7 +51,7 @@ class AgentLoop extends EventEmitter {
       let turnCount = 0;
 
       while (turnCount < MAX_TURNS) {
-        if (this._abortController.signal.aborted) {
+        if (abortController.signal.aborted) {
           this.emit("run:aborted", { runId });
           break;
         }
@@ -95,14 +106,18 @@ class AgentLoop extends EventEmitter {
       this.emit("run:error", { runId, error: error.message || String(error) });
       throw error;
     } finally {
-      this._running = false;
-      this._abortController = null;
+      this._activeRuns.delete(runId);
     }
   }
 
-  abort() {
-    if (this._abortController) {
-      this._abortController.abort();
+  // 不带 runId 时中止全部在跑任务
+  abort(runId) {
+    if (runId) {
+      this._activeRuns.get(runId)?.controller.abort();
+      return;
+    }
+    for (const info of this._activeRuns.values()) {
+      info.controller.abort();
     }
   }
 

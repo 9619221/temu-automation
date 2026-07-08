@@ -78,8 +78,8 @@ function createAgent(options = {}) {
   agent.on("run:aborted", ({ runId }) => console.log(`[Agent] run:aborted ${runId}`));
   agent.on("run:max_turns", ({ runId }) => console.log(`[Agent] run:max_turns ${runId}`));
 
-  // 5. 定时调度器
-  const scheduler = new AgentScheduler({ db });
+  // 5. 定时调度器（attachCloudDb 供差评事件监测查采集库）
+  const scheduler = new AgentScheduler({ db, attachCloudDb });
 
   const instance = {
     agent,
@@ -106,8 +106,8 @@ function createAgent(options = {}) {
       return await agent.run({ type: "followup", description, context });
     },
 
-    abort() {
-      agent.abort();
+    abort(runId) {
+      agent.abort(runId);
     },
 
     destroy() {

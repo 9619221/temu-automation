@@ -161,7 +161,11 @@ class ToolRouter {
       }
       try {
         const { queryAll } = require("../../db/connection.cjs");
-        const rows = await queryAll(ctx.db, sql, input.params || []);
+        // 硬行数上限：无 LIMIT 的查询包一层子查询强制截断，防止整表进上下文
+        const capped = /\blimit\b/i.test(sql)
+          ? sql
+          : `SELECT * FROM (${sql.replace(/;+\s*$/, "")}) __agent_q LIMIT 200`;
+        const rows = await queryAll(ctx.db, capped, input.params || []);
         return { row_count: rows.length, rows: rows.slice(0, 100) };
       } catch (err) {
         return { error: err?.message || String(err) };
@@ -186,11 +190,36 @@ class ToolRouter {
     });
 
     this._handlers.set("erp.outbound.process_normal", async (input, ctx) => {
-      return { message: "发货处理功能开发中", order_ids: input.order_ids };
+      // 本地发货确认（consign_deliver_ship）：扣本地库存，可用 unship 撤销
+      if (!ctx.services?.outbound?.shipConsignDelivery) {
+        return { error: "发货服务未初始化" };
+      }
+      const orderIds = Array.isArray(input.order_ids) ? input.order_ids : [input.order_ids].filter(Boolean);
+      if (orderIds.length === 0) return { error: "缺少 order_ids" };
+      const results = [];
+      for (const oId of orderIds) {
+        try {
+          const r = await ctx.services.outbound.shipConsignDelivery({ oId });
+          results.push({ order_id: oId, ok: true, result: r });
+        } catch (err) {
+          results.push({ order_id: oId, ok: false, error: err?.message || String(err) });
+        }
+      }
+      return { processed: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results };
     });
 
     this._handlers.set("erp.inventory.create_inbound", async (input, ctx) => {
-      return { message: "入库创建功能开发中", po_id: input.purchase_order_id };
+      // 确认采购单入库（confirm_po_inbound）：成本按采购单自动带出，需人工审批
+      if (!ctx.services?.purchase?.confirmPoInbound) {
+        return { error: "入库服务未初始化" };
+      }
+      const poId = input.purchase_order_id;
+      if (!poId) return { error: "缺少 purchase_order_id" };
+      try {
+        return await ctx.services.purchase.confirmPoInbound({ poId });
+      } catch (err) {
+        return { error: err?.message || String(err) };
+      }
     });
 
     this._handlers.set("erp.image.generate_main_image", async (input) => {
@@ -248,6 +277,15 @@ class ToolRouter {
         message: "主图上线指令已记录",
         sku_code: input.sku_code,
         job_id: input.image_job_id,
+      };
+    });
+
+    this._handlers.set("erp.supplier.change", async (input) => {
+      // 换供应商涉及采购链路重绑定，暂未开放给 Agent；引导上报 issue 由人工处理
+      return {
+        error: "换供应商暂未开放给 Agent，请用 agent.report_issue 上报，由人工在采购中心操作",
+        sku_code: input.sku_code,
+        suggested_supplier: input.supplier_id,
       };
     });
 

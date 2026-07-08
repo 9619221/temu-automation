@@ -38,24 +38,24 @@ async function handleAgentRoute(pathname, method, body, ctx) {
 
   if (route === "approvals/approve" && method === "POST") {
     if (!agentInstance) return sendError(503, "Agent 未初始化");
-    const { id } = body || {};
+    const { id, operator } = body || {};
     if (!id) return sendError(400, "缺少 id");
-    await agentInstance.approvalQueue.approve(id);
+    await agentInstance.approvalQueue.approve(id, operator || ctx.user?.username || "user");
     return sendJson({ ok: true });
   }
 
   if (route === "approvals/reject" && method === "POST") {
     if (!agentInstance) return sendError(503, "Agent 未初始化");
-    const { id, reason } = body || {};
+    const { id, reason, operator } = body || {};
     if (!id) return sendError(400, "缺少 id");
-    await agentInstance.approvalQueue.reject(id, reason || "");
+    await agentInstance.approvalQueue.reject(id, reason || "", operator || ctx.user?.username || "user");
     return sendJson({ ok: true });
   }
 
   // ─── Agent 控制 ───
   if (route === "start-patrol" && method === "POST") {
     if (!agentInstance) return sendError(503, "Agent 未初始化");
-    if (agentInstance.agent.running) return sendError(409, "Agent 正在运行中");
+    if (agentInstance.agent.hasRunOfType("patrol")) return sendError(409, "巡逻已在进行中");
     try {
       const { runId, turns, messages } = await agentInstance.startPatrol();
       const reply = _extractReply(messages);
@@ -69,7 +69,6 @@ async function handleAgentRoute(pathname, method, body, ctx) {
 
   if (route === "send-message" && method === "POST") {
     if (!agentInstance) return sendError(503, "Agent 未初始化");
-    if (agentInstance.agent.running) return sendError(409, "Agent 正在运行中");
     const { message } = body || {};
     if (!message) return sendError(400, "缺少 message");
     try {
@@ -87,7 +86,7 @@ async function handleAgentRoute(pathname, method, body, ctx) {
 
   if (route === "abort" && method === "POST") {
     if (!agentInstance) return sendError(503, "Agent 未初始化");
-    agentInstance.abort();
+    agentInstance.abort(body?.runId);
     return sendJson({ aborted: true });
   }
 
@@ -96,6 +95,7 @@ async function handleAgentRoute(pathname, method, body, ctx) {
     return sendJson({
       initialized: true,
       running: agentInstance.agent.running,
+      active_runs: agentInstance.agent.activeCount,
       pending_approvals: agentInstance.approvalQueue.pendingCount,
     });
   }
@@ -262,4 +262,4 @@ async function _persistRun(db, runId, triggerType, triggerData, turns, messages,
   }
 }
 
-module.exports = { handleAgentRoute };
+module.exports = { handleAgentRoute, persistRun: _persistRun, extractReply: _extractReply };
