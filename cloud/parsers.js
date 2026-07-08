@@ -2785,8 +2785,9 @@ function parseComplianceProperty(db, ctx, evt, body) {
     upsert.run({
       id: crypto.randomUUID(),
       tenant_id: ctx.tenant_id,
-      mall_id: ctx.mall_id || "",
-      site: ctx.site || null,
+      // ctx 里没有 mall_id（dispatchParsers 只传 tenant/device），必须从事件上取，否则永远落空串
+      mall_id: eventMallId(ctx, evt),
+      site: ctx.site || evt.site || null,
       product_skc_id: skc,
       product_name: toNullableString(firstDefined(item, ["productName", "goodsName", "skcName", "product_name"])),
       manufacturer_name: props.manufacturer_name,
@@ -2929,8 +2930,9 @@ function parseComplianceQueryDetail(db, ctx, evt, body) {
   upsert.run({
     id: crypto.randomUUID(),
     tenant_id: ctx.tenant_id,
-    mall_id: ctx.mall_id || "",
-    site: ctx.site || null,
+    // 同 parseComplianceProperty：mall_id 必须从事件上取
+    mall_id: eventMallId(ctx, evt),
+    site: ctx.site || evt.site || null,
     product_skc_id: skc,
     product_name: null,
     ...props,
