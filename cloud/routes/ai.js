@@ -26,6 +26,9 @@ function getUpstream(kind, subPath = "") {
       return {
         base: process.env.AI_DRAW_BASE_URL || "https://grsaiapi.com",
         key: process.env.AI_DRAW_KEY,
+        // AI_MODEL_REWRITE 是给 vectorengine 生图通道的映射（gpt-image-2→-c），
+        // grsai 只认原名，误改写会「model not found」（2026-07-08 踩坑）
+        skipModelRewrite: true,
       };
     }
     return {
@@ -132,7 +135,7 @@ async function proxy(kind, req, res) {
     const upstream = await fetch(url, {
       method: req.method,
       headers,
-      body: hasBody ? JSON.stringify(rewriteModel(req.body ?? {})) : undefined,
+      body: hasBody ? JSON.stringify(up.skipModelRewrite ? (req.body ?? {}) : rewriteModel(req.body ?? {})) : undefined,
       signal: controller.signal,
     });
     const ct = upstream.headers.get("content-type") || "application/json";
