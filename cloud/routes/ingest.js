@@ -44,11 +44,21 @@ r.get("/v1/health", authMiddleware, (req, res) => {
 // Activity library backfill targets. The extension can ask the cloud which SKCs
 // need a fresh marketing/enroll/list snapshot, then fetch those in the browser
 // context where Temu cookies are available.
+// 结果缓存 10 分钟：此查询对三张大表做全表聚合（活动表爆量后单次可达秒级），
+// 而全部设备每隔几秒轮询一次；不缓存会把单线程事件循环彻底拖死（2026-07-08 事故）。
+const activityTargetsCache = new Map(); // key -> { at, body }
+const ACTIVITY_TARGETS_TTL_MS = 10 * 60 * 1000;
 r.get("/v1/activity-targets", authMiddleware, (req, res) => {
   const db = getDb();
   const tenantId = req.user.tid;
   const limit = Math.min(1200, Math.max(1, Number(req.query.limit) || 800));
   const perGroupLimit = Math.min(200, Math.max(1, Number(req.query.per_group_limit) || 120));
+  const cacheKey = `${tenantId}|${limit}|${perGroupLimit}`;
+  const hit = activityTargetsCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < ACTIVITY_TARGETS_TTL_MS) {
+    res.json(hit.body);
+    return;
+  }
   try {
     const rows = db.prepare(`
       WITH latest_sales AS (
@@ -151,7 +161,9 @@ r.get("/v1/activity-targets", authMiddleware, (req, res) => {
       }
     }
     const targets = Array.from(groups.values()).filter((group) => group.skc_ids.length);
-    res.json({ ok: true, targets, count: rows.length, generated_at: Date.now() });
+    const body = { ok: true, targets, count: rows.length, generated_at: Date.now() };
+    activityTargetsCache.set(cacheKey, { at: Date.now(), body });
+    res.json(body);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
       res.json({ ok: true, targets: [], count: 0, generated_at: Date.now() });
