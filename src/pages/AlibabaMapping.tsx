@@ -926,7 +926,7 @@ export default function AlibabaMapping() {
         message.error("请填写可识别商品号的 1688 地址");
         return;
       }
-      if (!values.externalSpecId && !values.isNoSpec) {
+      if (!values.externalSpecId && !values.isNoSpec && !pendingUrlSpecs.length) {
         message.error("请先解析 1688 地址并选择要绑定的规格");
         return;
       }
@@ -1600,6 +1600,7 @@ export default function AlibabaMapping() {
           <Form.Item name="moq" hidden><InputNumber /></Form.Item>
           <Form.Item name="status" hidden><Input /></Form.Item>
           <Form.Item name="isDefault" hidden valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item name="isNoSpec" hidden valuePropName="checked"><Switch /></Form.Item>
         </Form>
       </Modal>
 
