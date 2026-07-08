@@ -23,7 +23,7 @@ class ApprovalQueue extends EventEmitter {
         await execute(this._db, `
           INSERT INTO erp_agent_approvals
             (id, run_id, tool_name, tool_input, status, created_at)
-          VALUES ($1, $2, $3, $4, 'pending', datetime('now'))
+          VALUES ($1, $2, $3, $4, 'pending', NOW())
         `, [id, item.runId, item.toolName, JSON.stringify(item.toolInput || {})]);
       } catch (error) {
         console.warn("[ApprovalQueue] DB write failed:", error?.message);
@@ -112,7 +112,7 @@ class ApprovalQueue extends EventEmitter {
     try {
       await execute(this._db, `
         UPDATE erp_agent_approvals
-        SET status = $1, reject_reason = $2, resolved_at = datetime('now')
+        SET status = $1, reject_reason = $2, resolved_at = NOW()
         WHERE id = $3
       `, [status, reason, id]);
     } catch (error) {

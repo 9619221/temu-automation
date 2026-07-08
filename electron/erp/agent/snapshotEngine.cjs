@@ -28,13 +28,13 @@ class SnapshotEngine {
     try {
       const purchaseSummary = await queryOne(db, `
         SELECT
-          SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_count,
-          SUM(CASE WHEN status = 'approved_to_pay' THEN 1 ELSE 0 END) AS pending_payment_count,
-          SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_count,
-          SUM(CASE WHEN status = 'arrived' THEN 1 ELSE 0 END) AS arrived_count,
-          SUM(CASE WHEN status = 'inbounded' THEN 1 ELSE 0 END) AS inbounded_count
+          COUNT(*) FILTER (WHERE status = 'draft') AS draft_count,
+          COUNT(*) FILTER (WHERE status = 'approved_to_pay') AS pending_payment_count,
+          COUNT(*) FILTER (WHERE status = 'paid') AS paid_count,
+          COUNT(*) FILTER (WHERE status = 'arrived') AS arrived_count,
+          COUNT(*) FILTER (WHERE status = 'inbounded') AS inbounded_count
         FROM erp_purchase_orders
-        WHERE created_at > datetime('now', '-30 days')
+        WHERE created_at::timestamptz > NOW() - INTERVAL '30 days'
       `, []);
       snapshot.sections.purchase = {
         label: "采购",
@@ -52,7 +52,7 @@ class SnapshotEngine {
     try {
       const stockAlerts = await queryAll(db, `
         SELECT internal_sku_code AS sku_code, product_name AS name,
-               CAST(COALESCE(jst_actual_stock_qty, 0) AS INTEGER) AS stock
+               COALESCE(jst_actual_stock_qty, 0)::int AS stock
         FROM erp_skus
         WHERE status = 'active' AND COALESCE(jst_actual_stock_qty, 0) < 50
         ORDER BY COALESCE(jst_actual_stock_qty, 0) ASC
@@ -75,11 +75,11 @@ class SnapshotEngine {
     try {
       const flowSummary = await queryAll(db, `
         SELECT m.mall_name, f.stat_date,
-               SUM(CAST(f.expose_num AS INTEGER)) AS total_exposure,
-               SUM(CAST(f.click_num AS INTEGER)) AS total_clicks,
-               SUM(CAST(f.detail_visitor_num AS INTEGER)) AS total_detail,
-               SUM(CAST(f.add_to_cart_user_num AS INTEGER)) AS total_cart,
-               SUM(CAST(f.buyer_num AS INTEGER)) AS total_buyers
+               SUM(CAST(f.expose_num AS BIGINT)) AS total_exposure,
+               SUM(CAST(f.click_num AS BIGINT)) AS total_clicks,
+               SUM(CAST(f.detail_visitor_num AS BIGINT)) AS total_detail,
+               SUM(CAST(f.add_to_cart_user_num AS BIGINT)) AS total_cart,
+               SUM(CAST(f.buyer_num AS BIGINT)) AS total_buyers
         FROM temu_product_flow_snapshot f
         LEFT JOIN erp_temu_malls m ON m.mall_id = f.mall_id
         WHERE f.stat_date >= $1
