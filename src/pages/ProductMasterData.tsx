@@ -1498,7 +1498,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           }
         }
         if (!mountedRef.current) return;
-        const updated = Number(response?.result?.updated || 0);
+        const updated = Number(response?.result?.updated || 0) + Number(response?.result?.updated1688 || 0);
         if (response?.ok && updated > 0) {
           message.success(`已补全 ${updated} 个 SKU 的商品图`);
           void loadAll({ silent: true });
@@ -2241,6 +2241,12 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   );
 
   const bundleColumns: ColumnsType<BundleComponentView> = [
+    {
+      title: "图片",
+      key: "image",
+      width: 64,
+      render: (_value, row) => (row.sku ? renderSkuImage(row.sku, 40) : "-"),
+    },
     {
       title: "普通商品",
       key: "sku",
