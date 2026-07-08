@@ -1,5 +1,6 @@
 import { Router } from "express";
 import crypto from "crypto";
+import { Worker } from "node:worker_threads";
 import { getDb } from "../db/connection.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { dispatchParsers } from "../parsers.js";
@@ -682,7 +683,38 @@ r.get("/v1/addstock-tasks/status", authMiddleware, (req, res) => {
   }
 });
 
-r.post("/v1/batch", authMiddleware, async (req, res) => {
+// ===== 采集入库 worker（2026-07-08 事故治理）=====
+// better-sqlite3 同步写库在洪峰期会把主线程事件循环卡死几十秒，login/dashboard/
+// 心跳全部 502。/v1/batch 改为：主线程只鉴权+设备 upsert+入队应答，enrich/落库/
+// parser 全部交给 ingest-worker.js 串行消费。队列积压超限时返回 429，扩展侧
+// ingest-queue 会自行重试，数据不丢。
+let ingestWorker = null;
+let pendingItems = 0;
+const MAX_PENDING_ITEMS = 30_000;
+
+function ensureIngestWorker() {
+  if (ingestWorker) return ingestWorker;
+  const workerPath = new URL("../ingest-worker.js", import.meta.url);
+  ingestWorker = new Worker(workerPath);
+  ingestWorker.on("message", (msg) => {
+    pendingItems = Math.max(0, pendingItems - (Number(msg?.itemCount) || 0));
+    if (msg && msg.ok === false) console.warn("[ingest] worker batch failed:", msg.error);
+  });
+  ingestWorker.on("error", (err) => {
+    console.error("[ingest] worker error, will respawn:", err?.message);
+    ingestWorker = null;
+    pendingItems = 0;
+  });
+  ingestWorker.on("exit", (code) => {
+    if (code !== 0) console.error("[ingest] worker exited with code", code);
+    ingestWorker = null;
+    pendingItems = 0;
+  });
+  ingestWorker.unref();
+  return ingestWorker;
+}
+
+r.post("/v1/batch", authMiddleware, (req, res) => {
   const { items } = req.body || {};
   if (!Array.isArray(items)) return res.status(400).json({ error: "items 必须是数组" });
 
@@ -690,7 +722,7 @@ r.post("/v1/batch", authMiddleware, async (req, res) => {
   const deviceUuid = req.headers["x-device-id"] || null;
   const tenant_id = req.user.tid;
 
-  // 1. upsert device
+  // 设备 upsert 留在主线程（毫秒级），保证 last_seen 即时
   let device_id = null;
   if (deviceUuid) {
     const exist = db.prepare("SELECT id FROM devices WHERE device_uuid = ?").get(deviceUuid);
@@ -706,104 +738,20 @@ r.post("/v1/batch", authMiddleware, async (req, res) => {
     }
   }
 
-  // 2. 批量写入 + 维度统计 + mall upsert
-  const insertEvt = db.prepare(`
-    INSERT INTO capture_events
-    (id, tenant_id, device_id, mall_id, site, page, kind, method, url, url_path, status, body_size, body_json, ts, captured_at, received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const upsertStat = db.prepare(`
-    INSERT INTO api_endpoint_stats (tenant_id, site, method, url_path, count_total, last_seen)
-    VALUES (?, ?, ?, ?, 1, ?)
-    ON CONFLICT(tenant_id, site, method, url_path)
-    DO UPDATE SET count_total = count_total + 1, last_seen = excluded.last_seen
-  `);
-  const upsertMall = db.prepare(`
-    INSERT INTO mall_accounts (id, tenant_id, site, mall_id, mall_name, last_seen)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(tenant_id, site, mall_id)
-    DO UPDATE SET
-      mall_name = COALESCE(excluded.mall_name, mall_accounts.mall_name),
-      last_seen = excluded.last_seen
-  `);
-
-  const now = Date.now();
-  let inserted = 0;
-
-  // 单条 enrich：生成 event id + url_path + body 落库/parser 用的 json
-  const enrichOne = (it) => {
-    const url = it.url || "";
-    const url_path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] || url;
-    const method = (it.method || "GET").toUpperCase();
-    const storedBody = attachRequestBody(it.body || null, it.requestBodyText);
-    // 完整 body 仅供 parser 在内存中使用（生成 snapshot），不一定落库
-    const parser_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
-    // 飞书等非业务路径整条不落库；Temu 大响应(>200KB)只存元数据、body_json 置空
-    const skipRow = NON_BUSINESS_PATH_RE.test(url_path);
-    // perf/perf-discovery 是浏览器性能监控事件，无任何 parser 消费（PARSERS 全按业务 url_path 匹配），
-    // 「接口发现」面板只用其元数据、不读 body_json → 落库直接清空响应体，省约 40% capture_events 体积。
-    const isPerfEvent = String(it.kind || "").startsWith("perf");
-    const body_json = (isPerfEvent || !parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
-    return { id: crypto.randomUUID(), url, url_path, method, body_json, parser_json, skipRow, it };
-  };
-
-  // 单块入库事务（小事务，逐块提交）
-  const txChunk = db.transaction((chunk) => {
-    for (const e of chunk) {
-      if (e.skipRow) continue;
-      insertEvt.run(
-        e.id,
-        tenant_id,
-        device_id,
-        e.it.mall_id || null,
-        e.it.site || null,
-        e.it.page || null,
-        e.it.kind || "unknown",
-        e.method,
-        e.url,
-        e.url_path,
-        e.it.status ?? null,
-        e.it.bodySize ?? null,
-        e.body_json,
-        Number(e.it.ts) || now,
-        Number(e.it.captured_at) || now,
-        now
-      );
-      upsertStat.run(tenant_id, e.it.site || "", e.method, e.url_path, now);
-      if (e.it.mall_id) {
-        upsertMall.run(crypto.randomUUID(), tenant_id, e.it.site || "", String(e.it.mall_id), e.it.mall_name || null);
-      }
-      inserted++;
-    }
-  });
-
-  // ★ 分块处理 + 块间 setImmediate 让出事件循环：避免单个大批量请求独占单线程
-  // 数秒、把 login/dashboard 饿死导致 Caddy 502。把一个大事务 + 全量 parser 拆成
-  // 每 CHUNK 条一个小事务 + 该块 parser，块之间让事件循环喘口气。
-  const CHUNK = 150;
-  const yieldLoop = () => new Promise((resolve) => setImmediate(resolve));
-  for (let i = 0; i < items.length; i += CHUNK) {
-    const enriched = items.slice(i, i + CHUNK).map(enrichOne);
-    txChunk(enriched);
-    // parser 在主事务外跑，失败不影响 ingest 主流程
-    try {
-      const parserItems = enriched.filter((e) => !e.skipRow).map((e) => ({
-        id: e.id,
-        url_path: e.url_path,
-        page: e.it.page || null,
-        body_json: e.parser_json,
-        ts: Number(e.it.ts) || now,
-        mall_id: e.it.mall_id || null,
-        site: e.it.site || null,
-      }));
-      dispatchParsers(db, { tenant_id, device_id }, parserItems);
-    } catch (e) {
-      console.warn("[ingest] dispatchParsers failed:", e?.message);
-    }
-    if (i + CHUNK < items.length) await yieldLoop();
+  if (pendingItems + items.length > MAX_PENDING_ITEMS) {
+    return res.status(429).json({ error: "ingest_backlog", retry: true, pending: pendingItems });
   }
 
-  res.json({ ok: true, inserted });
+  try {
+    const worker = ensureIngestWorker();
+    pendingItems += items.length;
+    worker.postMessage({ id: crypto.randomUUID(), tenant_id, device_id, items, now: Date.now() });
+  } catch (err) {
+    console.error("[ingest] enqueue failed:", err?.message);
+    return res.status(500).json({ error: "ingest_enqueue_failed" });
+  }
+
+  res.json({ ok: true, inserted: items.length, queued: true });
 });
 
 // 合规属性查询：桌面端打印标签时拉取制造商/欧代/土代/进口商
