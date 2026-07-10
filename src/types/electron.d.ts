@@ -745,6 +745,7 @@ interface ErpAPI {
     delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
     saveBundle: (payload: {
       id?: string;
+      requestKey?: string;
       accountId?: string;
       internalSkuCode?: string;
       productName: string;

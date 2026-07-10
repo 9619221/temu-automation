@@ -1876,16 +1876,22 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     );
   };
 
+  // 组合装保存幂等键：新建时生成，保存失败/超时重试沿用同一 key，后端命中已建记录不重复建单
+  const bundleRequestKeyRef = useRef<string>("");
+
   const resetBundleModal = () => {
     setBundleModalOpen(false);
     setEditingBundleSku(null);
     setBundleComponents([]);
     setBundleLoadingComponents(false);
     bundleForm.resetFields();
+    bundleRequestKeyRef.current = "";
   };
 
   const openBundleModal = async (row?: ErpSkuRow, initialSkus: ErpSkuRow[] = []) => {
     const bundleSku = row || null;
+    // 新建生成新幂等键；编辑不需要（走 id 更新）
+    bundleRequestKeyRef.current = bundleSku?.id ? "" : crypto.randomUUID();
     setEditingBundleSku(bundleSku);
     bundleForm.resetFields();
     bundleForm.setFieldsValue({
@@ -1956,6 +1962,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     try {
       await erp.sku.saveBundle({
         id: editingBundleSku?.id,
+        requestKey: editingBundleSku?.id ? undefined : bundleRequestKeyRef.current,
         accountId: values.accountId,
         internalSkuCode: values.internalSkuCode,
         productName: values.productName,
