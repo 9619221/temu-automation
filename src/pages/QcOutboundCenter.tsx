@@ -1349,7 +1349,15 @@ export default function QcOutboundCenter() {
           if (!Array.isArray(itemsArr)) itemsArr = [];
         }
       }
-      const skus = itemsArr.filter((it: any) => it.skuId && Number(it.qty) > 0).map((it: any) => ({ productSkuId: Number(it.skuId), qty: Number(it.qty), skuName: it.name || "", spec: it.propertiesValue || "" }));
+      const skus = itemsArr.filter((it: any) => it.skuId && Number(it.qty) > 0).map((it: any) => ({ productSkuId: Number(it.skuId), qty: Number(it.qty), skuName: it.name || "", spec: it.propertiesValue || "", adviceQty: null as number | null }));
+      // 平台建议备货量（最大备货数）：超过它下备货单会被官方 1002 拒，弹窗里给到参照
+      if (skus.length) {
+        try {
+          const adv = await erp.inventory.action({ action: "consign_sku_advice", mallId: firstMallId, productSkuIds: skus.map((s: any) => String(s.productSkuId)) });
+          const advMap = new Map((adv?.rows || []).map((r: any) => [String(r.productSkuId), r.adviceQty]));
+          for (const s of skus) { const a = advMap.get(String(s.productSkuId)); if (typeof a === "number") s.adviceQty = a; }
+        } catch { /* 建议量拿不到不影响发货 */ }
+      }
       const defaultPkg = skus.map((s: any) => ({ productSkuId: s.productSkuId, skuNum: s.qty }));
       setCreateShipModal((s) => s ? { ...s, loading: false, addresses: addrs, selectedAddressId: defaultAddr?.id || "", skus, packages: defaultPkg.length ? [defaultPkg] : [] } : s);
     } catch (e: any) {
@@ -2445,6 +2453,11 @@ export default function QcOutboundCenter() {
                           {sku.spec && <span style={{ color: "#999", marginLeft: 8, fontSize: 12 }}>{sku.spec}</span>}
                         </div>
                         <span style={{ whiteSpace: "nowrap", marginLeft: 12 }}>
+                          {typeof (sku as any).adviceQty === "number" && (
+                            <span style={{ color: sku.qty > (sku as any).adviceQty ? "#fa8c16" : "#999", fontSize: 12, marginRight: 8 }}>
+                              建议备货 {(sku as any).adviceQty}
+                            </span>
+                          )}
                           发货 {sku.qty}　已分配 {allocated}
                           <span style={{ color: remaining !== 0 ? "#ff4d4f" : "#52c41a", fontWeight: 500 }}>剩余 {remaining}</span>
                         </span>
