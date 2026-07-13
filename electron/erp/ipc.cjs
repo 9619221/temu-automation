@@ -30,6 +30,7 @@ const {
   unshipCloudConsignDelivery,
   setCloudConsignItemShipQty
 } = require("./services/consignDeliverShip.cjs");
+const { quickPullNewConsign } = require("./services/temuOpenApiQuickPull.cjs");
 const {
   getOfficialShipPreview,
   fetchStagingSkusDetailed,
@@ -23662,7 +23663,10 @@ async function listSkuSwapItems(db, docId) {if (!db || !docId) return [];let leg
       AND external_offer_id = @external_offer_id
       AND external_sku_id = @external_sku_id
       AND external_spec_id = @external_spec_id
-  `, [row]);return toSku1688Source(after);}async function deleteSku1688SourceRow(db, payload = {}, actor = {}) {assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源删除");const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");const row = await queryOne(db, "SELECT * FROM erp_sku_1688_sources WHERE id = ?", [sourceId]);if (!row) throw new Error(`1688 supplier mapping not found: ${sourceId}`);const now = nowIso();await execute(db, `
+  `, [row]);
+  // 货源单价是无库存 SKU 的成本来源，绑定/改价后重算该子商品所属组合装的成本快照。
+  try {await refreshBundleCostForSkus(db, [skuId]);} catch (e) {try {console.warn("[bundle-cost] refresh after 1688 source upsert failed:", e?.message || e);} catch {}}
+  return toSku1688Source(after);}async function deleteSku1688SourceRow(db, payload = {}, actor = {}) {assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源删除");const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");const row = await queryOne(db, "SELECT * FROM erp_sku_1688_sources WHERE id = ?", [sourceId]);if (!row) throw new Error(`1688 supplier mapping not found: ${sourceId}`);const now = nowIso();await execute(db, `
     UPDATE erp_sku_1688_sources
     SET status = 'deleted',
         is_default = 0,
@@ -23681,7 +23685,10 @@ async function listSkuSwapItems(db, docId) {if (!db || !docId) return [];let leg
         SET is_default = 1,
             updated_at = @updated_at
         WHERE id = @id
-      `, { id: next.id, updated_at: now });}}const after = await queryOne(db, "SELECT * FROM erp_sku_1688_sources WHERE id = ?", [sourceId]);return { deleted: true, promotedSourceId, sku1688Source: toSku1688Source(after) };}async function findSku1688SourceByIdentity(db, params = {}) {const accountId = optionalString(params.accountId || params.account_id);const skuId = optionalString(params.skuId || params.sku_id);const externalOfferId = optionalString(params.externalOfferId || params.external_offer_id);if (!accountId || !skuId || !externalOfferId) return null;return await queryOne(db, `
+      `, { id: next.id, updated_at: now });}}const after = await queryOne(db, "SELECT * FROM erp_sku_1688_sources WHERE id = ?", [sourceId]);
+  // 删除/切换默认货源后，该子商品的成本来源变了，重算所属组合装成本快照。
+  try {await refreshBundleCostForSkus(db, [row.sku_id]);} catch (e) {try {console.warn("[bundle-cost] refresh after 1688 source delete failed:", e?.message || e);} catch {}}
+  return { deleted: true, promotedSourceId, sku1688Source: toSku1688Source(after) };}async function findSku1688SourceByIdentity(db, params = {}) {const accountId = optionalString(params.accountId || params.account_id);const skuId = optionalString(params.skuId || params.sku_id);const externalOfferId = optionalString(params.externalOfferId || params.external_offer_id);if (!accountId || !skuId || !externalOfferId) return null;return await queryOne(db, `
     SELECT *
     FROM erp_sku_1688_sources
     WHERE account_id = @account_id
@@ -26026,7 +26033,20 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {con
         // 与送仓托管统一查询/采购 workbench 对齐放宽到 120s，避免「连接主控端超时」。
         timeoutMs: 120000 });return payload.workbench || {};}return await getOutboundWorkbench(params);}async function performOutboundActionRuntime(payload = {}) {if (shouldUseClientRuntime()) {ensureClientRuntime();const response = await remoteRequest("/api/outbound/action", { method: "POST", body: payload });return response.result;}const actor = getCurrentSessionActor(payload?.actor || {});return await performOutboundAction(payload || {}, actor);} // 直接库存动作（不走 outbound_shipment 单据流转）：
 // purchase_return / customer_return / platform_return_to_warehouse / transfer_between_accounts / swap_sku
-async function performInventoryAction(payload = {}, actorInput = {}) {const { db, services } = requireErp();const action = requireString(payload.action, "action");const actor = normalizeActor(actorInput);const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");switch (action) {case "purchase_return":{// 自家仓退给 1688 供应商。库存按 FIFO 扣，并按退货单价冲减 SKU 货值、重算剩余均价。
+// 直接库存动作（换货/退货/调拨等）会改子商品成本，完成后重算受影响组合装的成本快照。
+// 只覆盖真正动成本的动作；consign 系列不动 SKU 成本，不触发。
+const BUNDLE_COST_INVENTORY_ACTIONS = new Set(["purchase_return", "customer_return", "platform_return_to_warehouse", "transfer_between_accounts", "swap_sku", "revert_swap_sku"]);
+async function performInventoryAction(payload = {}, actorInput = {}) {
+  const result = await performInventoryActionCore(payload, actorInput);
+  if (BUNDLE_COST_INVENTORY_ACTIONS.has(String(payload?.action || ""))) {
+    const skuIds = [payload?.skuId, payload?.fromSkuId, payload?.toSkuId, result?.fromSkuId, result?.toSkuId].filter(Boolean);
+    if (skuIds.length) {
+      try {const { db } = requireErp();await refreshBundleCostForSkus(db, skuIds);} catch (e) {try {console.warn("[bundle-cost] refresh after inventory action failed:", e?.message || e);} catch {}}
+    }
+  }
+  return result;
+}
+async function performInventoryActionCore(payload = {}, actorInput = {}) {const { db, services } = requireErp();const action = requireString(payload.action, "action");const actor = normalizeActor(actorInput);const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");switch (action) {case "purchase_return":{// 自家仓退给 1688 供应商。库存按 FIFO 扣，并按退货单价冲减 SKU 货值、重算剩余均价。
         // unit_cost 按调用方传的退货单价/PO 原单价；它会进入库存货值公式。
         const accountId = requireString(payload.accountId, "accountId");const skuId = requireString(payload.skuId, "skuId");const qty = positiveInteger(payload.qty, 0);if (qty <= 0) throw new Error("qty must be positive");return { action, lines: await services.inventory.applyDirectOutbound({ accountId, skuId, qty, unitCost: optionalNumber(payload.unitCost), // PO 原单价（业务侧传）
               ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN, sourceDocType: payload.sourceDocType || "purchase_return", sourceDocId: optionalString(payload.sourceDocId) || "", affectSkuTotal: true, actor }) };}case "customer_return":{// 消费者退到平台仓。库存 +N，均价不变（按当前 SKU 加权成本回灌，数学上不变）。
@@ -26059,7 +26079,8 @@ async function performInventoryAction(payload = {}, actorInput = {}) {const { db
         // performInventoryAction 是同步函数，官方接口是异步，故本 case 返回 promise（调用方都会 await）。
         const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = optionalString(payload.soId || payload.so_id);return getOfficialShipPreview({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));}case "consign_official_staging_detail":{// 加入发货台 + 返回 SKU 明细（供前端包裹编辑器使用）。
         const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id, "subPurchaseOrderSn");return fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn: soId }).then((skus) => ({ action, skus }));}case "consign_official_staging_add":{// 加入发货台（单个备货单，独立按钮用）。
-        const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");return stagingAddOfficial({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));}case "consign_official_shiporder_lookup":{const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");return lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));}case "consign_sync_ship_status":{const soIds = Array.isArray(payload.soIds) ? payload.soIds.map(String).filter(Boolean) : [];if (!soIds.length) return { action, updated: 0 };return syncShipOrderStatus({ db, soIds }).then((r) => ({ action, ...r }));}case "consign_official_ship_create":{// 创建官方发货单（生成 FH 单，可撤销、不真发货）。skuList=[{productSkuId,qty}]。
+        const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");return stagingAddOfficial({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));}case "consign_official_shiporder_lookup":{const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");return lookupDeliveryOrderSn({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));}case "consign_sync_ship_status":{const soIds = Array.isArray(payload.soIds) ? payload.soIds.map(String).filter(Boolean) : [];if (!soIds.length) return { action, updated: 0 };return syncShipOrderStatus({ db, soIds }).then((r) => ({ action, ...r }));}case "consign_quick_pull":{// 新备货单快速通道：按需从官方接口拉近 48h 新单补进本地（60s 防抖，见 temuOpenApiQuickPull.cjs）。
+        return quickPullNewConsign({ db, force: payload.force === true }).then((r) => ({ action, ...r }));}case "consign_official_ship_create":{// 创建官方发货单（生成 FH 单，可撤销、不真发货）。skuList=[{productSkuId,qty}]。
         const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");const skuList = Array.isArray(payload.skuList) ? payload.skuList : [];const deliveryAddressId = optionalString(payload.deliveryAddressId);const packageCount = Number(payload.packageCount) || 1;const rawPackages = Array.isArray(payload.packages) ? payload.packages : null;return createOfficialShipOrder({ db, mallId, subPurchaseOrderSn: soId, skuList, deliveryAddressId, packageCount, packages: rawPackages }).then((r) => ({ action, ...r }));}case "consign_official_ship_cancel":{// 撤销官方发货单（仅 FH 未物流下单可撤）。
         const mallId = requireString(payload.mallId || payload.mall_id, "mallId");const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");const cancelSoId = optionalString(payload.soId || payload.so_id);return cancelOfficialShipOrder({ db, mallId, deliveryOrderSn, subPurchaseOrderSn: cancelSoId }).then((r) => ({ action, ...r }));}case "consign_official_logistics_companies":{// 快递公司字典（自寄兜底；全托管店多返回空，主路径用 logistics_match）。
         const mallId = requireString(payload.mallId || payload.mall_id, "mallId");return getOfficialLogisticsCompanies({ db, mallId }).then((companies) => ({ action, companies }));}case "consign_official_logistics_match":{// 平台推荐物流商匹配（logisticsmatch.get）：选哪家上门揽收 + 运费 + predictId。
