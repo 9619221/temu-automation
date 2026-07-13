@@ -2137,7 +2137,7 @@ export default function QcOutboundCenter() {
                 if (soIds.length && erp?.inventory?.action) {
                   try { await erp.inventory.action({ action: "consign_sync_ship_status", soIds }); } catch { /* ignore */ }
                 }
-                void loadUnified({
+                const reload = () => loadUnified({
                   page: unifiedPage,
                   pageSize: unifiedPageSize,
                   search: stockQuery,
@@ -2150,6 +2150,19 @@ export default function QcOutboundCenter() {
                   source: unifiedSource,
                   notify: true,
                 });
+                void reload();
+                // 新备货单快速通道：后台从官方接口拉近 48h 新单（服务端 60s 防抖），拉到再刷一次列表
+                if (erp?.inventory?.action) {
+                  void (async () => {
+                    try {
+                      const r: any = await erp.inventory.action({ action: "consign_quick_pull" });
+                      if (r?.inserted > 0) {
+                        message.success(`发现 ${r.inserted} 个新备货单`);
+                        void reload();
+                      }
+                    } catch { /* 快速通道失败不影响常规刷新 */ }
+                  })();
+                }
               }}
             >
               刷新
