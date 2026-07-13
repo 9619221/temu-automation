@@ -81,9 +81,20 @@
 - 需要 review / 协作时再走 PR：claude/* 或 codex/* 分支 → PR → 合 master；master 是唯一 base，**禁止 PR base 在 goofy-wing 或其他长期分支**
 - 紧急 hotfix：直接在 master 改完提交即可，或 fast-track PR
 
+## 服务器架构实况（2026-07-13 实测更新，覆盖下文过时表述）
+
+- **ERP 真身在 `temu-db`（43.161.201.83）**，`erp.temu.chat` DNS 也指向它。`temu-erp.service` 在这台上跑，数据库已切 **PostgreSQL**（`PG_CONNECTION_STRING` → 10.5.0.12/erp_production），`/opt/temu-erp-data/erp.sqlite` 已废弃（36 字节空壳）。
+- **香港机 `temu-erp`（43.161.214.204）只剩网关/云采集**：caddy、temu-cloud、AI 生图/代理还在，`temu-erp.service` 已停。它 caddy 的 `/releases` 目录不再对外生效（域名不指它了）。
+- **更新包（latest.yml + exe）要传 `temu-db:/opt/temu-updates/releases/`**，不是香港机。exe 由服务器直出（HTTP 200），文档旧说法「exe 302 跳 GitHub」已不成立，但 GitHub Releases 仍要照发（双源）。
+- **发版机是局域网 192.168.8.241**（Windows，有 auto-image-gen 出图运行时、签名工具链、`~/.ssh/config` 的 temu-erp/temu-db 别名与 `codex_temu_server_admin` 密钥）。本机（win-0cdc33n3ijq）已复制同款密钥并配好 `temu-erp` / `temu-db` 别名。
+- **传大文件的靠谱路径**：发版机直传服务器的通道极不稳定（可整段停滞）。实测可用：发版机 →（局域网 scp，秒级）→ 本机 →（直传 temu-db，约 1-2MB/s，178MB 约 3 分钟）。GitHub 大资产从香港服务器用 API curl 上传最快（国际带宽）。
+- **发版前置检查**：`verify-release-prereqs` 的 ANALYZE_API_KEY 在线连通性检查是裸 https 直连（不走代理），此网络环境下时通时断；可 `SKIP_ANALYZE_LIVE_CHECK=1` 跳过（密钥/配置一致性检查仍会跑）。
+- **GitHub 发布**：发版机 ssh 会话里 `gh auth token` 读不到 Windows 凭据库；用本机 `git credential fill` 取 token 后经 API 操作，或设 `GH_TOKEN` 环境变量。
+- **同步前先做全量哈希比对**（本地 LF 归一化后 sha256 vs 服务器），只传差异文件——2026-07-13 实测服务器与 master 仅差 2 个文件，说明日常有人在保持同步，不要盲目全量覆盖。
+
 ## 服务器代码同步
 
-erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。每次桌面端发版（步骤 8 验证通过）后**立即同步**，规则：
+erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。每次桌面端发版（步骤 8 验证通过）后**立即同步**，规则（⚠️ 下文命令里的 `ssh temu-erp` 与 sqlite 快照已过时，按上节实况执行：主机用 `temu-db`，数据库快照用 PG 侧手段或省略——纯代码同步且有 .bak 回滚时可不做）：
 
 ### 同步范围
 
