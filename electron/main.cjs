@@ -2737,6 +2737,13 @@ async function switchImageStudioProfile(profile) {
     lastImageStudioConfigSignature = "";
     lastImageStudioConfigSyncAt = 0;
 
+    // AI 出图业务已全量走云端（erp.temu.chat/agent），本地子进程仅为可选遗留。
+    // 本机未安装本地运行时，切完 profile 直接返回，不再尝试拉起本地子进程（避免每次调用刷「未找到 AI 出图运行时」错误）。
+    if (!resolveAutoImageProjectDir()?.projectPath) {
+      const status = updateImageStudioStatus({ status: "stopped", ready: false, message: "AI 出图走云端，本地运行时未安装" });
+      return { profile: currentImageStudioProfile, status };
+    }
+
     await stopImageStudioServiceInternal({ updateStatus: false });
     updateImageStudioStatus({ status: "starting", ready: false, message: "正在切换生图 profile…" });
 
@@ -4543,11 +4550,13 @@ app.whenReady().then(async () => {
   // 载入持久化的 AI 凭证覆盖 (用户在 Settings 中设置的 Key)
   hydrateImageStudioRuntimeConfigFromDisk();
 
-  const imageStudioStartupPromise = ensureImageStudioService()
-    .then((status) => {
-      console.log("[Main] Image studio auto-started successfully");
-      return status;
-    })
+  // AI 出图业务已全量走云端，本地运行时未安装时跳过预热，不再报错
+  const imageStudioStartupPromise = (resolveAutoImageProjectDir()?.projectPath
+    ? ensureImageStudioService().then((status) => {
+        console.log("[Main] Image studio auto-started successfully");
+        return status;
+      })
+    : Promise.resolve(updateImageStudioStatus({ status: "stopped", ready: false, message: "AI 出图走云端，本地运行时未安装" })))
     .catch((e) => {
       console.error("[Main] Image studio auto-start failed (will retry on demand):", e.message);
       return null;
