@@ -46,9 +46,13 @@ function Get-VersionFromLatest {
 }
 
 function Get-GitHubToken {
+  # 优先 GH_TOKEN 环境变量（无 gh CLI 的机器用 git credential fill 取 token 后传入）
+  if ($env:GH_TOKEN) {
+    return $env:GH_TOKEN.Trim()
+  }
   $token = (& gh auth token 2>$null | Out-String).Trim()
   if (-not $token) {
-    throw "gh auth token returned empty. Run: gh auth login"
+    throw "gh auth token returned empty. Run: gh auth login (or set GH_TOKEN)"
   }
   return $token
 }
