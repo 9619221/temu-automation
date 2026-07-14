@@ -2431,6 +2431,8 @@ export default function QcOutboundCenter() {
               {createShipModal?.addresses.length ? (
                 <Select
                   style={{ width: "100%" }}
+                  showSearch
+                  optionFilterProp="label"
                   value={createShipModal?.selectedAddressId}
                   onChange={(v) => setCreateShipModal((s) => s ? { ...s, selectedAddressId: v } : s)}
                   options={createShipModal?.addresses.map((a) => ({ value: a.id, label: `${a.label}${a.isDefault ? "（默认）" : ""}` }))}
