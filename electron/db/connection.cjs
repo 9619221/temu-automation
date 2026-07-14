@@ -410,6 +410,10 @@ async function withTransaction(db, fn) {
       client.release();
     }
   } else {
+    // sqlite 不支持嵌套 BEGIN：已在事务里就直接并入外层事务（提交/回滚由最外层负责）
+    if (db.inTransaction) {
+      return await fn(db);
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
       const result = await fn(db);
