@@ -140,6 +140,8 @@ async function fetchStagingSkusDetailed({ db, mallId, subPurchaseOrderSn }) {
       map((d) => ({
         productSkuId: Number(d.productSkuId),
         qty: Number(d.productSkuPurchaseQuantity),
+        // 官方发货上限（商家后台「实际发货数 最大不超过 N」同源字段），前端输入框按它封顶
+        maxQty: d.skuDeliveryQuantityMaxLimit != null ? Number(d.skuDeliveryQuantityMaxLimit) : null,
         skuName: d.productName || d.skuName || "",
         spec: d.productSkuSpec || d.spec || "",
         thumbUrl: d.thumbUrl || d.skuImgUrl || ""

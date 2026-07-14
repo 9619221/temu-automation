@@ -1349,14 +1349,14 @@ export default function QcOutboundCenter() {
           if (!Array.isArray(itemsArr)) itemsArr = [];
         }
       }
-      const skus = itemsArr.filter((it: any) => it.skuId && Number(it.qty) > 0).map((it: any) => ({ productSkuId: Number(it.skuId), qty: Number(it.qty), skuName: it.name || "", spec: it.propertiesValue || "", adviceQty: null as number | null }));
-      // 平台建议备货量（最大备货数）：超过它下备货单会被官方 1002 拒，弹窗里给到参照
+      const skus = itemsArr.filter((it: any) => it.skuId && Number(it.qty) > 0).map((it: any) => ({ productSkuId: Number(it.skuId), qty: Number(it.qty), skuName: it.name || "", spec: it.propertiesValue || "", maxQty: null as number | null }));
+      // 官方发货上限（发货台 skuDeliveryQuantityMaxLimit，= 商家后台「最大不超过 N」）：输入框按它封顶
       if (skus.length) {
         try {
-          const adv = await erp.inventory.action({ action: "consign_sku_advice", mallId: firstMallId, productSkuIds: skus.map((s: any) => String(s.productSkuId)) });
-          const advMap = new Map((adv?.rows || []).map((r: any) => [String(r.productSkuId), r.adviceQty]));
-          for (const s of skus) { const a = advMap.get(String(s.productSkuId)); if (typeof a === "number") s.adviceQty = a; }
-        } catch { /* 建议量拿不到不影响发货 */ }
+          const det = await erp.inventory.action({ action: "consign_official_staging_detail", mallId: firstMallId, soId: soId0 });
+          const maxMap = new Map((det?.skus || []).map((r: any) => [String(r.productSkuId), r.maxQty]));
+          for (const s of skus) { const m = maxMap.get(String(s.productSkuId)); if (typeof m === "number" && m > 0) s.maxQty = m; }
+        } catch { /* 上限拿不到时退回按待发数封顶 */ }
       }
       const defaultPkg = skus.map((s: any) => ({ productSkuId: s.productSkuId, skuNum: s.qty }));
       setCreateShipModal((s) => s ? { ...s, loading: false, addresses: addrs, selectedAddressId: defaultAddr?.id || "", skus, packages: defaultPkg.length ? [defaultPkg] : [] } : s);
@@ -1372,12 +1372,16 @@ export default function QcOutboundCenter() {
     const { rows, selectedAddressId, packages } = createShipModal;
     const isSingle = rows.length === 1 && packages.length > 0;
     if (isSingle) {
-      const totalBySkuMap = new Map<number, number>();
-      for (const s of createShipModal.skus) totalBySkuMap.set(s.productSkuId, s.qty);
       const allocBySkuMap = new Map<number, number>();
       for (const pkg of packages) for (const item of pkg) allocBySkuMap.set(item.productSkuId, (allocBySkuMap.get(item.productSkuId) || 0) + item.skuNum);
-      for (const [id, need] of totalBySkuMap) {
-        if ((allocBySkuMap.get(id) || 0) !== need) { message.error(`SKU ${id} 分配数量不等于实际发货数 ${need}`); return; }
+      for (const s of createShipModal.skus) {
+        const alloc = allocBySkuMap.get(s.productSkuId) || 0;
+        const cap = typeof (s as any).maxQty === "number" ? (s as any).maxQty : null;
+        // 有官方上限时按上限封顶（允许超发到上限）；拿不到上限时保持旧规则：必须等于待发数
+        if (cap != null) {
+          if (alloc <= 0) { message.error(`SKU ${s.productSkuId} 未分配发货数量`); return; }
+          if (alloc > cap) { message.error(`SKU ${s.productSkuId} 分配数量 ${alloc} 超过官方发货上限 ${cap}`); return; }
+        } else if (alloc !== s.qty) { message.error(`SKU ${s.productSkuId} 分配数量不等于实际发货数 ${s.qty}`); return; }
       }
     }
     setCreateShipModal(null);
@@ -2453,13 +2457,15 @@ export default function QcOutboundCenter() {
                           {sku.spec && <span style={{ color: "#999", marginLeft: 8, fontSize: 12 }}>{sku.spec}</span>}
                         </div>
                         <span style={{ whiteSpace: "nowrap", marginLeft: 12 }}>
-                          {typeof (sku as any).adviceQty === "number" && (
-                            <span style={{ color: sku.qty > (sku as any).adviceQty ? "#fa8c16" : "#999", fontSize: 12, marginRight: 8 }}>
-                              建议备货 {(sku as any).adviceQty}
+                          {typeof (sku as any).maxQty === "number" && (
+                            <span style={{ color: "#999", fontSize: 12, marginRight: 8 }}>
+                              最大 {(sku as any).maxQty}
                             </span>
                           )}
                           发货 {sku.qty}　已分配 {allocated}
-                          <span style={{ color: remaining !== 0 ? "#ff4d4f" : "#52c41a", fontWeight: 500 }}>剩余 {remaining}</span>
+                          {remaining < 0
+                            ? <span style={{ color: "#fa8c16", fontWeight: 500 }}>超发 +{-remaining}</span>
+                            : <span style={{ color: remaining !== 0 ? "#ff4d4f" : "#52c41a", fontWeight: 500 }}>剩余 {remaining}</span>}
                         </span>
                       </div>
                     );
@@ -2483,6 +2489,9 @@ export default function QcOutboundCenter() {
                         </div>
                         {createShipModal.skus.map((sku) => {
                           const item = pkg.find((p) => p.productSkuId === sku.productSkuId);
+                          // 封顶 = 官方发货上限（无上限数据时退回待发数）－ 其他包裹已分配数
+                          const skuCap = typeof (sku as any).maxQty === "number" ? (sku as any).maxQty : sku.qty;
+                          const allocatedElsewhere = createShipModal.packages.reduce((sum, p, i) => i === pi ? sum : sum + (p.find((it) => it.productSkuId === sku.productSkuId)?.skuNum || 0), 0);
                           return (
                             <div key={sku.productSkuId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 13 }}>
                               <div style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2492,7 +2501,7 @@ export default function QcOutboundCenter() {
                               <InputNumber
                                 size="small"
                                 min={0}
-                                max={sku.qty}
+                                max={Math.max(0, skuCap - allocatedElsewhere)}
                                 value={item?.skuNum || 0}
                                 style={{ width: 70 }}
                                 onChange={(v) => setCreateShipModal((s) => {
