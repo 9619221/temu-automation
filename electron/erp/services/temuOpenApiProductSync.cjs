@@ -48,22 +48,56 @@ async function fetchGoodsPage(creds, page) {
   return { items };
 }
 
+/**
+ * 从商品 raw item 解析出「商品资料」列表要用的现成字段（mig110 列）。
+ * 与旧版 listAllTemuOpenApiProductsAsSkc 的 SQL 现场解析口径一致：
+ * ext_code 优先商品级 extCode，为空时兜底第一个非空的 SKU extCode。
+ * 同时供采集入库与历史行回填脚本（scripts/backfill-temu-openapi-product-cols.cjs）复用。
+ */
+function deriveProductListColumns(item = {}) {
+  const skus = Array.isArray(item.productSkuSummaries) ? item.productSkuSummaries : [];
+  const skcId = item.productSkcId != null && String(item.productSkcId) !== "" ? String(item.productSkcId) : null;
+  const thumbUrl = item.mainImageUrl != null && String(item.mainImageUrl) !== "" ? String(item.mainImageUrl) : null;
+  let extCode = item.extCode != null && String(item.extCode) !== "" ? String(item.extCode) : null;
+  if (!extCode) {
+    const skuWithCode = skus.find((s) => s && s.extCode != null && String(s.extCode) !== "");
+    extCode = skuWithCode ? String(skuWithCode.extCode) : null;
+  }
+  const skusJson = JSON.stringify(skus.map((s = {}) => {
+    const specList = Array.isArray(s.productSkuSpecList) ? s.productSkuSpecList : [];
+    const className = specList.map((sp) => (sp && sp.specName != null ? String(sp.specName) : "")).filter(Boolean).join("/") || null;
+    return {
+      productSkuId: s.productSkuId != null ? s.productSkuId : null,
+      skuExtCode: s.extCode != null ? String(s.extCode) : "",
+      className,
+      warehouseInventoryNum: s.virtualStock != null ? s.virtualStock : null
+    };
+  }));
+  return { skcId, thumbUrl, extCode, skusJson };
+}
+
 async function upsertProductWithSkus(db, mallId, item, now) {
   const productId = item.productId != null ? String(item.productId) : "";
   if (!productId) return 0;
   const skus = Array.isArray(item.productSkuSummaries) ? item.productSkuSummaries : [];
+  const derived = deriveProductListColumns(item);
 
   await execute(db, `
     INSERT INTO erp_temu_openapi_products
       (mall_id, product_id, product_name, jit_mode, product_properties_json,
-       sku_count, raw_json, last_synced_at, created_at, updated_at)
-    VALUES (@mall_id,@product_id,@product_name,@jit_mode,@props,@sku_count,@raw,@now,@now,@now)
+       sku_count, raw_json, skc_id, thumb_url, ext_code, skus_json,
+       last_synced_at, created_at, updated_at)
+    VALUES (@mall_id,@product_id,@product_name,@jit_mode,@props,@sku_count,@raw,@skc_id,@thumb_url,@ext_code,@skus_json,@now,@now,@now)
     ON CONFLICT(mall_id, product_id) DO UPDATE SET
       product_name=excluded.product_name,
       jit_mode=excluded.jit_mode,
       product_properties_json=excluded.product_properties_json,
       sku_count=excluded.sku_count,
       raw_json=excluded.raw_json,
+      skc_id=excluded.skc_id,
+      thumb_url=excluded.thumb_url,
+      ext_code=excluded.ext_code,
+      skus_json=excluded.skus_json,
       last_synced_at=excluded.last_synced_at,
       updated_at=excluded.updated_at
   `, {
@@ -74,6 +108,10 @@ async function upsertProductWithSkus(db, mallId, item, now) {
     props: JSON.stringify(item.productProperties || []),
     sku_count: skus.length,
     raw: JSON.stringify(item),
+    skc_id: derived.skcId,
+    thumb_url: derived.thumbUrl,
+    ext_code: derived.extCode,
+    skus_json: derived.skusJson,
     now
   });
 
@@ -195,4 +233,4 @@ async function syncAllMalls(db) {
   return { malls: results.length, results };
 }
 
-module.exports = { syncOneMall, syncAllMalls };
+module.exports = { syncOneMall, syncAllMalls, deriveProductListColumns };

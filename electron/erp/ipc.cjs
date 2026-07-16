@@ -22419,28 +22419,16 @@ const temuProductSyncInFlight = new Set(); /** 手动触发采集：带 mallId �
   `, [mallId, limit, offset]);const total = (await queryOne(db, "SELECT COUNT(*) AS n FROM erp_temu_openapi_products WHERE mall_id = ?", [mallId])).n;return { products, total, limit, offset };}async function syncTemuOpenApiProductsRuntime(payload = {}, actor = {}) {if (shouldUseClientRuntime()) {ensureClientRuntime();return await remoteRequest("/api/temu/openapi/products/sync", { method: "POST", body: payload || {} });}return await syncTemuOpenApiProducts(payload || {}, actor);}async function listTemuOpenApiProductsRuntime(payload = {}, actor = {}) {if (shouldUseClientRuntime()) {ensureClientRuntime();const mallId = optionalString(payload?.mallId || payload?.mall_id);const qs = mallId ? `?mallId=${encodeURIComponent(mallId)}` : "";return await remoteRequest("/api/temu/openapi/products" + qs, { method: "GET" });}return await listTemuOpenApiProducts(payload || {}, actor);} /** 全店官方商品 → SkcRow 形状（供「商品管理」页作底列表，抓包销量/流量按 mall|skc 叠加）。 */async function listAllTemuOpenApiProductsAsSkc(payload = {}, actor = {}) {assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方商品");const { db } = requireErp();const rows = await queryAll(db, `
     SELECT p.mall_id AS mall_id,
            p.product_id AS product_id,
-           json_extract(p.raw_json, '$.productSkcId') AS skc_id,
+           p.skc_id AS skc_id,
            p.product_name AS title,
-           json_extract(p.raw_json, '$.mainImageUrl') AS thumb_url,
-           COALESCE(
-             NULLIF(json_extract(p.raw_json, '$.extCode'), ''),
-             (SELECT s.ext_code FROM erp_temu_openapi_skus s
-              WHERE s.mall_id = p.mall_id AND s.product_id = p.product_id
-                AND s.ext_code IS NOT NULL AND s.ext_code <> '' LIMIT 1)
-           ) AS ext_code,
-           (SELECT json_group_array(json_object(
-                'productSkuId', json_extract(ss.value, '$.productSkuId'),
-                'skuExtCode', COALESCE(json_extract(ss.value, '$.extCode'), ''),
-                'className', (SELECT group_concat(json_extract(sp.value, '$.specName'), '/')
-                              FROM json_each(json_extract(ss.value, '$.productSkuSpecList')) sp),
-                'warehouseInventoryNum', json_extract(ss.value, '$.virtualStock')
-            ))
-            FROM json_each(json_extract(p.raw_json, '$.productSkuSummaries')) ss) AS skus_json,
+           p.thumb_url AS thumb_url,
+           p.ext_code AS ext_code,
+           p.skus_json AS skus_json,
            p.sku_count AS sku_count,
            p.updated_at AS updated_at
     FROM erp_temu_openapi_products p
     JOIN erp_temu_openapi_auth a ON a.mall_id = p.mall_id AND a.status = 'active'
-    WHERE json_extract(p.raw_json, '$.productSkcId') IS NOT NULL
+    WHERE p.skc_id IS NOT NULL AND p.skc_id <> ''
   `);return { rows };}async function listAllTemuOpenApiProductsAsSkcRuntime(payload = {}, actor = {}) {if (shouldUseClientRuntime()) {ensureClientRuntime();return await remoteRequest("/api/temu/openapi/products/skc", { method: "GET" });}return await listAllTemuOpenApiProductsAsSkc(payload || {}, actor);} /** 全店官方销量(salesv2) → TemuSalesRow 形状（按 mall|skc enrich 销量/库存/缺货/规格/货号）。 */async function listAllTemuOpenApiSales(payload = {}, actor = {}) {assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方销量");const { db } = requireErp();const records = await queryAll(db, `
     SELECT r.mall_id, r.product_skc_id, r.raw_json
     FROM erp_temu_openapi_records r
@@ -24699,16 +24687,9 @@ function buildNoSpec1688Option(detail = {}, offerId) {return { externalSkuId: ""
         AND address_id = @address_id
       ORDER BY updated_at DESC
       LIMIT 1
-    `, { company_id: companyId, oauth_id: oauth, address_id: remoteId });if (row?.id) return row.id;}const row = await queryOne(db, `
-    SELECT id
-    FROM erp_1688_delivery_addresses
-    WHERE company_id = @company_id
-      AND COALESCE(account_id, '') = COALESCE(@account_id, '')
-      AND address_id = @address_id
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `, { company_id: companyId, account_id: optionalString(accountId) || "", address_id: remoteId });if (row?.id) return row.id; // 认领手动录入的行：同 OAuth 下手机号+收件人都对得上、但还没绑远端 ID 的地址，
-  // 同步时直接把远端 ID 补到这行上，避免手动行永远「未绑 1688」+ 平行长出重复行。
+    `, { company_id: companyId, oauth_id: oauth, address_id: remoteId });if (row?.id) return row.id;} // 认领手动录入的行：同 OAuth 下手机号+收件人都对得上、但还没绑远端 ID 的地址，
+  // 同步时直接把远端 ID 补到这行上。放在旧的 account_id 兜底之前，
+  // 否则会先命中历史遗留的无主行，手动行永远绑不上。
   if (oauth && optionalString(addressMobile) && optionalString(fullName)) {const manualRow = await queryOne(db, `
       SELECT id
       FROM erp_1688_delivery_addresses
@@ -24720,9 +24701,19 @@ function buildNoSpec1688Option(detail = {}, offerId) {return { externalSkuId: ""
         AND status = 'active'
       ORDER BY updated_at DESC
       LIMIT 1
-    `, { company_id: companyId, oauth_id: oauth, mobile: optionalString(addressMobile), full_name: optionalString(fullName) });if (manualRow?.id) return manualRow.id;}return null;}async function sync1688DeliveryAddressesAction({ db, payload, actor }) {assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);const accountId = optionalString(payload.accountId || payload.account_id); // [OAuth 维度 2026-05-21] 同步以 OAuth 为单位。caller 未传 OAuth 时，按 accountId
+    `, { company_id: companyId, oauth_id: oauth, mobile: optionalString(addressMobile), full_name: optionalString(fullName) });if (manualRow?.id) return manualRow.id;}const row = await queryOne(db, `
+    SELECT id
+    FROM erp_1688_delivery_addresses
+    WHERE company_id = @company_id
+      AND COALESCE(account_id, '') = COALESCE(@account_id, '')
+      AND address_id = @address_id
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `, { company_id: companyId, account_id: optionalString(accountId) || "", address_id: remoteId });return row?.id || null;}async function sync1688DeliveryAddressesAction({ db, payload, actor }) {assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);const accountId = optionalString(payload.accountId || payload.account_id); // [OAuth 维度 2026-05-21] 同步以 OAuth 为单位。caller 未传 OAuth 时，按 accountId
   // 反查店铺挂的默认 OAuth；都没有就让 call1688ProcurementApi 走公司默认 OAuth。
-  let purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id);if (!purchase1688AccountId && accountId) {const acct = await queryOne(db, "SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?", [accountId]);purchase1688AccountId = optionalString(acct?.default_1688_purchase_account_id);}if (!purchase1688AccountId) {purchase1688AccountId = optionalString((await resolve1688AuthRowForPurchase({ companyId, accountId }))?.id);}const params = raw1688Params(payload, { webSite: optionalString(payload.webSite) || "1688" });if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key, params };const rawResponse = payload.mockResponse || (await call1688ProcurementApi({ db, actor, accountId, purchase1688AccountId, action: "sync_1688_addresses", api: PROCUREMENT_APIS.RECEIVE_ADDRESS, params }));const addresses = normalize1688ReceiveAddressResponse(rawResponse);let addedCount = 0;let updatedCount = 0;const saved = []; for (const address of addresses) {const existingId = await findExisting1688AddressId(db, { companyId, accountId, purchase1688AccountId, alibabaAddressId: address.alibabaAddressId, addressMobile: address.mobile, fullName: address.fullName });if (existingId) updatedCount += 1;else addedCount += 1;saved.push(await save1688DeliveryAddressAction({ db, actor, payload: { ...address, id: existingId || undefined, companyId, accountId, purchase1688AccountId } }));} // diff: 远端没回来的本地行打 inactive。
+  let purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id);if (!purchase1688AccountId && accountId) {const acct = await queryOne(db, "SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?", [accountId]);purchase1688AccountId = optionalString(acct?.default_1688_purchase_account_id);}if (!purchase1688AccountId) {// 没指定买家账号时不再只同步公司第一行：把公司下所有可用的 1688 授权账号各同步一遍，
+  // 否则第二个账号的地址永远同步不到（询盘设置的同步按钮就不带账号）。
+  const authRows = await queryAll(db, "SELECT id FROM erp_1688_auth_settings WHERE company_id = ? AND status != 'disabled' ORDER BY authorized_at", [companyId]);if (authRows.length > 1) {const perAccount = [];let firstError = null;for (const authRow of authRows) {try {perAccount.push({ purchase1688AccountId: authRow.id, ...(await sync1688DeliveryAddressesAction({ db, payload: { ...payload, purchase1688AccountId: authRow.id }, actor })) });} catch (error) {if (!firstError) firstError = error;perAccount.push({ purchase1688AccountId: authRow.id, error: error?.message || String(error) });}}const merged = perAccount.filter((item) => !item.error);if (!merged.length && firstError) throw firstError;return { apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key, multiAccount: true, addressCount: merged.reduce((sum, item) => sum + Number(item.addressCount || 0), 0), addresses: merged.flatMap((item) => item.addresses || []), addedCount: merged.reduce((sum, item) => sum + Number(item.addedCount || 0), 0), updatedCount: merged.reduce((sum, item) => sum + Number(item.updatedCount || 0), 0), deactivatedCount: merged.reduce((sum, item) => sum + Number(item.deactivatedCount || 0), 0), accounts: perAccount.map((item) => ({ purchase1688AccountId: item.purchase1688AccountId || null, addressCount: item.addressCount || 0, error: item.error || null })) };}purchase1688AccountId = optionalString(authRows[0]?.id) || optionalString((await resolve1688AuthRowForPurchase({ companyId, accountId }))?.id);}const params = raw1688Params(payload, { webSite: optionalString(payload.webSite) || "1688" });if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key, params };const rawResponse = payload.mockResponse || (await call1688ProcurementApi({ db, actor, accountId, purchase1688AccountId, action: "sync_1688_addresses", api: PROCUREMENT_APIS.RECEIVE_ADDRESS, params }));const addresses = normalize1688ReceiveAddressResponse(rawResponse);let addedCount = 0;let updatedCount = 0;const saved = []; for (const address of addresses) {const existingId = await findExisting1688AddressId(db, { companyId, accountId, purchase1688AccountId, alibabaAddressId: address.alibabaAddressId, addressMobile: address.mobile, fullName: address.fullName });if (existingId) updatedCount += 1;else addedCount += 1;saved.push(await save1688DeliveryAddressAction({ db, actor, payload: { ...address, id: existingId || undefined, companyId, accountId, purchase1688AccountId } }));} // diff: 远端没回来的本地行打 inactive。
   // [OAuth 维度 2026-05-21] 反向反激活范围改成按 OAuth（同一个 OAuth 名下的所有
   // 地址）；OAuth 未知时退回老的 account_id 范围保持兼容。
   let deactivatedCount = 0;if (addresses.length > 0 && !payload.skipDeactivate) {const remoteAddressIds = new Set(addresses.map((address) => optionalString(address.alibabaAddressId)).filter(Boolean));const localActiveRows = purchase1688AccountId ? await queryAll(db, `
