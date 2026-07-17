@@ -23,6 +23,7 @@ import { BellOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined,
 import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { activeSupplierBindingsForSku, removeSupplierBindingRows } from "../utils/supplierBindings";
 import ProductMasterData from "./ProductMasterData";
 
 const { Text } = Typography;
@@ -1052,6 +1053,8 @@ export default function AlibabaMapping() {
             ...MAPPING_WORKBENCH_PARAMS,
             includeWorkbench: false,
           });
+          setBoundRows((current) => removeSupplierBindingRows(current, [row.id]));
+          setBoundTotal((current) => Math.max(0, current - 1));
           message.success("供应商绑定已删除");
           await reloadBothPages();
         } catch (error: any) {
@@ -1061,7 +1064,47 @@ export default function AlibabaMapping() {
         }
       },
     });
-  }, [reloadCurrentPage]);
+  }, [reloadBothPages]);
+
+  const deleteAllMappingsForSku = useCallback((row: Sku1688SourceRow) => {
+    if (!erp) return;
+    const targets = activeSupplierBindingsForSku(boundRows, row.skuId);
+    if (targets.length <= 1) {
+      deleteMapping(row);
+      return;
+    }
+    Modal.confirm({
+      title: "删除该商品全部供应商绑定",
+      content: `商品编码 ${row.internalSkuCode || row.skuId} 共有 ${targets.length} 条有效绑定。删除后这些 1688 规格都会从供应商管理移除；已生成的采购单和 1688 订单不会删除。`,
+      okText: `删除全部 ${targets.length} 条`,
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        const key = `delete_all_sku_1688_sources-${row.skuId}`;
+        setActionLoadingId(key);
+        try {
+          for (const target of targets) {
+            await erp.purchase.action({
+              action: "delete_sku_1688_source",
+              sourceId: target.id,
+              ...MAPPING_WORKBENCH_PARAMS,
+              includeWorkbench: false,
+            });
+          }
+          const targetIds = targets.map((target) => target.id);
+          setBoundRows((current) => removeSupplierBindingRows(current, targetIds));
+          setBoundTotal((current) => Math.max(0, current - targetIds.length));
+          message.success(`已删除该商品 ${targetIds.length} 条供应商绑定`);
+          await reloadBothPages();
+        } catch (error: any) {
+          message.error(error?.message || "该商品供应商绑定删除失败");
+          await reloadBothPages();
+        } finally {
+          setActionLoadingId(null);
+        }
+      },
+    });
+  }, [boundRows, deleteMapping, reloadBothPages]);
 
 
   const searchRelationSuppliers = useCallback(async () => {
@@ -1172,6 +1215,18 @@ export default function AlibabaMapping() {
       key: "colorSpec",
       width: 160,
       render: (_value, row) => row.colorSpec || "-",
+    },
+    {
+      title: "1688绑定",
+      key: "mappingIdentity",
+      width: 240,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text>商品号：{row.externalOfferId || "-"}</Text>
+          <Text>规格：{row.platformSkuName || row.externalSpecId || "-"}</Text>
+          <Text type="secondary">配比：{row.ourQty || 1}:{row.platformQty || 1}</Text>
+        </Space>
+      ),
     },
     {
       title: "系统供应商",
@@ -1329,6 +1384,7 @@ export default function AlibabaMapping() {
       render: (_value, row) => {
         const monitorEnabled = Boolean(row.sourcePayload?.monitorProduct?.enabled);
         const followEnabled = Boolean(row.sourcePayload?.followedAt1688);
+        const siblingCount = activeSupplierBindingsForSku(boundRows, row.skuId).length;
         if (isSkuPlaceholderRow(row)) {
           return editable ? (
             <Button
@@ -1407,11 +1463,24 @@ export default function AlibabaMapping() {
                 删除
               </Button>
             ) : null}
+            {editable && siblingCount > 1 ? (
+              <Tooltip title={`删除该商品全部 ${siblingCount} 条有效绑定`}>
+                <Button
+                  size="small"
+                  danger
+                  loading={actionLoadingId === `delete_all_sku_1688_sources-${row.skuId}`}
+                  style={supplierActionButtonStyle}
+                  onClick={() => deleteAllMappingsForSku(row)}
+                >
+                  全部删除
+                </Button>
+              </Tooltip>
+            ) : null}
           </div>
         );
       },
     },
-  ], [actionLoadingId, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
+  ], [actionLoadingId, boundRows, deleteAllMappingsForSku, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
 
   const currentLoading = activeTab === "bound" ? boundLoading : activeTab === "unbound" ? unboundLoading : false;
   const searchPlaceholder = "搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号";
