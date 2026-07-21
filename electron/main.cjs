@@ -4706,16 +4706,10 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
   });
 
   // 读映射表：mall_id -> accountId
-  const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
   const mallToAccountId = new Map();
-  try {
-    if (fs.existsSync(STORE_MAPPING_FILE)) {
-      const m = JSON.parse(fs.readFileSync(STORE_MAPPING_FILE, "utf-8"));
-      for (const [accId, mallIds] of Object.entries(m || {})) {
-        if (Array.isArray(mallIds)) for (const mid of mallIds) mallToAccountId.set(String(mid), accId);
-      }
-    }
-  } catch { /* ignore */ }
+  for (const [accId, mallIds] of Object.entries(readStoreMapping())) {
+    if (Array.isArray(mallIds)) for (const mid of mallIds) mallToAccountId.set(String(mid), accId);
+  }
   const accountById = new Map(allCreds.map((c) => [c.accountId, c]));
 
   const mergedTasks = {};
@@ -4827,8 +4821,21 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
 });
 
 // ===== 店铺映射表（手动指定「哪个店归哪个账号」，采集时按它精准登账号）=====
-// 与 worker 共用同一个映射文件（项目根 .settlement-account-mall-map.json）。
-const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
+// 安装版 app.asar 内只读，映射表必须落在 userData；旧版写在项目根（仅 dev 下可写），读取时兼容旧位置。
+const STORE_MAPPING_FILE = path.join(app.getPath("userData"), "settlement-account-mall-map.json");
+const LEGACY_STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
+
+function readStoreMapping() {
+  for (const p of [STORE_MAPPING_FILE, LEGACY_STORE_MAPPING_FILE]) {
+    try {
+      if (fs.existsSync(p)) {
+        const obj = JSON.parse(fs.readFileSync(p, "utf-8"));
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+      }
+    } catch { /* ignore */ }
+  }
+  return {};
+}
 
 ipcMain.handle("automation:list-accounts", async () => {
   try {
@@ -4841,9 +4848,7 @@ ipcMain.handle("automation:list-accounts", async () => {
 
 ipcMain.handle("automation:store-mapping:get", async () => {
   try {
-    if (!fs.existsSync(STORE_MAPPING_FILE)) return { ok: true, mapping: {} };
-    const obj = JSON.parse(fs.readFileSync(STORE_MAPPING_FILE, "utf-8"));
-    return { ok: true, mapping: (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {} };
+    return { ok: true, mapping: readStoreMapping() };
   } catch (e) {
     return { ok: false, error: e.message, mapping: {} };
   }

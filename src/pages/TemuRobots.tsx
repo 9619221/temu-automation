@@ -145,12 +145,21 @@ function BatchCollectSection() {
         if (accts.length === 0) return;
         // 长名优先匹配，避免短名误匹配（如 "Lumen" 误匹配 "Lumen Global Studio"）
         const sortedAccts = [...accts].sort((a, b) => b.name.length - a.name.length);
-        const mapping: Record<string, string[]> = {};
+        // 只补充现有映射里还没归属的店，绝不覆盖已有条目——否则低命中的自动匹配会把完整（含手工）映射整份抹掉
+        const current: Record<string, string[]> = (await api?.automation?.storeMappingGet?.())?.mapping || {};
+        const owned = new Set(Object.values(current).flat().map(String));
+        const mapping: Record<string, string[]> = { ...current };
         let matched = 0;
+        // 账号名有两种习惯：品牌名（店铺全名含它，如「Lumen Global」）和数字编号（对店铺编号，如「28」↔ store_code「028」，去前导零比对）
+        const stripZeros = (s: string) => s.replace(/^0+/, "");
         for (const m of malls) {
+          if (owned.has(String(m.mall_id))) continue;
           const hay = String(m.mall_name || "").toLowerCase();
-          if (!hay) continue;
-          const acct = sortedAccts.find((a) => hay.includes(a.name.toLowerCase()));
+          const code = stripZeros(String(m.store_code || ""));
+          const acct = sortedAccts.find((a) =>
+            (hay !== "" && hay.includes(a.name.toLowerCase()))
+            || (code !== "" && /^\d+$/.test(a.name) && stripZeros(a.name) === code)
+          );
           if (!acct) continue;
           if (!mapping[acct.id]) mapping[acct.id] = [];
           mapping[acct.id].push(m.mall_id);
@@ -159,7 +168,7 @@ function BatchCollectSection() {
         if (matched > 0) {
           await api?.automation?.storeMappingSave?.(mapping);
           // 不打 message 提示，避免每次进入 TEMU 机器人页都弹通知
-          console.log(`[batch-collect] 自动按店铺名建立映射：${Object.keys(mapping).length} 账号 / ${matched} 店`);
+          console.log(`[batch-collect] 自动按店铺名补充映射：新增 ${matched} 店（共 ${Object.keys(mapping).length} 账号）`);
         }
       } catch {
         if (manual) message.warning("店铺列表加载失败：主控端无响应，请稍后再试");
