@@ -7085,20 +7085,33 @@ const SETTLEMENT_MALLS = [
 const SETTLEMENT_INCOME_PATH = "/api/merchant/front/finance/income-summary";
 
 function loadSettlementCloudConfig() {
-  const envFile = path.join(projectRootDir, ".settlement-robot.env");
-  const config = { endpoint: "https://erp.temu.chat", authToken: "", deviceId: "settlement-robot" };
-  try {
-    if (!fs.existsSync(envFile)) return config;
-    const content = fs.readFileSync(envFile, "utf-8");
-    for (const line of content.split(/\r?\n/)) {
-      const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.+?)\s*$/);
-      if (!m) continue;
-      if (m[1] === "CLOUD_ENDPOINT") config.endpoint = m[2];
-      if (m[1] === "AUTH_TOKEN") config.authToken = m[2];
-      if (m[1] === "DEVICE_ID") config.deviceId = m[2];
+  // 内置默认凭证：.settlement-robot.env 不进安装包（gitignore + build files 都不含它），
+  // 打包客户端上没有它时若无默认值，上报会被静默跳过（界面显示"云端上报 0 条"）。
+  // 存在 env 文件时仍以文件为准：先找项目根目录（开发机），再找用户数据目录（客户端可手工覆盖）。
+  const config = {
+    endpoint: "https://erp.temu.chat/cloud",
+    authToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOiJzZXR0bGVtZW50LXJvYm90IiwidGlkIjoiZGVmYXVsdC10ZW5hbnQiLCJyb2xlIjoiZGV2aWNlIiwibmFtZSI6InNldHRsZW1lbnQtcm9ib3QiLCJpYXQiOjE3ODEwNjA3NTcsImV4cCI6MTgxMjU5Njc1N30.QR-ZcdsvGWiG0lLCj19fJbFGolnPfHQKhEusKJdsA_M",
+    deviceId: "settlement-robot",
+  };
+  const candidates = [
+    path.join(projectRootDir, ".settlement-robot.env"),
+    path.join(workerRuntimeDataDir, ".settlement-robot.env"),
+  ];
+  for (const envFile of candidates) {
+    try {
+      if (!fs.existsSync(envFile)) continue;
+      const content = fs.readFileSync(envFile, "utf-8");
+      for (const line of content.split(/\r?\n/)) {
+        const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.+?)\s*$/);
+        if (!m) continue;
+        if (m[1] === "CLOUD_ENDPOINT") config.endpoint = m[2];
+        if (m[1] === "AUTH_TOKEN") config.authToken = m[2];
+        if (m[1] === "DEVICE_ID") config.deviceId = m[2];
+      }
+      break;
+    } catch (e) {
+      console.error("[settlement] 读取 .settlement-robot.env 失败:", e.message);
     }
-  } catch (e) {
-    console.error("[settlement] 读取 .settlement-robot.env 失败:", e.message);
   }
   return config;
 }
