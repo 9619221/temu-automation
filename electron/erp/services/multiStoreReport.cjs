@@ -109,6 +109,34 @@ async function fetchCaptureEventsViaHttp(urlPaths) {
 }
 
 // 统一获取抓包事件：ATTACH 可用走 SQLite 跨库查询，否则走 HTTP
+// 增量游标：记录每组 url_paths 上次处理到的 received_at（存 erp_report_cache），
+// 下次只取新增事件；留 6 小时重叠余量，靠各 sync 的 upsert 幂等去重，
+// 单轮偶发失败也能被后续轮次的重叠区补回。opts.fullResync=true 强制全量。
+const SETTLEMENT_CURSOR_OVERLAP_MS = 45 * 60 * 1000;
+
+function settlementCursorKey(urlPaths) {
+  const crypto = require("crypto");
+  return "stl_capture_cursor:" + crypto.createHash("sha1").update(urlPaths.join("|"), "utf8").digest("hex").slice(0, 16);
+}
+
+async function readSettlementCursor(db, key) {
+  try {
+    const row = await queryOne(db, "SELECT payload_json FROM erp_report_cache WHERE cache_key = ?", [key]);
+    const value = Number(JSON.parse(row?.payload_json || "{}").received_at);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function writeSettlementCursor(db, key, receivedAt) {
+  try {
+    await execute(db,
+      "INSERT INTO erp_report_cache (cache_key, payload_json, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(cache_key) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+      [key, JSON.stringify({ received_at: receivedAt })]);
+  } catch {/* 缓存表不可用时退化为全量，不阻塞同步 */}
+}
+
 async function getSettlementCaptureEvents(db, urlPaths, opts = {}) {
   const attachCloudDb = opts.attachCloudDb;
   const isAttached = typeof attachCloudDb === "function" && attachCloudDb(db) === true;
@@ -116,15 +144,25 @@ async function getSettlementCaptureEvents(db, urlPaths, opts = {}) {
     const capture = await robotCaptureSql(db, "ce");
     const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     const placeholders = urlPaths.map(() => "?").join(",");
-    return await queryAll(db, `
+    const cursorKey = settlementCursorKey(urlPaths);
+    const cursor = opts.fullResync ? 0 : await readSettlementCursor(db, cursorKey);
+    const sinceWhere = cursor > 0 ? " AND ce.received_at > ?" : "";
+    const sinceParams = cursor > 0 ? [cursor - SETTLEMENT_CURSOR_OVERLAP_MS] : [];
+    const rows = await queryAll(db, `
       SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
         FROM ${capture.from}
        WHERE ce.url_path IN (${placeholders})
          AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
          AND ce.body_json IS NOT NULL AND ce.body_json <> ''
          ${capture.where}
+         ${sinceWhere}
        ORDER BY ce.received_at ASC
-    `, [...urlPaths]);
+    `, [...urlPaths, ...sinceParams]);
+    if (rows.length) {
+      const maxReceived = Number(rows[rows.length - 1].received_at) || 0;
+      if (maxReceived > cursor) await writeSettlementCursor(db, cursorKey, maxReceived);
+    }
+    return rows;
   }
   if (db.__isPg) {
     return await fetchCaptureEventsViaHttp(urlPaths);
@@ -2727,7 +2765,7 @@ const SETTLEMENT_INCOME_PATH = "/api/merchant/front/finance/income-summary";cons
 // 后写覆盖=最新一条），逐店复用 upsertSettlementIncomeFromDashboard 落 erp_temu_settlement_income。
 // 需要 db 已具备挂载 cloud 的能力（opts.attachCloudDb）。供独立同步脚本/定时器调用，不进报表热路径。
 async function syncSettlementIncomeFromCapture(db, opts = {}) {await ensureSettlementIncomeSchema(db);let events;try {events = await getSettlementCaptureEvents(db, [SETTLEMENT_INCOME_PATH], opts);} catch (error) {if (/no such table/i.test(String(error?.message || ""))) {return { ok: false, attached: true, malls: 0, rows: 0 };}throw error;}if (!events) return { ok: false, attached: false, malls: 0, rows: 0 }; // 按 mall 聚合：stat_date → 原始 income item（received_at 升序遍历，后写覆盖=最新抓包）
-  const byMall = new Map();for (const ev of events) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const list = extractSettlementIncomeListFromCaptureBody(body);if (!Array.isArray(list)) continue;const mallId = String(ev.mall_id);if (!byMall.has(mallId)) byMall.set(mallId, new Map());const dayMap = byMall.get(mallId);for (const item of list) {const statDate = normalizeSettlementDate(item);if (item && statDate) dayMap.set(statDate, item);}}let totalRows = 0;for (const [mallId, dayMap] of byMall) {if (!dayMap.size) continue;const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];totalRows += await upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId, source: SETTLEMENT_ROBOT_SOURCE }).rows;}return { ok: true, attached: true, malls: byMall.size, rows: totalRows };}function emptySettlement() {return { latest_date: null, today: { income: 0 }, last7d: { income: 0, income_prev: 0, income_wow: null }, last30d: { income: 0, income_prev: 0, income_mom: null }, trend_daily: [] };}async function buildSettlementIncomeByMall(db) {let latest;try {const sourceSql = await sourceWhere(db, "erp_temu_settlement_income");latest = (await queryOne(db, `
+  const byMall = new Map();for (const ev of events) {let body;try {body = JSON.parse(ev.body_json);} catch {continue;}const list = extractSettlementIncomeListFromCaptureBody(body);if (!Array.isArray(list)) continue;const mallId = String(ev.mall_id);if (!byMall.has(mallId)) byMall.set(mallId, new Map());const dayMap = byMall.get(mallId);for (const item of list) {const statDate = normalizeSettlementDate(item);if (item && statDate) dayMap.set(statDate, item);}}let totalRows = 0;for (const [mallId, dayMap] of byMall) {if (!dayMap.size) continue;const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];totalRows += (await upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId, source: SETTLEMENT_ROBOT_SOURCE })).rows || 0;}return { ok: true, attached: true, malls: byMall.size, rows: totalRows };}function emptySettlement() {return { latest_date: null, today: { income: 0 }, last7d: { income: 0, income_prev: 0, income_wow: null }, last30d: { income: 0, income_prev: 0, income_mom: null }, trend_daily: [] };}async function buildSettlementIncomeByMall(db) {let latest;try {const sourceSql = await sourceWhere(db, "erp_temu_settlement_income");latest = (await queryOne(db, `
       SELECT MAX(stat_date) AS d
       FROM erp_temu_settlement_income
       WHERE mall_id IS NOT NULL AND mall_id <> ''
