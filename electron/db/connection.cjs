@@ -226,7 +226,7 @@ function translateSqlSyntax(sql) {
     const args = _splitAtTopComma(inner);
     if (args.length === 1) {
       if (/^'now'$/i.test(args[0].trim())) return `CURRENT_DATE::text`;
-      return `(${args[0]})::date`;
+      return `(${args[0]})::date::text`;
     }
     const [expr, mod] = args;
     if (/^'now'$/i.test(expr) && /^'localtime'$/i.test(mod))
@@ -240,7 +240,7 @@ function translateSqlSyntax(sql) {
     if (days) return `((${expr})::date + INTERVAL '${days[1]} days')::text`;
     if (/^'now'$/i.test(expr))
       return `(CURRENT_DATE + (${mod})::interval)::text`;
-    return `(${expr})::date`;
+    return `(${expr})::date::text`;
   });
 
   // --- ROUND(double, int) → ROUND((double)::numeric, int) ---
