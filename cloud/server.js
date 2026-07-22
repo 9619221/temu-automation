@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { migrate } from "./db/migrate.js";
 import { getDb } from "./db/connection.js";
+import { startReplicator } from "./pg-replicator.js";
 import authRoute from "./routes/auth.js";
 import ingestRoute from "./routes/ingest.js";
 import hookRoute from "./routes/hook.js";
@@ -75,6 +76,9 @@ function runCleanup() {
 }
 setInterval(runCleanup, CLEANUP_INTERVAL);
 setTimeout(runCleanup, 60_000);
+
+// sqlite → PG 进程内增量复制（PG_MIRROR_URL 未配置时静默禁用，沿用外部 cron）
+startReplicator();
 
 const PORT = Number(process.env.PORT || 8788);
 // 默认只绑本机回环：公网只能经 Caddy TLS 反代进来，杜绝直连明文端口。

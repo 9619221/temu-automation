@@ -4,6 +4,7 @@ import { Worker } from "node:worker_threads";
 import { getDb } from "../db/connection.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { dispatchParsers } from "../parsers.js";
+import { notifyIngest } from "../pg-replicator.js";
 
 const r = Router();
 
@@ -699,6 +700,8 @@ function ensureIngestWorker() {
   ingestWorker.on("message", (msg) => {
     pendingItems = Math.max(0, pendingItems - (Number(msg?.itemCount) || 0));
     if (msg && msg.ok === false) console.warn("[ingest] worker batch failed:", msg.error);
+    // 批次已落 sqlite → 去抖触发 PG 增量复制（复制器未启用时是空操作）
+    if (msg && msg.ok) notifyIngest();
   });
   ingestWorker.on("error", (err) => {
     console.error("[ingest] worker error, will respawn:", err?.message);
