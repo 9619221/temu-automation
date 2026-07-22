@@ -673,7 +673,10 @@ function settlementCostTooltip(r: SettlementRow) {
 }
 
 // 日期工具
-function dateStr(d: Date): string { return d.toISOString().slice(0, 10); }
+function dateStr(d: Date): string {
+  // 按本地时间拼接，避免 toISOString() 的 UTC 偏移在早上 8 点前把日期算早一天
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 function monthStart(offset = 0): string {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset);
   return dateStr(d);
