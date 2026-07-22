@@ -3415,25 +3415,26 @@ const SITE_EXC_API_PATH = "/api/kiana/mms/robin/queryFullyOtherMessage";const SI
                CASE WHEN json_extract(d.raw_json, '$.交易类型') = '销售冲回' THEN COALESCE(d.amount, 0) ELSE 0 END AS reversal_amt,
                CASE WHEN json_extract(d.raw_json, '$.交易类型') = '非商责补贴' THEN COALESCE(d.amount, 0) ELSE 0 END AS subsidy_amt,
                CASE
-                 WHEN COALESCE(lc.unit_cost, 0) > 0 THEN lc.unit_cost
+                 WHEN COALESCE(lc1.unit_cost, 0) > 0 THEN lc1.unit_cost
+                 WHEN COALESCE(lc2.unit_cost, 0) > 0 THEN lc2.unit_cost
                  WHEN COALESCE(h.weighted_avg_cost, 0) > 0 THEN h.weighted_avg_cost
                  WHEN COALESCE(k.wac, 0) > 0 THEN k.wac
                  ELSE 0
                END AS unit_cost,
                CASE
-                 WHEN COALESCE(lc.unit_cost, 0) > 0 THEN 'ledger'
+                 WHEN COALESCE(lc1.unit_cost, 0) > 0 OR COALESCE(lc2.unit_cost, 0) > 0 THEN 'ledger'
                  WHEN COALESCE(h.weighted_avg_cost, 0) > 0 THEN 'history'
                  WHEN COALESCE(k.wac, 0) > 0 THEN 'current'
                  ELSE 'missing'
                END AS source_kind
           FROM erp_temu_settlement_order_detail d
           LEFT JOIN sku_wac k ON k.internal_sku_code = d.sku_ext_code
-          LEFT JOIN ledger_cost lc
-            ON lc.internal_sku_code = d.sku_ext_code
-           AND (
-             lc.source_doc_id = 'consign-ship-cloud:' || d.mall_id || ':' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
-             OR lc.source_doc_id = 'consign-ship:' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
-           )
+          LEFT JOIN ledger_cost lc1
+            ON lc1.internal_sku_code = d.sku_ext_code
+           AND lc1.source_doc_id = 'consign-ship-cloud:' || d.mall_id || ':' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
+          LEFT JOIN ledger_cost lc2
+            ON lc2.internal_sku_code = d.sku_ext_code
+           AND lc2.source_doc_id = 'consign-ship:' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
           LEFT JOIN erp_sku_cost_daily_snapshot h
             ON h.sku_id = k.sku_id
            AND h.stat_date = (
