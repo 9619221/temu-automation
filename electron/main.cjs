@@ -1030,16 +1030,27 @@ async function configureAutoUpdater() {
 autoUpdater.on("checking-for-update", () => {
   broadcastUpdateState({ status: "checking", message: "正在检查更新…" });
 });
+// 更新公告：latest.yml 的 releaseNotes（发版时由 release-notes.md 经 releaseInfo 写入）。
+// generic 源是字符串；GitHub 源可能是带 HTML 的数组，统一拍平成纯文本。
+function formatUpdateReleaseNotes(info) {
+  const raw = info?.releaseNotes;
+  const text = Array.isArray(raw)
+    ? raw.map((item) => (typeof item === "string" ? item : item?.note || "")).join("\n")
+    : (typeof raw === "string" ? raw : "");
+  return text.replace(/<[^>]+>/g, "").trim();
+}
+
 autoUpdater.on("update-available", (info) => {
   broadcastUpdateState({ status: "available", message: `发现新版本 ${info?.version || ""}`, releaseVersion: info?.version });
   // 发现新版本立即弹窗提醒用户，避免依赖 UI 角落标记被忽略；
   // 用户选「稍后」不持久化跳过——下次启动还会再弹一次。
   if (mainWindow && !mainWindow.isDestroyed()) {
+    const releaseNotes = formatUpdateReleaseNotes(info);
     dialog.showMessageBox(mainWindow, {
       type: "info",
       title: "发现新版本",
       message: `新版本 ${info?.version || ""} 已发布`,
-      detail: "现在下载更新？下载完成后会再次提示你重启安装。",
+      detail: `${releaseNotes ? `本次更新：\n${releaseNotes}\n\n` : ""}现在下载更新？下载完成后会再次提示你重启安装。`,
       buttons: ["稍后", "下载更新"],
       defaultId: 1,
       cancelId: 0,
