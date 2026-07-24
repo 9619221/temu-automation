@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "temu-automation",
   "private": true,
   "version": "3.2.12",
@@ -49,7 +49,7 @@
   },
   "build": {
     "appId": "com.temu.automation",
-    "productName": "Temu 鑷姩鍖栬繍钀ュ伐鍏?,
+    "productName": "Temu 自动化运营工具",
     "asar": true,
     "directories": {
       "output": "release",
@@ -125,7 +125,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "differentialPackage": false,
-      "shortcutName": "Temu 鑷姩鍖栬繍钀ュ伐鍏?,
+      "shortcutName": "Temu 自动化运营工具",
       "include": "build-installer/installer.nsh"
     }
   },
