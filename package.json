@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "temu-automation",
   "private": true,
-  "version": "3.2.11",
+  "version": "3.2.12",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -49,7 +49,7 @@
   },
   "build": {
     "appId": "com.temu.automation",
-    "productName": "Temu 自动化运营工具",
+    "productName": "Temu 鑷姩鍖栬繍钀ュ伐鍏?,
     "asar": true,
     "directories": {
       "output": "release",
@@ -125,7 +125,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "differentialPackage": false,
-      "shortcutName": "Temu 自动化运营工具",
+      "shortcutName": "Temu 鑷姩鍖栬繍钀ュ伐鍏?,
       "include": "build-installer/installer.nsh"
     }
   },
