@@ -7359,6 +7359,29 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       </Button>
     ) : null,
   ].filter(Boolean);
+  // 点「刷新」时顺带把当前页「待改价」且已推 1688 的采购单金额同步一遍：
+  // 后台自动同步 10 分钟一轮，这里让手动刷新立即拉到 1688 改价结果。
+  // 最多取 10 笔，避免一次刷新打出太多 1688 详情请求。
+  const refreshWithPriceSync = async () => {
+    const targets = purchaseOrders
+      .filter((row) => row.status === "pushed_pending_price" && row.externalOrderId)
+      .slice(0, 10);
+    if (erp && targets.length) {
+      setActingKey("refresh-price-sync");
+      try {
+        const results = await Promise.allSettled(targets.map((row) => erp.purchase.action({
+          action: "sync_1688_order_price",
+          poId: row.id,
+          includeWorkbench: false,
+        }, { timeoutMs: 120000 })));
+        const synced = results.filter((r) => r.status === "fulfilled").length;
+        if (synced) message.success(`已同步 ${synced} 笔待改价单的 1688 金额`);
+      } finally {
+        setActingKey(null);
+      }
+    }
+    await loadData();
+  };
   const queueActions = [
     activeWorkArea === "sourcing" && canPurchase ? (
       <Button
@@ -7394,7 +7417,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     <Button key="export" icon={<DownloadOutlined />} loading={actingKey === "export"} onClick={() => void exportActiveQueue()}>
       导出
     </Button>,
-    <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
+    <Button key="refresh" icon={<ReloadOutlined />} loading={loading || actingKey === "refresh-price-sync"} onClick={() => void refreshWithPriceSync()}>
       刷新
     </Button>,
   ].filter(Boolean);
