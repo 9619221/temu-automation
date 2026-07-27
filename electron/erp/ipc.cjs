@@ -22680,7 +22680,8 @@ const SLIM_SOURCE_PAYLOAD_DROP_KEYS = ["raw", "skuInfos", "rawResponse", "rawAlp
       status = excluded.status,
       updated_at = excluded.updated_at
   `, [row]); // 「新增供应商」可同时录入货品行（对齐供应商档案列表字段），写入飞书货盘明细表
-  const goodsRows = Array.isArray(payload.goods) ? payload.goods : [];if (goodsRows.length) {for (const item of goodsRows) {const productName = optionalString(item.productName ?? item.product_name);if (!productName) continue;const productCode = optionalString(item.productCode ?? item.product_code);const digest = crypto.createHash("sha1").update(`${row.company_id}:${row.name}|${productCode || ""}|${productName}`).digest("hex").slice(0, 24);await execute(db, `
+  const goodsRows = Array.isArray(payload.goods) ? payload.goods : [];if (goodsRows.length) {for (const item of goodsRows) {const productName = optionalString(item.productName ?? item.product_name);if (!productName) continue;const productCode = optionalString(item.productCode ?? item.product_code);const digest = crypto.createHash("sha1").update(`${row.company_id}:${row.name}|${productCode || ""}|${productName}`).digest("hex").slice(0, 24); // 编辑已有货品行时带原 id 直接覆盖，避免改名/改编码后按新 hash 裂出重复行
+      const goodsId = optionalString(item.id) || `feishu:goods:${digest}`;await execute(db, `
       INSERT INTO erp_feishu_supplier_goods (
         id, company_id, supplier_id, supplier_name, product_name, product_code, color_spec,
         purchase_price, alibaba_url, label_size, shipping_req, purchase_mode, shop, source_table,
@@ -22694,6 +22695,8 @@ const SLIM_SOURCE_PAYLOAD_DROP_KEYS = ["raw", "skuInfos", "rawResponse", "rawAlp
       ON CONFLICT(id) DO UPDATE SET
         supplier_id = excluded.supplier_id,
         supplier_name = excluded.supplier_name,
+        product_name = excluded.product_name,
+        product_code = excluded.product_code,
         color_spec = excluded.color_spec,
         purchase_price = excluded.purchase_price,
         alibaba_url = excluded.alibaba_url,
@@ -22703,8 +22706,11 @@ const SLIM_SOURCE_PAYLOAD_DROP_KEYS = ["raw", "skuInfos", "rawResponse", "rawAlp
         shop = excluded.shop,
         source_table = excluded.source_table,
         updated_at = excluded.updated_at
-    `, { id: `feishu:goods:${digest}`, company_id: row.company_id, supplier_id: row.id, supplier_name: row.name, product_name: productName, product_code: productCode, color_spec: optionalString(item.colorSpec ?? item.color_spec), purchase_price: optionalString(item.purchasePrice ?? item.purchase_price), alibaba_url: optionalString(item.alibabaUrl ?? item.alibaba_url), label_size: optionalString(item.labelSize ?? item.label_size), shipping_req: optionalString(item.shippingReq ?? item.shipping_req), purchase_mode: optionalString(item.purchaseMode ?? item.purchase_mode), shop: optionalString(item.shop), source_table: optionalString(item.sourceTable ?? item.source_table), created_at: now, updated_at: now });}}return toSupplier(await queryOne(db, "SELECT * FROM erp_suppliers WHERE id = ?", [row.id]));} // 飞书货盘货品清单：supplierId 可选（不传=全量货盘明细），JOIN 供应商档案带出地址/标签/税率
-async function listFeishuSupplierGoods(params = {}) {const { db } = requireErp();const supplierId = optionalString(params.supplierId || params.supplier_id || params.id);const companyId = optionalString(params.companyId || params.company_id);const conditions = [];if (supplierId) conditions.push("goods.supplier_id = @supplier_id");if (companyId) conditions.push("goods.company_id = @company_id");const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";const rows = await queryAll(db, `
+    `, { id: goodsId, company_id: row.company_id, supplier_id: row.id, supplier_name: row.name, product_name: productName, product_code: productCode, color_spec: optionalString(item.colorSpec ?? item.color_spec), purchase_price: optionalString(item.purchasePrice ?? item.purchase_price), alibaba_url: optionalString(item.alibabaUrl ?? item.alibaba_url), label_size: optionalString(item.labelSize ?? item.label_size), shipping_req: optionalString(item.shippingReq ?? item.shipping_req), purchase_mode: optionalString(item.purchaseMode ?? item.purchase_mode), shop: optionalString(item.shop), source_table: optionalString(item.sourceTable ?? item.source_table), created_at: now, updated_at: now });}}return toSupplier(await queryOne(db, "SELECT * FROM erp_suppliers WHERE id = ?", [row.id]));} // 飞书货盘货品清单：supplierId 可选（不传=全量货盘明细），JOIN 供应商档案带出地址/标签/税率
+async function listFeishuSupplierGoods(params = {}) {const { db } = requireErp();
+  // 顺带把 1688 绑定同步进档案/补商品编码（节流 10 分钟，失败不影响列表）。
+  try {await backfillSupplierGoodsFrom1688Sources(db);} catch (e) {try {console.warn("[supplier-archive] backfill failed:", e?.message || e);} catch {}}
+  const supplierId = optionalString(params.supplierId || params.supplier_id || params.id);const companyId = optionalString(params.companyId || params.company_id);const conditions = [];if (supplierId) conditions.push("goods.supplier_id = @supplier_id");if (companyId) conditions.push("goods.company_id = @company_id");const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";const rows = await queryAll(db, `
     SELECT
       goods.*,
       supplier.address AS supplier_address,
@@ -23596,7 +23602,108 @@ async function listSkuSwapItems(db, docId) {if (!db || !docId) return [];let leg
       @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
       @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
     )
-  `, [row]);return await queryOne(db, "SELECT * FROM erp_sourcing_candidates WHERE id = ?", [row.id]);}async function upsertSku1688SourceRow(db, payload = {}, actor = {}) {assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源绑定");const skuId = requireString(payload.skuId || payload.sku_id, "skuId");const sku = await queryOne(db, "SELECT * FROM erp_skus WHERE id = ?", [skuId]);if (!sku) throw new Error(`SKU not found: ${skuId}`);const now = nowIso();const externalOfferId = requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId");const isNoSpec = payload.isNoSpec === true || payload.is_no_spec === 1 || payload.is_no_spec === true;const externalSkuId = optionalString(payload.externalSkuId || payload.external_sku_id) || "";let externalSpecId = optional1688SpecId(payload.externalSpecId || payload.external_spec_id, { allowEmpty: isNoSpec, context: "供应商映射" }); // 护栏：specId 与 skuId 同值＝上游（遨虾/聚水潭/网页推断）没拿到真 cargoSkuId、拿 skuId 顶替的伪规格，
+  `, [row]);return await queryOne(db, "SELECT * FROM erp_sourcing_candidates WHERE id = ?", [row.id]);}
+// —— 1688 绑定 ↔ 供应商档案联动 ——
+// 绑定映射保存后把供应商写进档案：主档按「公司+名称」查缺建，货品行按稳定 id upsert，
+// 商品编码取系统商品编码（erp_skus.internal_sku_code），让档案与商品资料自动挂钩。
+async function syncSupplierGoodsArchiveFromSource(db, sku = {}, source = {}) {
+  const supplierName = optionalString(source.supplier_name || source.supplierName);
+  if (!supplierName) return;
+  if (optionalString(source.status) === "deleted") return;
+  const companyId = optionalString(sku.company_id) || "company_default";
+  const now = nowIso();
+  let supplier = await queryOne(db, "SELECT id FROM erp_suppliers WHERE company_id = ? AND name = ? LIMIT 1", [companyId, supplierName]);
+  if (!supplier) {
+    supplier = { id: createId("supplier") };
+    await execute(db, `
+      INSERT INTO erp_suppliers (
+        id, company_id, name, categories_json, supplier_level,
+        settlement_currency, tags_json, status, created_at, updated_at
+      )
+      VALUES (@id, @company_id, @name, '[]', 'standard', 'CNY', '[]', 'active', @created_at, @updated_at)
+    `, { id: supplier.id, company_id: companyId, name: supplierName, created_at: now, updated_at: now });
+  }
+  const productName = optionalString(sku.product_name) || optionalString(source.product_title);
+  if (!productName) return;
+  const productCode = optionalString(sku.internal_sku_code);
+  const digest = crypto.createHash("sha1").update(`${companyId}:${supplierName}|${productCode || ""}|${productName}`).digest("hex").slice(0, 24);
+  // 手工维护的字段（颜色规格/标签尺寸等）只在 INSERT 给空值，UPDATE 一律不碰；
+  // 采购价档案里已有就保留（人工录的比绑定单价更准）。
+  await execute(db, `
+    INSERT INTO erp_feishu_supplier_goods (
+      id, company_id, supplier_id, supplier_name, product_name, product_code,
+      purchase_price, alibaba_url, source_table, created_at, updated_at
+    )
+    VALUES (
+      @id, @company_id, @supplier_id, @supplier_name, @product_name, @product_code,
+      @purchase_price, @alibaba_url, @source_table, @created_at, @updated_at
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      supplier_id = excluded.supplier_id,
+      supplier_name = excluded.supplier_name,
+      product_code = COALESCE(excluded.product_code, erp_feishu_supplier_goods.product_code),
+      purchase_price = COALESCE(erp_feishu_supplier_goods.purchase_price, excluded.purchase_price),
+      alibaba_url = COALESCE(excluded.alibaba_url, erp_feishu_supplier_goods.alibaba_url),
+      source_table = COALESCE(NULLIF(erp_feishu_supplier_goods.source_table, ''), excluded.source_table),
+      updated_at = excluded.updated_at
+  `, {
+    id: `feishu:goods:${digest}`,
+    company_id: companyId,
+    supplier_id: supplier.id,
+    supplier_name: supplierName,
+    product_name: productName,
+    product_code: productCode,
+    purchase_price: source.unit_price != null && source.unit_price !== "" ? String(source.unit_price) : null,
+    alibaba_url: optionalString(source.product_url),
+    source_table: "1688绑定",
+    created_at: now,
+    updated_at: now,
+  });
+}
+// 存量打通：档案页读取时节流触发。①缺商品编码但有 1688 链接的档案行按 offerId 反查绑定补编码；
+// ②已有 1688 绑定但档案里还没有的供应商货品补一行。每进程 10 分钟一次，失败静默。
+let supplierGoodsBackfillAt = 0;
+async function backfillSupplierGoodsFrom1688Sources(db) {
+  const nowMs = Date.now();
+  if (nowMs - supplierGoodsBackfillAt < 10 * 60 * 1000) return;
+  supplierGoodsBackfillAt = nowMs;
+  const sources = await queryAll(db, `
+    SELECT src.supplier_name, src.product_url, src.external_offer_id, src.unit_price, src.status,
+           sku.company_id, sku.product_name, sku.internal_sku_code
+    FROM erp_sku_1688_sources src
+    JOIN erp_skus sku ON sku.id = src.sku_id
+    WHERE src.status = 'active'
+      AND COALESCE(src.supplier_name, '') != ''
+    ORDER BY src.updated_at DESC
+    LIMIT 5000
+  `);
+  if (!sources.length) return;
+  const codeByOffer = new Map();
+  for (const src of sources) {
+    const offerId = optionalString(src.external_offer_id);
+    const code = optionalString(src.internal_sku_code);
+    if (offerId && code && !codeByOffer.has(offerId)) codeByOffer.set(offerId, code);
+  }
+  const missing = await queryAll(db, `
+    SELECT id, alibaba_url
+    FROM erp_feishu_supplier_goods
+    WHERE COALESCE(product_code, '') = ''
+      AND COALESCE(alibaba_url, '') != ''
+    LIMIT 5000
+  `);
+  for (const row of missing) {
+    const match = String(row.alibaba_url || "").match(/(\d{8,})/);
+    const code = match ? codeByOffer.get(match[1]) : null;
+    if (!code) continue;
+    await execute(db, "UPDATE erp_feishu_supplier_goods SET product_code = @product_code, updated_at = @updated_at WHERE id = @id", { id: row.id, product_code: code, updated_at: nowIso() });
+  }
+  for (const src of sources) {
+    try {
+      await syncSupplierGoodsArchiveFromSource(db, { company_id: src.company_id, product_name: src.product_name, internal_sku_code: src.internal_sku_code }, src);
+    } catch { /* 单行失败不影响其余 */ }
+  }
+}
+async function upsertSku1688SourceRow(db, payload = {}, actor = {}) {assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源绑定");const skuId = requireString(payload.skuId || payload.sku_id, "skuId");const sku = await queryOne(db, "SELECT * FROM erp_skus WHERE id = ?", [skuId]);if (!sku) throw new Error(`SKU not found: ${skuId}`);const now = nowIso();const externalOfferId = requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId");const isNoSpec = payload.isNoSpec === true || payload.is_no_spec === 1 || payload.is_no_spec === true;const externalSkuId = optionalString(payload.externalSkuId || payload.external_sku_id) || "";let externalSpecId = optional1688SpecId(payload.externalSpecId || payload.external_spec_id, { allowEmpty: isNoSpec, context: "供应商映射" }); // 护栏：specId 与 skuId 同值＝上游（遨虾/聚水潭/网页推断）没拿到真 cargoSkuId、拿 skuId 顶替的伪规格，
   // 1688 下单接口会拒。落库时就规整为「无规格」（清空 specId → is_no_spec=1），下单走 offerId-only，
   // 把伪规格挡在入库环节，而不是留到下单才被护栏拦下。这是所有手动/候选写入的唯一落库点，一处管多路径。
   if (externalSpecId && externalSkuId && externalSpecId === externalSkuId) {externalSpecId = "";}const mappingGroupId = optionalString(payload.mappingGroupId || payload.mapping_group_id) || `map_${sku.id}_${externalOfferId}`;const row = { id: optionalString(payload.id) || createId("sku_1688"), account_id: optionalString(payload.accountId || payload.account_id) || sku.account_id, sku_id: sku.id, mapping_group_id: mappingGroupId, external_offer_id: externalOfferId, external_sku_id: externalSkuId, external_spec_id: externalSpecId || "", // 最终规格为空即标记无规格（与 allowEmpty 自洽：有规格则 0，确无规格则 1）。
@@ -23655,6 +23762,8 @@ async function listSkuSwapItems(db, docId) {if (!db || !docId) return [];let leg
   `, [row]);
   // 货源单价是无库存 SKU 的成本来源，绑定/改价后重算该子商品所属组合装的成本快照。
   try {await refreshBundleCostForSkus(db, [skuId]);} catch (e) {try {console.warn("[bundle-cost] refresh after 1688 source upsert failed:", e?.message || e);} catch {}}
+  // 绑定保存后自动写供应商档案（主档+货品行，商品编码=系统商品编码），失败不阻塞绑定。
+  try {await syncSupplierGoodsArchiveFromSource(db, sku, after);} catch (e) {try {console.warn("[supplier-archive] sync after 1688 source upsert failed:", e?.message || e);} catch {}}
   return toSku1688Source(after);}async function deleteSku1688SourceRow(db, payload = {}, actor = {}) {assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源删除");const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");const row = await queryOne(db, "SELECT * FROM erp_sku_1688_sources WHERE id = ?", [sourceId]);if (!row) throw new Error(`1688 supplier mapping not found: ${sourceId}`);const now = nowIso();await execute(db, `
     UPDATE erp_sku_1688_sources
     SET status = 'deleted',

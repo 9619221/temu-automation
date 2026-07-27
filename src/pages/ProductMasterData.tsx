@@ -909,6 +909,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [bundleDetailMap, setBundleDetailMap] = useState<Record<string, BundleComponentDetailRow[] | "loading" | "error">>({});
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<ErpSupplierRow | null>(null);
+  // 供应商档案列表「编辑」的货品行：非空时弹窗带出货品栏并按原 id 覆盖保存
+  const [editingGoodsRow, setEditingGoodsRow] = useState<FeishuSupplierGoodsRow | null>(null);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountCreateModalOpen, setAccountCreateModalOpen] = useState(false);
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
@@ -1626,6 +1628,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const openSupplierModal = (row?: ErpSupplierRow) => {
     const supplier = row || null;
     setEditingSupplier(supplier);
+    setEditingGoodsRow(null);
     supplierForm.resetFields();
     supplierForm.setFieldsValue(supplier ? {
       supplierCode: supplier.supplierCode,
@@ -1643,6 +1646,26 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       tags: [],
     });
     setSupplierModalOpen(true);
+  };
+
+  // 档案列表行编辑：预填供应商主档（查不到主档就只带名字，保存时会新建）+ 该货品行
+  const openGoodsEditModal = (row: FeishuSupplierGoodsRow) => {
+    const supplier = suppliers.find((item) => item.id === row.supplierId) || null;
+    openSupplierModal(supplier || undefined);
+    setEditingGoodsRow(row);
+    supplierForm.setFieldsValue({
+      ...(supplier ? {} : { name: row.supplierName || "" }),
+      goodsProductName: row.productName,
+      goodsProductCode: row.productCode,
+      goodsColorSpec: row.colorSpec,
+      goodsPurchasePrice: row.purchasePrice,
+      goodsAlibabaUrl: row.alibabaUrl,
+      goodsLabelSize: row.labelSize,
+      goodsShippingReq: row.shippingReq,
+      goodsPurchaseMode: row.purchaseMode,
+      goodsShop: row.shop,
+      goodsSourceTable: row.sourceTable,
+    });
   };
 
   const handleSaveSupplier = async () => {
@@ -1668,8 +1691,9 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         settlementCurrency: editingSupplier?.settlementCurrency || "CNY",
         remark: values.remark,
         status: values.status || "active",
-        // 新增时附带录入货品行（对齐供应商档案列表字段）；编辑供应商不动货品
-        goods: !editingSupplier && optionalText(values.goodsProductName) ? [{
+        // 新增时附带录入货品行（对齐供应商档案列表字段）；编辑档案货品行时带原 id 覆盖保存
+        goods: (!editingSupplier || editingGoodsRow) && optionalText(values.goodsProductName) ? [{
+          id: editingGoodsRow?.id,
           productName: String(values.goodsProductName).trim(),
           productCode: optionalText(values.goodsProductCode),
           colorSpec: optionalText(values.goodsColorSpec),
@@ -1685,7 +1709,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       supplierForm.resetFields();
       setSupplierModalOpen(false);
       setEditingSupplier(null);
-      message.success(editingSupplier ? "供应商已保存" : "供应商已创建");
+      setEditingGoodsRow(null);
+      message.success(editingSupplier || editingGoodsRow ? "供应商已保存" : "供应商已创建");
       await loadAll();
     } catch (error: any) {
       message.error(error?.message || "供应商保存失败");
@@ -2217,6 +2242,17 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         return brandTag ? <Tag color={SUPPLIER_TAG_META[brandTag]?.color || "default"} style={{ marginInlineEnd: 0 }}>{brandTag}</Tag> : "-";
       },
     },
+    ...(canManageSuppliers ? [{
+      title: "操作",
+      key: "actions",
+      width: 90,
+      fixed: "right" as const,
+      render: (_value: unknown, row: FeishuSupplierGoodsRow) => (
+        <Button size="small" icon={<EditOutlined />} onClick={() => openGoodsEditModal(row)}>
+          编辑
+        </Button>
+      ),
+    }] : []),
   ];
 
   const renderSkuImage = (row: ErpSkuRow, size = 44) => row.imageUrl ? (
@@ -3479,23 +3515,24 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       </Modal>
 
       <Modal
-        title={editingSupplier ? "编辑供应商" : "新增供应商"}
+        title={editingGoodsRow ? "编辑供应商及货品" : editingSupplier ? "编辑供应商" : "新增供应商"}
         open={supplierModalOpen}
         okText="保存"
         cancelText="取消"
-        width={editingSupplier ? 720 : 1200}
+        width={editingSupplier && !editingGoodsRow ? 720 : 1200}
         confirmLoading={submitting === "supplier"}
         onOk={handleSaveSupplier}
         onCancel={() => {
           setSupplierModalOpen(false);
           setEditingSupplier(null);
+          setEditingGoodsRow(null);
         }}
         destroyOnClose
       >
         <Form form={supplierForm} layout="vertical">
           <Row gutter={32}>
-            <Col xs={24} md={editingSupplier ? 24 : 12}>
-              {!editingSupplier ? (
+            <Col xs={24} md={editingSupplier && !editingGoodsRow ? 24 : 12}>
+              {!editingSupplier || editingGoodsRow ? (
                 <Divider style={{ margin: "4px 0 16px" }} orientation="left" plain>供应商信息</Divider>
               ) : null}
               <Row gutter={12}>
@@ -3556,7 +3593,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                 </Col>
               </Row>
             </Col>
-            {!editingSupplier ? (
+            {!editingSupplier || editingGoodsRow ? (
               <Col xs={24} md={12}>
                 <Divider style={{ margin: "4px 0 16px" }} orientation="left" plain>
                   货品信息（选填，填写商品名称后写入供应商档案列表）
