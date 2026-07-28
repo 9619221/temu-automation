@@ -7363,8 +7363,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   // 后台自动同步 10 分钟一轮，这里让手动刷新立即拉到 1688 改价结果。
   // 最多取 10 笔，避免一次刷新打出太多 1688 详情请求。
   const refreshWithPriceSync = async () => {
+    // 已入库/已关闭/已取消的单成本已定，不再回拉；其余只要绑了 1688 单号都同步，
+    // 覆盖付款后卖家改价的场景（改价发生在付款环节，金额只会在这之后变化）。
+    const PRICE_SYNC_EXCLUDED = new Set(["inbounded", "closed", "cancelled", "exception"]);
     const targets = purchaseOrders
-      .filter((row) => row.status === "pushed_pending_price" && row.externalOrderId)
+      .filter((row) => row.externalOrderId && !PRICE_SYNC_EXCLUDED.has(row.status))
       .slice(0, 10);
     if (erp && targets.length) {
       setActingKey("refresh-price-sync");
@@ -7375,7 +7378,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           includeWorkbench: false,
         }, { timeoutMs: 120000 })));
         const synced = results.filter((r) => r.status === "fulfilled").length;
-        if (synced) message.success(`已同步 ${synced} 笔待改价单的 1688 金额`);
+        if (synced) message.success(`已同步 ${synced} 笔采购单的 1688 金额`);
       } finally {
         setActingKey(null);
       }
