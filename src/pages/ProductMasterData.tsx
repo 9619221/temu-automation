@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
-import { Alert, Button, Col, Descriptions, Divider, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Descriptions, Divider, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography, Upload, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, EyeOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useSessionState } from "../hooks/useSessionState";
@@ -203,6 +203,64 @@ function parseGoodsImageUrls(value?: string | null): string[] {
     }
   }
   return [text];
+}
+
+// 新增/编辑供应商弹窗里的货品图片项
+interface GoodsImageItem {
+  uid: string;
+  fileName: string;
+  url?: string;      // 已保存在服务器的图
+  dataUrl?: string;  // 本次新加待上传的图
+}
+
+const MAX_GOODS_IMAGES = 6;
+const GOODS_IMAGE_TARGET_BYTES = 260 * 1024;
+
+function goodsImageFileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function goodsImageDataUrlBytes(dataUrl: string) {
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  return Math.floor(base64.length * 3 / 4);
+}
+
+// 大图压到 260KB 以内再提交（后端限 5MB，走 IPC/HTTP 也别传原图）
+async function prepareGoodsUploadImage(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) throw new Error("请上传图片文件");
+  const originalDataUrl = await goodsImageFileToDataUrl(file);
+  if (file.size <= GOODS_IMAGE_TARGET_BYTES && goodsImageDataUrlBytes(originalDataUrl) <= GOODS_IMAGE_TARGET_BYTES) return originalDataUrl;
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new window.Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("图片加载失败"));
+    el.src = originalDataUrl;
+  });
+  let maxSide = 1100;
+  let quality = 0.78;
+  let lastDataUrl = originalDataUrl;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+    const width = Math.max(1, Math.round(image.width * scale));
+    const height = Math.max(1, Math.round(image.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("图片压缩失败");
+    context.drawImage(image, 0, 0, width, height);
+    lastDataUrl = canvas.toDataURL("image/jpeg", quality);
+    if (goodsImageDataUrlBytes(lastDataUrl) <= GOODS_IMAGE_TARGET_BYTES) return lastDataUrl;
+    maxSide = Math.max(520, Math.round(maxSide * 0.78));
+    quality = Math.max(0.58, quality - 0.06);
+  }
+  if (goodsImageDataUrlBytes(lastDataUrl) > 900 * 1024) throw new Error("图片太大，请换一张更小的图片");
+  return lastDataUrl;
 }
 
 // 列表缩略图：原图同名 webp 存 feishu-goods-thumbs/
@@ -911,6 +969,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [editingSupplier, setEditingSupplier] = useState<ErpSupplierRow | null>(null);
   // 供应商档案列表「编辑」的货品行：非空时弹窗带出货品栏并按原 id 覆盖保存
   const [editingGoodsRow, setEditingGoodsRow] = useState<FeishuSupplierGoodsRow | null>(null);
+  // 货品图片：url = 已保存在服务器的图（编辑带出），dataUrl = 本次新粘贴/上传待提交的图
+  const [goodsImageItems, setGoodsImageItems] = useState<GoodsImageItem[]>([]);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountCreateModalOpen, setAccountCreateModalOpen] = useState(false);
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
@@ -1645,6 +1705,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       status: "active",
       tags: [],
     });
+    setGoodsImageItems([]);
     setSupplierModalOpen(true);
   };
 
@@ -1666,6 +1727,43 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       goodsShop: row.shop,
       goodsSourceTable: row.sourceTable,
     });
+    setGoodsImageItems(parseGoodsImageUrls(row.imageUrl).map((url, index) => ({
+      uid: `saved-${index}-${url}`,
+      fileName: "已保存图片",
+      url,
+    })));
+  };
+
+  const addGoodsImageFiles = async (files: File[]) => {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+    const slotsLeft = Math.max(0, MAX_GOODS_IMAGES - goodsImageItems.length);
+    if (!slotsLeft) {
+      message.warning(`最多 ${MAX_GOODS_IMAGES} 张图片`);
+      return;
+    }
+    try {
+      const prepared = await Promise.all(imageFiles.slice(0, slotsLeft).map(async (file) => ({
+        uid: `${file.name || "paste"}-${file.lastModified || Date.now()}-${file.size}-${Math.random().toString(36).slice(2)}`,
+        fileName: file.name || "已粘贴图片",
+        dataUrl: await prepareGoodsUploadImage(file),
+      })));
+      setGoodsImageItems((previous) => [...previous, ...prepared].slice(0, MAX_GOODS_IMAGES));
+    } catch (error: any) {
+      message.error(error?.message || "图片处理失败");
+    }
+  };
+
+  const handleGoodsImagePaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+    const itemFiles = Array.from(event.clipboardData?.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const imageFiles = [...files, ...itemFiles];
+    if (!imageFiles.length) return;
+    event.preventDefault();
+    void addGoodsImageFiles(imageFiles);
   };
 
   const handleSaveSupplier = async () => {
@@ -1704,12 +1802,16 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           purchaseMode: optionalText(values.goodsPurchaseMode),
           shop: optionalText(values.goodsShop),
           sourceTable: optionalText(values.goodsSourceTable),
+          // 保留的已有图 + 本次新粘贴/上传的图（后端落盘后合并写回 image_url）
+          imageUrls: goodsImageItems.map((item) => item.url).filter(Boolean),
+          imageDataUrls: goodsImageItems.map((item) => item.dataUrl).filter(Boolean),
         }] : undefined,
       });
       supplierForm.resetFields();
       setSupplierModalOpen(false);
       setEditingSupplier(null);
       setEditingGoodsRow(null);
+      setGoodsImageItems([]);
       message.success(editingSupplier || editingGoodsRow ? "供应商已保存" : "供应商已创建");
       await loadAll();
     } catch (error: any) {
@@ -3526,6 +3628,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           setSupplierModalOpen(false);
           setEditingSupplier(null);
           setEditingGoodsRow(null);
+          setGoodsImageItems([]);
         }}
         destroyOnClose
       >
@@ -3602,6 +3705,52 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                   <Col xs={24}>
                     <Form.Item name="goodsProductName" label="商品名称">
                       <Input placeholder="货品品名" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24}>
+                    <Form.Item label="商品图片" style={{ marginBottom: 12 }}>
+                      <div onPaste={handleGoodsImagePaste} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {goodsImageItems.map((item) => (
+                          <div key={item.uid} style={{ position: "relative", width: 72, height: 72 }}>
+                            <Image
+                              src={item.dataUrl || goodsThumbUrl(item.url || "")}
+                              fallback={item.url}
+                              width={72}
+                              height={72}
+                              preview={{ mask: <EyeOutlined />, src: item.dataUrl || goodsPreviewUrl(item.url || "") }}
+                              style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
+                            />
+                            <Button
+                              size="small"
+                              type="text"
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={() => setGoodsImageItems((previous) => previous.filter((it) => it.uid !== item.uid))}
+                              style={{ position: "absolute", top: -6, right: -6, background: "#fff", borderRadius: "50%", boxShadow: "0 1px 4px rgba(0,0,0,0.2)", width: 20, height: 20, minWidth: 20, display: "flex", alignItems: "center", justifyContent: "center" }}
+                            />
+                          </div>
+                        ))}
+                        {goodsImageItems.length < MAX_GOODS_IMAGES ? (
+                          <Upload
+                            accept="image/*"
+                            multiple
+                            showUploadList={false}
+                            beforeUpload={(file, fileList) => {
+                              // beforeUpload 对每个文件各触发一次，只在第一个文件时处理整批，避免重复添加
+                              if (file === fileList[0]) void addGoodsImageFiles(fileList as unknown as File[]);
+                              return Upload.LIST_IGNORE;
+                            }}
+                          >
+                            <div
+                              tabIndex={0}
+                              style={{ width: 72, height: 72, borderRadius: 6, border: "1px dashed #d8dee9", color: "#98a2b3", fontSize: 11, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, cursor: "pointer", background: "#f8fbff", textAlign: "center" }}
+                            >
+                              <PlusOutlined />
+                              点击/粘贴
+                            </div>
+                          </Upload>
+                        ) : null}
+                      </div>
                     </Form.Item>
                   </Col>
                   <Col xs={24} md={12}>

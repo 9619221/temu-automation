@@ -675,6 +675,7 @@ interface ErpAPI {
       tags?: string[];
       // 新增供应商时可附带录入货品行（对齐供应商档案列表字段），写入飞书货盘明细表
       goods?: Array<{
+        id?: string;
         productName: string;
         productCode?: string;
         colorSpec?: string;
@@ -685,6 +686,9 @@ interface ErpAPI {
         purchaseMode?: string;
         shop?: string;
         sourceTable?: string;
+        // 货品图片：imageUrls=保留的已有图 URL，imageDataUrls=新粘贴/上传的 dataURL
+        imageUrls?: string[];
+        imageDataUrls?: string[];
       }>;
     }) => Promise<any>;
     importFeishuOnce: (payload: {

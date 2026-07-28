@@ -22681,16 +22681,18 @@ const SLIM_SOURCE_PAYLOAD_DROP_KEYS = ["raw", "skuInfos", "rawResponse", "rawAlp
       updated_at = excluded.updated_at
   `, [row]); // 「新增供应商」可同时录入货品行（对齐供应商档案列表字段），写入飞书货盘明细表
   const goodsRows = Array.isArray(payload.goods) ? payload.goods : [];if (goodsRows.length) {for (const item of goodsRows) {const productName = optionalString(item.productName ?? item.product_name);if (!productName) continue;const productCode = optionalString(item.productCode ?? item.product_code);const digest = crypto.createHash("sha1").update(`${row.company_id}:${row.name}|${productCode || ""}|${productName}`).digest("hex").slice(0, 24); // 编辑已有货品行时带原 id 直接覆盖，避免改名/改编码后按新 hash 裂出重复行
-      const goodsId = optionalString(item.id) || `feishu:goods:${digest}`;await execute(db, `
+      const goodsId = optionalString(item.id) || `feishu:goods:${digest}`; // 货品图片：imageUrls=保留的已有图，imageDataUrls=新粘贴/上传图（落盘 feishu-goods 桶）。
+      // 两个字段都没传（老客户端）时 image_url 传 null，由 COALESCE 保留原值；传了空数组表示清空（存 ''）。
+      const imageFieldsSent = item.imageUrls !== undefined || item.imageDataUrls !== undefined;const keptImageUrls = Array.isArray(item.imageUrls) ? item.imageUrls.map((value) => optionalString(value)).filter(Boolean) : [];const uploadedImageUrls = Array.isArray(item.imageDataUrls) && item.imageDataUrls.length ? saveErpImageUploads(db, { imageDataUrls: item.imageDataUrls }, "feishu-goods") : [];const mergedImageUrls = [...keptImageUrls, ...uploadedImageUrls];const imageUrlValue = !imageFieldsSent ? null : mergedImageUrls.length === 0 ? "" : mergedImageUrls.length === 1 ? mergedImageUrls[0] : JSON.stringify(mergedImageUrls);await execute(db, `
       INSERT INTO erp_feishu_supplier_goods (
         id, company_id, supplier_id, supplier_name, product_name, product_code, color_spec,
         purchase_price, alibaba_url, label_size, shipping_req, purchase_mode, shop, source_table,
-        created_at, updated_at
+        image_url, created_at, updated_at
       )
       VALUES (
         @id, @company_id, @supplier_id, @supplier_name, @product_name, @product_code, @color_spec,
         @purchase_price, @alibaba_url, @label_size, @shipping_req, @purchase_mode, @shop, @source_table,
-        @created_at, @updated_at
+        @image_url, @created_at, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         supplier_id = excluded.supplier_id,
@@ -22705,8 +22707,9 @@ const SLIM_SOURCE_PAYLOAD_DROP_KEYS = ["raw", "skuInfos", "rawResponse", "rawAlp
         purchase_mode = excluded.purchase_mode,
         shop = excluded.shop,
         source_table = excluded.source_table,
+        image_url = COALESCE(excluded.image_url, erp_feishu_supplier_goods.image_url),
         updated_at = excluded.updated_at
-    `, { id: goodsId, company_id: row.company_id, supplier_id: row.id, supplier_name: row.name, product_name: productName, product_code: productCode, color_spec: optionalString(item.colorSpec ?? item.color_spec), purchase_price: optionalString(item.purchasePrice ?? item.purchase_price), alibaba_url: optionalString(item.alibabaUrl ?? item.alibaba_url), label_size: optionalString(item.labelSize ?? item.label_size), shipping_req: optionalString(item.shippingReq ?? item.shipping_req), purchase_mode: optionalString(item.purchaseMode ?? item.purchase_mode), shop: optionalString(item.shop), source_table: optionalString(item.sourceTable ?? item.source_table), created_at: now, updated_at: now });}}return toSupplier(await queryOne(db, "SELECT * FROM erp_suppliers WHERE id = ?", [row.id]));} // 飞书货盘货品清单：supplierId 可选（不传=全量货盘明细），JOIN 供应商档案带出地址/标签/税率
+    `, { id: goodsId, company_id: row.company_id, supplier_id: row.id, supplier_name: row.name, product_name: productName, product_code: productCode, color_spec: optionalString(item.colorSpec ?? item.color_spec), purchase_price: optionalString(item.purchasePrice ?? item.purchase_price), alibaba_url: optionalString(item.alibabaUrl ?? item.alibaba_url), label_size: optionalString(item.labelSize ?? item.label_size), shipping_req: optionalString(item.shippingReq ?? item.shipping_req), purchase_mode: optionalString(item.purchaseMode ?? item.purchase_mode), shop: optionalString(item.shop), source_table: optionalString(item.sourceTable ?? item.source_table), image_url: imageUrlValue, created_at: now, updated_at: now });}}return toSupplier(await queryOne(db, "SELECT * FROM erp_suppliers WHERE id = ?", [row.id]));} // 飞书货盘货品清单：supplierId 可选（不传=全量货盘明细），JOIN 供应商档案带出地址/标签/税率
 async function listFeishuSupplierGoods(params = {}) {const { db } = requireErp();
   // 顺带把 1688 绑定同步进档案/补商品编码（节流 10 分钟，失败不影响列表）。
   try {await backfillSupplierGoodsFrom1688Sources(db);} catch (e) {try {console.warn("[supplier-archive] backfill failed:", e?.message || e);} catch {}}
