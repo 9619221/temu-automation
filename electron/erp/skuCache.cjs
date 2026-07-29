@@ -302,10 +302,16 @@ async function syncFull(companyId) {
 
 
 
-    all;await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;await execute(txDb, `
+    all;await execute(txDb, "DELETE FROM sku_cache WHERE company_id = ?", [companyId]);for (const row of items) {if (!row || !row.id) continue;
+    // 全量拉取按 updated_at 倒序翻页，拉取期间（~2 分钟）任何 SKU 被更新都会让页码错位，
+    // 同一 id 可能跨页重复出现——必须 upsert，纯 INSERT 会撞唯一约束让整个事务回滚（缓存长期空）。
+    await execute(txDb, `
     INSERT INTO sku_cache (company_id, id, internal_sku_code, product_name, status, updated_at, payload_json, cached_at)
     VALUES (@company_id, @id, @code, @name, @status, @updated_at, @payload, @cached_at)
-  `, { company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});await setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });return { mode: "full", total: all.length };}
+    ON CONFLICT(company_id, id) DO UPDATE SET
+      internal_sku_code = @code, product_name = @name, status = @status,
+      updated_at = @updated_at, payload_json = @payload, cached_at = @cached_at
+  `,{ company_id: companyId, id: String(row.id), code: row.internalSkuCode != null ? String(row.internalSkuCode) : null, name: row.productName != null ? String(row.productName) : null, status: row.status != null ? String(row.status) : null, updated_at: row.updatedAt != null ? String(row.updatedAt) : null, payload: JSON.stringify(row), cached_at: now });}});await setMeta(companyId, { cursor, lastFullAt: now, lastSyncAt: now });return { mode: "full", total: all.length };}
 
 // 增量：since 固定（cursor 回退 1 秒）+ offset 翻页拉所有变化行。
 async function syncIncremental(companyId) {

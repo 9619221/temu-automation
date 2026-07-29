@@ -836,6 +836,28 @@ function allocateMoneyByWeight(total, weights = []) {
 }
 
 // 把 PO 抬头货款(total_amount，不含运费)回填到明细行 unit_cost。
+// 分摊权重：qty × 映射比例(platform_qty/our_qty)。同一 1688 链接的不同装量规格
+// （如 8pcs/16pcs）靠映射比例区分，只按 qty 摊会把大装量行的货款摊少。
+// 任一行取不到有效比例时整单退回纯 qty 权重，行为与旧口径一致。
+async function buildPoLineGoodsWeights(db, lines = []) {
+  const qtyWeights = lines.map((line) => Number(line.qty || 0));
+  const ratios = [];
+  for (const line of lines) {
+    if (!line.sku_id) return qtyWeights;
+    const source = await queryOne(db, `
+      SELECT platform_qty, our_qty FROM erp_sku_1688_sources
+      WHERE sku_id = ? AND status = 'active'
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      LIMIT 1
+    `, [line.sku_id]);
+    const platformQty = Number(source?.platform_qty || 0);
+    const ourQty = Number(source?.our_qty || 0);
+    if (!(platformQty > 0) || !(ourQty > 0)) return qtyWeights;
+    ratios.push(platformQty / ourQty);
+  }
+  return lines.map((line, index) => Number(line.qty || 0) * ratios[index]);
+}
+
 // 背景：1688 订单同步只把整单货款写进了 PO 抬头，从未摊到明细行，
 // 导致入库 calculateLineLandedCost 取 unit_cost=0、落地成本只剩运费摊销、货款全漏。
 // 口径：按各明细行 qty 权重分摊整单货款(即“按 ERP 入库数量摊”)，unit_cost = 行货款 / 行 qty。
@@ -846,12 +868,12 @@ async function backfillPoLineUnitCostFromGoods(db, po) {
   const goods = roundMoney(po.total_amount);
   if (goods === null || goods <= 0) return;
   const lines = await queryAll(db, `
-    SELECT id, qty, unit_cost FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC
+    SELECT id, sku_id, qty, unit_cost FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC
   `, [po.id]);
   if (!lines.length) return;
   const allZero = lines.every((line) => !(Number(line.unit_cost || 0) > 0));
   if (!allZero) return;
-  const goodsByLine = allocateMoneyByWeight(goods, lines.map((line) => Number(line.qty || 0)));
+  const goodsByLine = allocateMoneyByWeight(goods, await buildPoLineGoodsWeights(db, lines));
 
 
 
@@ -25409,7 +25431,21 @@ async function confirmPurchaseOrderInboundAction({ db, services, payload, actor 
       @external_order_id, @external_order_status, @external_order_payload_json,
       @external_order_synced_at, @external_order_detail_json, @external_order_detail_synced_at
     )
-  `, [po]);const lineDrafts = usableLines.map((item) => {const qty = Math.max(1, Math.floor(Number(item.line.quantity || 1)));const unitCost = optionalNumber(item.source.unit_price) ?? unitFallback;return { item, qty, unitCost, amount: moneyOrZero(qty * unitCost) };});const allocatedFreight = allocateMoneyByWeight(money.freightAmount, lineDrafts.map((line) => line.amount));for (let index = 0; index < lineDrafts.length; index++) {const line = lineDrafts[index];await execute(db, `
+  `, [po]);
+  // 无映射单价的行按 qty×映射比例 摊整单货款（同 buildPoLineGoodsWeights 口径）；
+  // 任一行比例缺失则退回旧的平均单价 unitFallback。
+  const fallbackRatios = usableLines.map((item) => {const p = Number(item.source.platform_qty || 0);const o = Number(item.source.our_qty || 0);return p > 0 && o > 0 ? p / o : null;});
+  const allRatiosKnown = fallbackRatios.every((r) => r !== null);
+  const unpricedIdx = usableLines.map((item, i) => optionalNumber(item.source.unit_price) === null ? i : -1).filter((i) => i >= 0);
+  let fallbackByIdx = {};
+  if (allRatiosKnown && unpricedIdx.length && totalAmount > 0) {
+    const pricedTotal = usableLines.reduce((sum, item) => {const price = optionalNumber(item.source.unit_price);return price === null ? sum : sum + Math.max(1, Math.floor(Number(item.line.quantity || 1))) * price;}, 0);
+    const pool = Math.max(0, roundMoney(totalAmount - pricedTotal) ?? 0);
+    const weights = unpricedIdx.map((i) => Math.max(1, Math.floor(Number(usableLines[i].line.quantity || 1))) * fallbackRatios[i]);
+    const shares = allocateMoneyByWeight(pool, weights);
+    unpricedIdx.forEach((lineIndex, k) => {const qty = Math.max(1, Math.floor(Number(usableLines[lineIndex].line.quantity || 1)));fallbackByIdx[lineIndex] = qty > 0 ? Math.round(shares[k] / qty * 10000) / 10000 : 0;});
+  }
+  const lineDrafts = usableLines.map((item, index) => {const qty = Math.max(1, Math.floor(Number(item.line.quantity || 1)));const unitCost = optionalNumber(item.source.unit_price) ?? fallbackByIdx[index] ?? unitFallback;return { item, qty, unitCost, amount: moneyOrZero(qty * unitCost) };});const allocatedFreight = allocateMoneyByWeight(money.freightAmount, lineDrafts.map((line) => line.amount));for (let index = 0; index < lineDrafts.length; index++) {const line = lineDrafts[index];await execute(db, `
       INSERT INTO erp_purchase_order_lines (
         id, account_id, po_id, sku_id, qty, unit_cost, logistics_fee,
         expected_qty, received_qty, remark
