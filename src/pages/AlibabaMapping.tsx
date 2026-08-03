@@ -1035,6 +1035,31 @@ export default function AlibabaMapping() {
     }
   }, [reloadCurrentPage]);
 
+  const setDefaultMapping = useCallback(async (row: Sku1688SourceRow) => {
+    if (!erp) return;
+    const key = `set_default_sku_1688_source-${row.id}`;
+    setActionLoadingId(key);
+    try {
+      await erp.purchase.action({
+        action: "set_default_sku_1688_source",
+        sourceId: row.id,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
+      });
+      message.success("已设为默认供应商，推单将使用该链接");
+      // 写走云端、读走本地缓存：切默认会同时清掉旧默认行，先增量同步再刷新，
+      // 否则列表里旧默认还显示"默认"。
+      if (erp.mapping?.sync) {
+        await erp.mapping.sync({ mode: "incremental" }).catch(() => {});
+      }
+      await reloadCurrentPage();
+    } catch (error: any) {
+      message.error(error?.message || "设为默认失败");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }, [reloadCurrentPage]);
+
   const deleteMapping = useCallback((row: Sku1688SourceRow) => {
     if (!erp) return;
     Modal.confirm({
@@ -1238,7 +1263,7 @@ export default function AlibabaMapping() {
       title: "是否默认供应商",
       key: "defaultSupplier",
       width: 130,
-      render: (_value, row) => (row.isDefault ? "是" : "否"),
+      render: (_value, row) => (row.isDefault ? <Tag color="green">默认</Tag> : <Text type="secondary">备选</Text>),
     },
     {
       title: "基础数量",
@@ -1451,6 +1476,20 @@ export default function AlibabaMapping() {
                 {followEnabled ? "取关" : "关注"}
               </Button>
             </Tooltip>
+            {editable && !row.isDefault ? (
+              <Tooltip title="推单只使用默认供应商的链接，其余绑定保留为备选">
+                <Button
+                  size="small"
+                  type="primary"
+                  ghost
+                  loading={actionLoadingId === `set_default_sku_1688_source-${row.id}`}
+                  style={supplierActionButtonStyle}
+                  onClick={() => void setDefaultMapping(row)}
+                >
+                  设为默认
+                </Button>
+              </Tooltip>
+            ) : null}
             {editable ? (
               <Button
                 size="small"
@@ -1480,7 +1519,7 @@ export default function AlibabaMapping() {
         );
       },
     },
-  ], [actionLoadingId, boundRows, deleteAllMappingsForSku, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
+  ], [actionLoadingId, boundRows, deleteAllMappingsForSku, deleteMapping, editable, openCreateForSku, run1688SourceAction, setDefaultMapping]);
 
   const currentLoading = activeTab === "bound" ? boundLoading : activeTab === "unbound" ? unboundLoading : false;
   const searchPlaceholder = "搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号";
